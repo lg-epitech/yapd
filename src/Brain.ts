@@ -2295,14 +2295,42 @@ export const answersTo = (phrase: string) => {
   )
 }
 
+/** What names something only he should know, like a password, a PIN, a key or a token, or a code or phrase that stands for one. */
+const credential = String.raw`(?:pass(?:word|code|phrase)|pin(?: code)?|secret|token|(?:api|access|private) key|key|recovery code|seed phrase|(?:2fa|two[ -]factor|backup) code)s?`
+
+/** A word of a value, as it starts: not where a sentence or a clause ends. */
+const valued = String.raw`[^\s.,;:!?…]`
+
+/**
+ * A credential given with its value, whatever's said between of whose or
+ * what for it is: "my password for GitHub is hunter2", "the password I use
+ * there is …", "the GitHub password: …", "my token's …", one word after a
+ * comma or a dash at the end, "my GitHub password, hunter2", or the other way
+ * round, "hunter2 is my GitHub password". Taken for one whenever it could be,
+ * so "the key is to batch them" is too, but never "rig's key bindings are
+ * vim-style", where what follows the word is what it's of.
+ */
+const given = [
+  new RegExp(
+    String.raw`(?<![a-z0-9])${credential}(?:\s+(?:for|to|of|on|at|in|into|with|from|i|we|you|that|which)\s+[^\s:=]+?(?:\s+[^\s:=]+?){0,4}?)?(?:['’]s\s+|\s*[:=]\s*|\s+(?:is|was|are|were|equals)\s+)${valued}`,
+    "i",
+  ),
+  new RegExp(String.raw`(?<![a-z0-9])${credential}(?:\s*,\s*|\s+[—–-]\s+)${valued}+\s*[.!?…]?\s*$`, "i"),
+  new RegExp(
+    String.raw`${valued}+\s+(?:is|was|are|were)\s+(?:my|the|our|your|his|her|their)\s+(?:${valued}+\s+){0,3}?${credential}(?![a-z0-9])(?=\s*$|\s*[.,;:!?…)"'”’]|\s+(?:for|to|of|on|at|in|with|from)\s)`,
+    "i",
+  ),
+]
+
 /**
  * Whether what he asked to be kept in mind may give a secret away, in all he
- * said or in what the model made of it. It's refused as a secret before
- * anything else would turn it down, since only that keeps his words out of
- * the journal.
+ * said or in what the model made of it: whatever looks like one, or a
+ * credential given with its value. It's refused as a secret before anything
+ * else would turn it down, since only that keeps his words out of the
+ * journal.
  */
 export const secretive = (choice: Pick<Decision, "text">, utterance: Pick<Assistant.Utterance, "heard" | "whole">) =>
-  [utterance.heard, utterance.whole ?? "", choice.text].some((words) => T3Actions.revealing(words))
+  [utterance.heard, utterance.whole ?? "", choice.text].some((words) => T3Actions.revealing(words) || given.some((pattern) => pattern.test(words)))
 
 /** What's said of what can't be kept in mind, or forgotten. */
 const rememberLines = (lines: Pick<Lines, "address">) => {

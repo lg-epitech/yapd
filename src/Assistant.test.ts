@@ -12328,6 +12328,38 @@ describe("Assistant memories", () => {
     expect(result.journal).not.toContain("4 8 2 7")
   })
 
+  test("a password, key or token given with its value isn't remembered, whatever's said between, while a fact that only names one is", async () => {
+    const facts = [
+      "my password for GitHub is hunter2",
+      "the GitHub password: hunter2",
+      "my npm token's hunter2",
+      "the Tezos repo uses pnpm",
+      "rig's key bindings are vim-style",
+    ]
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(
+          (situation) => {
+            const text = facts.find((fact) => situation.utterance.heard === `Remember that ${fact}.`)
+            return text === undefined ? undefined : Brain.decision({ act: "remember", how: "fact", text })
+          },
+          undefined,
+          { memories: true },
+        )
+        const said: Array<string | undefined> = []
+        for (const fact of facts) {
+          yield* made.dictate(`Remember that ${fact}.`)
+          said.push(made.spoken().at(-1))
+        }
+        return { said, kept: (yield* made.memories!.list).map(({ text }) => text), journal: JSON.stringify(yield* made.journal.since(0)) }
+      }),
+    )
+    const refused = "I won't keep that, sir. It looks like a secret."
+    expect(result.said.slice(0, 3)).toEqual([refused, refused, refused])
+    expect(result.kept).toEqual(["the Tezos repo uses pnpm", "rig's key bindings are vim-style"])
+    expect(result.journal).not.toContain("hunter2")
+  })
+
   test("a secret the model's answer says back is said, but kept in the journal and logged nowhere", async () => {
     const lines: Array<string> = []
     const logger = Logger.make(({ message }) => {
