@@ -1858,11 +1858,11 @@ export interface Remembered {
  */
 export const remembered = (situation: Pick<Situation, "memories">): ReadonlyArray<Remembered> => {
   const { kept, written } = situation.memories ?? { kept: [], written: [] }
-  const theirs = new Set(written.map(({ name }) => name.toLowerCase()))
+  const theirs = new Set(written.map(({ name }) => calledAs(name)))
   const routines = [
     ...written.map(({ name, steps }) => ({ name, text: steps, kept: Option.none<Memory.Memory>() })),
     ...kept.flatMap((memory) =>
-      memory.kind === "routine" && memory.name !== undefined && !theirs.has(memory.name.toLowerCase()) ? [{ name: memory.name, text: memory.text, kept: Option.some(memory) }] : [],
+      memory.kind === "routine" && memory.name !== undefined && !theirs.has(calledAs(memory.name)) ? [{ name: memory.name, text: memory.text, kept: Option.some(memory) }] : [],
     ),
   ]
   return [
@@ -1897,14 +1897,18 @@ const handlesShown = (situation: Handled) =>
 export const bareHandle = (text: string, situation: Handled) => handlesShown(situation).has(Ledger.digest(text))
 
 /**
- * Whether he said a routine's whole name, as words compare, in all he said,
- * and for the rest of a request, in that part of it too: whichever handle the
- * model gave, the steps go only then, so one called "ship deploy" never goes
- * for his "ship", whether said or in his preferences, nor one called "ship"
- * for the rest of "tell the Tezos one to ship, and the Mina one to rebase".
+ * Whether he said a routine's whole name, as names compare, symbols and all,
+ * in all he said, and for the rest of a request, in that part of it too:
+ * whichever handle the model gave, the steps go only then, so one called
+ * "ship deploy" never goes for his "ship", whether said or in his
+ * preferences, nor one called "C" for his "C++", nor one called "ship" for the
+ * rest of "tell the Tezos one to ship, and the Mina one to rebase".
  */
-const nameSaid = (name: string, utterance: Pick<Assistant.Utterance, "heard" | "whole">) =>
-  asSaid(name, utterance.whole ?? utterance.heard) && (utterance.whole === undefined || asSaid(name, utterance.heard))
+const nameSaid = (name: string, utterance: Pick<Assistant.Utterance, "heard" | "whole">) => {
+  const wanted = calledAs(name)
+  const says = (said: string) => wanted !== "" && ` ${calledAs(said)} `.includes(` ${wanted} `)
+  return says(utterance.whole ?? utterance.heard) && (utterance.whole === undefined || says(utterance.heard))
+}
 
 /**
  * A message, or an offer, whose words the model gave as a routine's handle,
@@ -1944,18 +1948,42 @@ const wordsIn = (name: string) => name.split(/\s+/u).filter((word) => /[\p{L}\p{
 /** "When", "whenever" or "if I say", as he says a routine's name, whatever the punctuation. */
 const calling = /(?<![\p{L}\p{N}])(?:when|whenever|if)[^\p{L}\p{N}]+i[^\p{L}\p{N}]+say(?![\p{L}\p{N}])/iu
 
+/** Quotes or backticks around his words, which are never part of them. */
+const quotes = "[\"'`\u2018\u2019\u201c\u201d]"
+
 /**
- * A routine's name as he said it: his words right after "when", "whenever"
- * or "if I say", up to where he paused after them, a comma, a full stop or the
- * like as speech recognition writes it, or to the end, as when he said its
- * name after its steps; none when he said no such thing. Where it ends is his
- * to say, never the model's, so an "if" after it is in the steps.
+ * A routine's name as he said it, and what he said from where he paused after
+ * it: his words right after "when", "whenever" or "if I say", without the
+ * spaces, marks or quotes before them, up to where he paused after them, a
+ * comma, a full stop or the like as speech recognition writes it, never a
+ * symbol like the "." of ".NET", or to the end, as when he said its name after
+ * its steps, without quotes around it. None when he said no such thing. Where
+ * it ends is his to say, never the model's, so an "if" after it is in the
+ * steps, and its words are his, symbols and all, so his "C++" is never "C".
  */
-const spokenName = (said: string) => {
+const spokenCall = (said: string) => {
   const found = calling.exec(said)
-  const name = found === null ? "" : (said.slice(found.index + found[0].length).replace(/^[^\p{L}\p{N}]+/u, "").split(/[,;:.?!]/u)[0] ?? "").trim()
-  return name === "" ? undefined : name
+  if (found === null) return undefined
+  const from = said.slice(found.index + found[0].length).replace(new RegExp(`^(?:${gap}|${quotes})+`, "u"), "")
+  const paused = from.search(new RegExp(pause, "u"))
+  const name = (paused < 0 ? from : from.slice(0, paused)).replace(new RegExp(`(?:\\s|${quotes})+$`, "u"), "")
+  return name === "" ? undefined : { name, after: paused < 0 ? undefined : from.slice(paused) }
 }
+
+/** A routine's name as he said it, as `spokenCall` reads it. */
+const spokenName = (said: string) => spokenCall(said)?.name
+
+/**
+ * A routine's name as names compare: in any case, spacing or quotes, but
+ * symbols and all, so "C" is never "C++", nor ".NET" "NET". Two routines are
+ * the same only when their names are, kept by voice or in his preferences.
+ */
+export const calledAs = (name: string) =>
+  worded(name)
+    .split(" ")
+    .map(outOfQuotes)
+    .filter((word) => word !== "")
+    .join(" ")
 
 /** A routine as the model gives it to be kept, "name: steps": none without both. */
 export const routineOf = (text: string) => {
@@ -2141,11 +2169,9 @@ const spokenSteps = (said: string, steps: string) => {
   if (found === null) return undefined
   const before = said.slice(0, found.index)
   if (!only([...openers, ...keeping]).test(before)) return inHisWords(before, steps, aroundSteps.before.ahead, aroundSteps.before.behind)
-  const after = said.slice(found.index + found[0].length)
-  // From the first word of its name to his pause, as `spokenName` reads it.
-  const named = after.slice(Math.max(0, after.search(/[\p{L}\p{N}]/u)))
-  const paused = named.search(/[,;:.?!]/u)
-  return paused < 0 ? undefined : inHisWords(named.slice(paused), steps, aroundSteps.after.ahead, aroundSteps.after.behind)
+  // From his pause after its name, as `spokenCall` reads it.
+  const after = spokenCall(said)?.after
+  return after === undefined ? undefined : inHisWords(after, steps, aroundSteps.after.ahead, aroundSteps.after.behind)
 }
 
 /**
@@ -2469,13 +2495,13 @@ export const check = (given: Decision, situation: Situation, lines: Lines): Chec
       }
       // Where its name ends is his to say, never the model's: as far as he went after "when I say" before he paused, so a name the model
       // ran on into what he asked of the steps, like "ship, if green", which his saying "ship" would leave out, is refused, as is any he
-      // ran on into the steps without a pause.
-      if (utterance.echo === undefined && heard !== "" && routine !== undefined && Ledger.digest(spokenName(heard) ?? "") !== Ledger.digest(routine.name)) {
-        return { _tag: "Say", spoken: said.pause }
-      }
+      // ran on into the steps without a pause. Its words are his too, symbols and all, so the model's "C" for his "C++" keeps nothing.
+      const spoken = utterance.echo === undefined && heard !== "" && routine !== undefined ? (spokenName(heard) ?? "") : undefined
+      if (spoken !== undefined && routine !== undefined && Ledger.digest(spoken) !== Ledger.digest(routine.name)) return { _tag: "Say", spoken: said.pause }
+      if (spoken !== undefined && routine !== undefined && calledAs(spoken) !== calledAs(routine.name)) return { _tag: "Say", spoken: said.words(unheard(routine.name, spoken)) }
       if (routine !== undefined) {
         // The one in his preferences is the one, and a name yapd answers to already would never be heard as the routine's.
-        if ((situation.memories?.written ?? []).some(({ name }) => name.toLowerCase() === routine.name.toLowerCase())) return { _tag: "Say", spoken: said.written }
+        if ((situation.memories?.written ?? []).some(({ name }) => calledAs(name) === calledAs(routine.name))) return { _tag: "Say", spoken: said.written }
         if (answersTo(routine.name)) return { _tag: "Say", spoken: said.answered }
       }
       // About him, never a thread. What's kept is his words, never the model's: a routine's steps as he said them after its name's pause,
@@ -2491,8 +2517,9 @@ export const check = (given: Decision, situation: Situation, lines: Lines): Chec
       })
       if (utterance.echo !== undefined || heard === "") return alone(choice.text)
       if (routine !== undefined) {
+        // Its name as he said it, up to his pause, which the model's only says the same as.
         const steps = spokenSteps(heard, text)
-        return steps === undefined ? { _tag: "Say", spoken: said.steps(unheard(text, heard)) } : alone(`${routine.name}: ${steps}`)
+        return steps === undefined ? { _tag: "Say", spoken: said.steps(unheard(text, heard)) } : alone(`${spoken ?? routine.name}: ${steps}`)
       }
       const fact = spokenFact(heard, text)
       if (fact !== undefined) return alone(fact)

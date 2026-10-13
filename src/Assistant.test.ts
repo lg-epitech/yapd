@@ -12406,4 +12406,25 @@ describe("Assistant memories", () => {
     expect(result.journal.find(({ kind }) => kind === "dictation")).toMatchObject({ detail: { withheld: true } })
     expect(JSON.stringify(result.journal)).not.toContain("4f9a8b7c6d5e")
   })
+
+  test("routines whose names differ by a symbol are two, while one called the same in another case or quotes takes the other's place", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(() => undefined, undefined, { memories: true })
+        const memories = made.memories!
+        const at = yield* TestClock.currentTimeMillis
+        const add = (name: string, text: string) => memories.add({ at, kind: "routine", name, text, heard: `When I say ${name}, ${text}.` })
+        yield* add("C", "review the C parser")
+        yield* add("C++", "review the C++ parser")
+        yield* add("Let’s ship", "merge the PR")
+        const changed = yield* add("let's ship", "merge the PR and deploy")
+        return {
+          kept: (yield* memories.list).map(({ name, text }) => `${name}: ${text}`),
+          retired: changed._tag === "Kept" ? Option.getOrUndefined(Option.map(changed.retired, ({ name }) => name)) : changed._tag,
+        }
+      }),
+    )
+    expect(result.kept).toEqual(["C: review the C parser", "C++: review the C++ parser", "let's ship: merge the PR and deploy"])
+    expect(result.retired).toBe("Let’s ship")
+  })
 })

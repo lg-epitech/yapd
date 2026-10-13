@@ -2059,4 +2059,27 @@ describe("memories", () => {
       expect([text, sent(check(`Tell the Tezos one ${text}.`, { act: "send", target: handleOf(tezos), text }))]).toEqual([text, text])
     }
   })
+
+  test("a routine's name is his as he said it, symbols and all, so the model's \"C\" for his \"C++\" keeps nothing, and saying \"C++\" never sends one called \"C\"", () => {
+    const remember = (text: string) =>
+      Brain.check(Brain.decision({ act: "remember", how: "routine", text }), situation("When I say C++, review the C++ parser."), lines)
+    expect(remember("C: review the C++ parser")).toEqual({ _tag: "Say", spoken: "I couldn't keep that in your own words, sir: I didn't hear 'C' from you, so I didn't save it." })
+    const kept = remember("C++: review the C++ parser")
+    expect(kept._tag === "Do" ? kept.plan.decision.text : kept).toBe("C++: review the C++ parser")
+    // Kept as he said it up to his pause, in his case, never the model's.
+    const his = Brain.check(Brain.decision({ act: "remember", how: "routine", text: "net build: run the tests" }), situation("When I say .NET build, run the tests."), lines)
+    expect(his._tag === "Do" ? his.plan.decision.text : his).toEqual({ _tag: "Say", spoken: "I couldn't keep that in your own words, sir: I didn't hear 'net' from you, so I didn't save it." })
+    const dotted = Brain.check(Brain.decision({ act: "remember", how: "routine", text: ".net build: run the tests" }), situation("When I say .NET build, run the tests."), lines)
+    expect(dotted._tag === "Do" ? dotted.plan.decision.text : dotted).toBe(".NET build: run the tests")
+    // Two routines whose names differ by a symbol are two, and saying one never sends the other.
+    const both = { kept: [], written: [{ name: "C", steps: "review the C parser" }, { name: "C++", steps: "review the C++ parser" }] }
+    const send = (heard: string, text: string) => {
+      const checked = Brain.check(Brain.decision({ act: "send", how: "now", target: handleOf(tezos), text }), situation(heard, { memories: both }), lines)
+      return checked._tag === "Do" ? checked.plan.decision.text : checked
+    }
+    expect(Brain.remembered({ memories: both }).map(({ handle, name }) => `${handle} ${name}`)).toEqual(["p1 C", "p2 C++"])
+    expect(send("C++ the Tezos one.", "p1")).toEqual({ _tag: "Say", spoken: lines.cantTell })
+    expect(send("C++ the Tezos one.", "p2")).toBe("review the C++ parser")
+    expect(send("C the Tezos one.", "p1")).toBe("review the C parser")
+  })
 })

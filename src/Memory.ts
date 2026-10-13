@@ -59,6 +59,7 @@ interface Row {
   readonly at: number
   readonly kind: Kind
   readonly name: string | null
+  readonly called: string | null
   readonly text: string
   readonly heard: string
   readonly utterance: string | null
@@ -79,16 +80,16 @@ const memory = (row: Row): Memory => ({
 /** How much of what's kept one takes up. */
 const size = (kept: Pick<Memory, "name" | "text">) => kept.text.length + (kept.name?.length ?? 0)
 
-/** Whether one is a routine kept by voice that one in his preferences, by its names in lowercase, is called the same as, in any case. */
+/** Whether one is a routine kept by voice that one in his preferences, by its names as names compare, is called the same as. */
 const shadowed = (theirs: ReadonlySet<string>) => (kept: Pick<Memory, "kind" | "name">) =>
-  kept.kind === "routine" && kept.name !== undefined && theirs.has(kept.name.toLowerCase())
+  kept.kind === "routine" && kept.name !== undefined && theirs.has(Brain.calledAs(kept.name))
 
 export interface Memories {
   /** What's kept, oldest first, but a routine kept by voice that one in his preferences is called the same as, which is the one. */
   readonly list: Effect.Effect<ReadonlyArray<Memory>>
   /**
-   * Keeps one, if there's room: a routine called as one kept already, in any
-   * case, takes its place, as one, and gives it back, so taking this back
+   * Keeps one, if there's room: a routine called as one kept already, as
+   * names compare, takes its place, as one, and gives it back, so taking this back
    * brings it back. A fact kept already that says the same is given back as
    * kept already, and nothing new is.
    */
@@ -108,12 +109,12 @@ export interface Memories {
 /** The memories kept in `store`, beside his routines `written` in his preferences, read as they are now. */
 export const make = (store: Store.Store["Type"], written: Effect.Effect<ReadonlyArray<Preferences.Routine>> = Effect.succeed([])): Memories => {
   /** Whether one kept by voice is a routine one in his preferences is called the same as, as they are now. */
-  const hidden = Effect.map(written, (routines) => shadowed(new Set(routines.map(({ name }) => name.toLowerCase()))))
+  const hidden = Effect.map(written, (routines) => shadowed(new Set(routines.map(({ name }) => Brain.calledAs(name)))))
   const find = (database: Database, id: number) => Option.map(Option.fromNullable(database.query<Row, [number]>("select * from memories where id = ?").get(id)), memory)
-  /** The routine kept now under a name, told by its letters whatever their case, as the index tells it. */
+  /** The routine kept now under a name, as names compare, symbols and all, as the index tells it, so "C" is never "C++". */
   const called = (database: Database, name: string) =>
     Option.map(
-      Option.fromNullable(database.query<Row, [string]>("select * from memories where kind = 'routine' and forgotten_at is null and lower(name) = lower(?)").get(name)),
+      Option.fromNullable(database.query<Row, [string]>("select * from memories where kind = 'routine' and forgotten_at is null and called = ?").get(Brain.calledAs(name))),
       memory,
     )
   /**
@@ -164,10 +165,19 @@ export const make = (store: Store.Store["Type"], written: Effect.Effect<Readonly
           if (!room(database, asked, taken, hides)) return { _tag: "Full" }
           // Retired first, since only one routine is kept under a name.
           if (Option.isSome(taken)) retire(database, taken.value.id, asked.at)
+          const name = asked.kind === "routine" ? asked.name : undefined
           const id = Number(
             database
-              .query("insert into memories (at, kind, name, text, heard, utterance) values (?, ?, ?, ?, ?, ?)")
-              .run(asked.at, asked.kind, asked.kind === "routine" ? (asked.name ?? null) : null, asked.text, asked.heard, asked.utterance ?? null).lastInsertRowid,
+              .query("insert into memories (at, kind, name, called, text, heard, utterance) values (?, ?, ?, ?, ?, ?, ?)")
+              .run(
+                asked.at,
+                asked.kind,
+                name ?? null,
+                name === undefined ? null : Brain.calledAs(name),
+                asked.text,
+                asked.heard,
+                asked.utterance ?? null,
+              ).lastInsertRowid,
           )
           return { _tag: "Kept", memory: Option.getOrThrow(find(database, id)), retired: Option.flatMap(taken, (left) => find(database, left.id)) }
         }),
