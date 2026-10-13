@@ -19,6 +19,50 @@ export const fit = (text: string) => {
   return { rules: rules.slice(0, longest), whole: rules.length <= longest }
 }
 
+/** A routine he wrote in the file: what he says, and the steps sent to a thread for it, as he typed them. */
+export interface Routine {
+  readonly name: string
+  readonly steps: string
+}
+
+/** Quotes or backticks around a name, which aren't part of it. */
+const quoted = /^["'`\u201c\u2018]+|["'`\u201d\u2019]+$/g
+
+/**
+ * His routines: the lines under a "## Routines" heading, up to the next
+ * heading, written "- name: steps", from the whole file, however long, so
+ * none is lost to the cut. Anything else there, and the rest of the file, is
+ * free-form. The first of two called the same, in any case, is the one.
+ */
+export const routines = (text: string): ReadonlyArray<Routine> => {
+  const found: Array<Routine> = []
+  let under = false
+  for (const line of text.split(/\r?\n/)) {
+    const heading = /^ {0,3}#{1,6}\s+(.*?)[\s#]*$/.exec(line)
+    if (heading !== null) {
+      under = /^routines:?$/i.test(heading[1]!.trim())
+      continue
+    }
+    const routine = under ? /^\s*[-*+]\s+([^:]+?)\s*:\s*(\S.*?)\s*$/.exec(line) : null
+    if (routine === null) continue
+    const name = routine[1]!.replace(quoted, "").trim()
+    if (name !== "" && !found.some((other) => other.name.toLowerCase() === name.toLowerCase())) found.push({ name, steps: routine[2]! })
+  }
+  return found
+}
+
+/** His routines, read each time from the whole file, so a change applies to the next thing he says. None without a file. */
+export const written = (path: string) =>
+  Effect.gen(function* () {
+    const file = Bun.file(path)
+    if (!(yield* Effect.tryPromise(() => file.exists()))) return []
+    return routines(yield* Effect.tryPromise(() => file.text()))
+  }).pipe(
+    Effect.catchAll((error) =>
+      Effect.logWarning(`Could not read ${path}, so I'm going without your routines`, error).pipe(Effect.as<ReadonlyArray<Routine>>([])),
+    ),
+  )
+
 /** Read each time, so a change applies to the next dictation. None when there's no file, or nothing in it. */
 export const load = (path: string) =>
   Effect.gen(function* () {
