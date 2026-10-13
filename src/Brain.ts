@@ -1865,6 +1865,20 @@ export const asSaid = (words: string, said: string) => {
 }
 
 /**
+ * The model's words that are nowhere in what he said, as it wrote them, in
+ * its order, so he's told which weren't his, like a name it put right that
+ * speech recognition got wrong: none when there are more than a few, as for
+ * words of its own throughout, or when every one is his, only not in his
+ * order. Only to tell him, never to keep anything.
+ */
+export const unheard = (words: string, said: string) => {
+  const his = new Set(Ledger.digest(said).split(" "))
+  const theirs = words.split(/[^\p{L}\p{N}]+/u).filter((word) => word !== "" && !his.has(word.toLowerCase()))
+  const missing = theirs.filter((word, index) => theirs.findIndex((other) => other.toLowerCase() === word.toLowerCase()) === index)
+  return missing.length === 0 || missing.length > 3 ? undefined : missing.join(" ")
+}
+
+/**
  * Whether yapd answers to a phrase said on its own without the model, like
  * "say that again", "scratch that", "yes", "focus" or "mute it", which a
  * routine called the same would never be heard for, or would take the place
@@ -1898,9 +1912,11 @@ export const secretive = (choice: Pick<Decision, "text">, utterance: Pick<Assist
 /** What's said of what can't be kept in mind, or forgotten. */
 const rememberLines = (lines: Pick<Lines, "address">) => {
   const sir = addressed(lines)
+  // Which words weren't his, when a few, so he can say it another way.
+  const which = (missing: string | undefined) => (missing === undefined ? "," : `: I didn't hear '${missing}' from you,`)
   return {
-    words: `I couldn't keep that in your own words${sir}, so I didn't save it.`,
-    steps: `I couldn't keep the steps in your own words${sir}, so I didn't save it.`,
+    words: (missing?: string) => `I couldn't keep that in your own words${sir}${which(missing)} so I didn't save it.`,
+    steps: (missing?: string) => `I couldn't keep the steps in your own words${sir}${which(missing)} so I didn't save it.`,
     written: `That one's in your preferences${sir}.`,
     answered: `That's something I already answer to${sir}.`,
   }
@@ -2080,7 +2096,10 @@ export const check = (given: Decision, situation: Situation, lines: Lines): Chec
       // never kept, which he's told as it's done.
       const { utterance } = situation
       const heard = utterance.whole ?? utterance.heard
-      if (utterance.echo === undefined && heard !== "" && !asSaid(text, heard)) return { _tag: "Say", spoken: routine === undefined ? said.words : said.steps }
+      if (utterance.echo === undefined && heard !== "" && !asSaid(text, heard)) {
+        const missing = unheard(text, heard)
+        return { _tag: "Say", spoken: routine === undefined ? said.words(missing) : said.steps(missing) }
+      }
       if (routine !== undefined) {
         // The one in his preferences is the one, and a name yapd answers to already would never be heard as the routine's.
         if ((situation.memories?.written ?? []).some(({ name }) => name.toLowerCase() === routine.name.toLowerCase())) return { _tag: "Say", spoken: said.written }
@@ -2257,11 +2276,11 @@ const contract = `Reply with only a JSON object with the keys "act", "target", "
 - "mode": he wants you to change how and when you talk. "how" is "focus" to say only what needs him for a while, "quiet" for the night, like "goodnight", "I'm off to bed" or "turn yourself off", which also says only what needs him, "normal" when he's back, like "I'm back" or "you can talk normally again", which gives him the catch-up, "brief" to say only headlines again, like "talk shorter", or "full" to say every update in full, like "give me everything" or "stop giving me the short version". "when" is when focus or quiet ends, if he says, worked out from NOW as his clock reads it, "YYYY-MM-DDTHH:mm", like three o'clock today for "till three". It's about you, never a message for a thread, and never "mute", which is one thread. "stop", "quiet" or "be quiet" on their own only mean stop talking: "dismiss".
 - "remind": he wants to be told something later. At a time: "how" is "at", and "when" the time worked out from NOW, as his clock reads it, "YYYY-MM-DDTHH:mm" with no offset, like "2026-10-12T15:00" for three this afternoon. Or once a thread finishes its turn, "how" "finished", or asks him something, "how" "asked", with "target" that thread. "text" is what to tell him then, in a few words, like "call the bank", or "" when it's only that the thread finished or asks. "rest" keeps its meaning: what he wants done now, in the same breath, like "and tell the Mina one to rebase". Not "send" with "after", which tells the thread itself once it's done; something he wants offered to a thread then is "offer". You don't watch pull requests: told to say when one's checks pass or it's merged, "answer" that you don't.
 - "offer": he wants you to offer, at a time or when a thread finishes or asks him something, to send a thread a message. "how" and "when" as for "remind"; "target" is the thread told, and the one watched; "text" is the message as "send" writes it. yapd asks him then, and only his yes sends it. One that watches one thread and tells another, you can't: "answer" so.
-- "remember": he wants you to keep something in mind from now on. "how" is "fact" for something that's so about him or his work, like "remember that rig's T3 Code runs the nightly", with "text" the fact copied from what he said word for word, mistakes and all, like "rig's T3 Code runs the nightly". Or "routine" for steps to send a thread whenever he says a name, like "when I say review it, have Sol review it until it's clean", with "text" "name: steps", each copied from what he said word for word, like "review it: have Sol review it until it's clean". Said again with other steps, it's the same name: yapd changes it. "target" is "". Being told something at a time, or once a thread does something, is "remind".
+- "remember": he wants you to keep something in mind from now on. "how" is "fact" for something that's so about him or his work, like "remember that rig's T3 Code runs the nightly", with "text" the fact copied from what he said word for word, mistakes and all, like "rig's T3 Code runs the nightly". Or "routine" for steps to send a thread whenever he says a name, like "when I say review it, have Sol review it until it's clean", with "text" "name: steps", each copied from what he said word for word, like "review it: have Sol review it until it's clean". Either is copied as it came through, names too: what "hearing" says of misheard names never applies to it, and a word you put right isn't his, so nothing is kept. A routine's steps go to an agent as they're kept, so when a name in them came through as another word, like "Saul" for Sol, keep nothing: "answer" that the name didn't come through as he said it, and that a routine typed in his preferences keeps it as he writes it. Said again with other steps, it's the same name: yapd changes it. "target" is "". Being told something at a time, or once a thread does something, is "remind".
 - "forget": he wants one of REMINDERS cancelled, or one of MEMORIES forgotten. "target" is its handle there, like r2, k1 or p3. "Forget it" or "never mind" on its own is "dismiss".
 - This you can't do yet, but name it when it's what he wants, with "target" and "text" filled in, and yapd tells him: "tidy" a thread away, like archiving or renaming it.`
 
-const hearing = `What he says comes through speech recognition, and names get mangled. A word that doesn't fit the sentence, or sounds like nothing he'd say, is most likely a name misheard: a thread's subject, a project, a machine or a model in THREADS or OTHER THREADS that sounds like it, like a coin, a client or a tool he works on coming out as an everyday word or a made-up one. Weigh such a word above the ordinary ones around it, like "migration" or "status", which fit many threads. His own words get mangled the same way: "appd" and "YAPT" are yapd, "Wig" is rig, "Saul" is Sol, "masterwork tree" is master worktree, "poll request" is pull request. Match threads by how they sound and by what the work is about, never by spelling. Short words like "no", "now", "on" and "not" are the least reliable of all.`
+const hearing = `What he says comes through speech recognition, and names get mangled. A word that doesn't fit the sentence, or sounds like nothing he'd say, is most likely a name misheard: a thread's subject, a project, a machine or a model in THREADS or OTHER THREADS that sounds like it, like a coin, a client or a tool he works on coming out as an everyday word or a made-up one. Weigh such a word above the ordinary ones around it, like "migration" or "status", which fit many threads. His own words get mangled the same way: "appd" and "YAPT" are yapd, "Wig" is rig, "Saul" is Sol, "masterwork tree" is master worktree, "poll request" is pull request, except in what "remember" copies, which is as it came through. Match threads by how they sound and by what the work is about, never by spelling. Short words like "no", "now", "on" and "not" are the least reliable of all.`
 
 const choosing = `Choosing a thread:
 - "it", "that" and "this one" mean FOCUS. "The other one" means the alternative you offered last. When FOCUS is an update not tied to a thread, "it" is the thread in THREADS doing that work, when one is: same project, same subject.

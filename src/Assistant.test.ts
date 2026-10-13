@@ -11701,6 +11701,8 @@ describe("Assistant memories", () => {
             const { heard } = situation.utterance
             if (heard === asked) return Brain.decision({ act: "remember", how: "routine", text: reworded ? "review it: have Sol review the work until it's clean" : "review it: have Sol review it until it's clean" })
             if (heard === "When I say review it, have Opus review it twice.") return Brain.decision({ act: "remember", how: "routine", text: "review it: have Opus review it twice" })
+            // A name put right, as speech recognition got it wrong, isn't his either, and would go to the agent as he never said it.
+            if (heard === "When I say review it, have Saul review it until it's clean.") return Brain.decision({ act: "remember", how: "routine", text: "review it: have Sol review it until it's clean" })
             return undefined
           },
           undefined,
@@ -11709,6 +11711,8 @@ describe("Assistant memories", () => {
         const kept = () => Effect.map(made.memories!.list, (all) => all.map(({ name, text }) => `${name}: ${text}`))
         yield* made.dictate(asked)
         const unsaved = { said: made.spoken().at(-1), kept: yield* kept() }
+        yield* made.dictate("When I say review it, have Saul review it until it's clean.")
+        const corrected = { said: made.spoken().at(-1), kept: yield* kept() }
         reworded = false
         // Over yapd's own voice, what was heard may be its words.
         yield* made.heard({ heard: asked, via: "shortcut", at: yield* TestClock.currentTimeMillis, voiced: 3, turns: 1, echo: "I'll tell you when it finishes, sir." })
@@ -11717,10 +11721,11 @@ describe("Assistant memories", () => {
         yield* made.dictate(asked)
         const saved = { said: made.spoken().at(-1), kept: yield* kept() }
         yield* made.dictate("When I say review it, have Opus review it twice.")
-        return { unsaved, echoed, saved, changed: { said: made.spoken().at(-1), kept: yield* kept() } }
+        return { unsaved, corrected, echoed, saved, changed: { said: made.spoken().at(-1), kept: yield* kept() } }
       }),
     )
-    expect(result.unsaved).toEqual({ said: "I couldn't keep the steps in your own words, sir, so I didn't save it.", kept: [] })
+    expect(result.unsaved).toEqual({ said: "I couldn't keep the steps in your own words, sir: I didn't hear 'the work' from you, so I didn't save it.", kept: [] })
+    expect(result.corrected).toEqual({ said: "I couldn't keep the steps in your own words, sir: I didn't hear 'Sol' from you, so I didn't save it.", kept: [] })
     expect(result.echoed).toEqual({ said: "I didn't keep that, sir: it may have been my own voice. Say it again?", kept: [] })
     expect(result.saved).toEqual({ said: "Noted, sir. Review it: have Sol review it until it's clean.", kept: ["review it: have Sol review it until it's clean"] })
     expect(result.changed).toEqual({ said: "Changed, sir. Review it: have Opus review it twice.", kept: ["review it: have Opus review it twice"] })
