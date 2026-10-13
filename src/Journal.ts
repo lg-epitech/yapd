@@ -152,6 +152,8 @@ export class Journal extends Context.Tag("yapd/Journal")<
     readonly missed: (at: number, spoke: number, most?: number, whenever?: number) => Effect.Effect<ReadonlyArray<Kept>>
     /** These entries, by id, oldest first, heard or not, like the ones a catch-up told him of. */
     readonly rows: (ids: ReadonlyArray<number>) => Effect.Effect<ReadonlyArray<Kept>>
+    /** The entries kept under a key that starts with `prefix`, however long ago, oldest first, the latest `most` of them. */
+    readonly keyed: (prefix: string, most?: number) => Effect.Effect<ReadonlyArray<Kept>>
     /** The times yapd was turned on or off since `at`, newest first, the latest `most` of them, as the entries kept as it was. */
     readonly switched: (at: number, most?: number) => Effect.Effect<ReadonlyArray<Kept>>
     /**
@@ -530,6 +532,19 @@ export const fromStore = (
               database
                 .query<Row, Array<number>>(`select * from journal where id in (${ids.map(() => "?").join(", ")}) order by at, id`)
                 .all(...ids)
+                .map(kept),
+            ),
+          ),
+    keyed: (prefix, most = 1000) =>
+      prefix === ""
+        ? Effect.succeed([])
+        : reading(
+            store.transaction((database: Database) =>
+              database
+                // Keys from the prefix on, up to the first that doesn't start with it: what the index on keys finds.
+                .query<Row, [string, string, number]>("select * from journal where key >= ? and key < ? order by at desc, id desc limit ?")
+                .all(prefix, `${prefix.slice(0, -1)}${String.fromCharCode(prefix.charCodeAt(prefix.length - 1) + 1)}`, most)
+                .reverse()
                 .map(kept),
             ),
           ),

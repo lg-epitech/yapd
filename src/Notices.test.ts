@@ -1769,6 +1769,32 @@ describe("Notices of usage", () => {
     expect(result.next).toHaveLength(1)
   })
 
+  test("a monthly window said at 95 percent isn't said again more than a week on, once when it resets moves into the next hour", async () => {
+    // Weeks off, 20 seconds before the hour.
+    const first = Math.floor((now + 20 * 24 * 60 * 60_000) / 3_600_000) * 3_600_000 + 59 * 60_000 + 40_000
+    let resets = new Date(first).toISOString()
+    const usage = () => [
+      {
+        instanceId: "claudeAgent",
+        displayName: "Claude",
+        enabled: true,
+        status: "ready",
+        usageLimits: { checkedAt: new Date(now).toISOString(), windows: [{ id: "claude-monthly", kind: "monthly", label: "Monthly", usedPercent: 96, resetsAt: resets }] },
+      },
+    ]
+    const told = await run(
+      Effect.gen(function* () {
+        const made = yield* notices({ view: [], bounded: {}, usage })
+        yield* made.usage
+        yield* made.wait(8 * 24 * 60 * 60)
+        resets = new Date(first + 40_000).toISOString()
+        yield* made.usage
+        return made.told
+      }),
+    )
+    expect(told).toEqual([expect.stringMatching(/^Claude's monthly limit is at 96 percent, sir\. It resets .*\.$/)])
+  })
+
   test("a 95 percent warning waiting to be said as quiet begins is kept for the morning, never said that night", async () => {
     const usage = () => [
       {

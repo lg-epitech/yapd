@@ -4,7 +4,7 @@ import * as Brain from "./Brain.ts"
 import { Condenser, english } from "./Condenser.ts"
 import * as Hands from "./Hands.ts"
 import type { Notice } from "./Inbox.ts"
-import type { Entry, Journal } from "./Journal.ts"
+import type { Entry, Journal, Kept } from "./Journal.ts"
 import type * as Modes from "./Modes.ts"
 import * as Payload from "./Payload.ts"
 import { addressed, type Lines, Persona } from "./Persona.ts"
@@ -978,7 +978,8 @@ export const make = (options: {
      * Says how much of a provider's window is used once it passes 95 percent,
      * or keeps it for the digest at 80, each once a window, however often
      * it's read, across restarts too: a window that's said, whose reset is
-     * still ahead, isn't again, even when when it resets moves a little. 95 is
+     * still ahead, isn't again, even when when it resets moves a little, and
+     * however long ago it was said, as a monthly one's may be weeks. 95 is
      * kept for the morning in quiet, said in focus as at any other time, and
      * not while a limit a thread hit holds, which says more; said, what 80
      * said of the same window is put by. While yapd is off, it's kept for a
@@ -988,8 +989,8 @@ export const make = (options: {
     const using = (usage: Threads.Usage) =>
       Effect.gen(function* () {
         const now = yield* Clock.currentTimeMillis
-        const kept = (yield* journal.since(now - longest, { kinds: ["notice"], most: 1000 })).filter((entry) => entry.key?.startsWith("usage:") === true)
-        const resetOf = (entry: (typeof kept)[number]) => Option.getOrUndefined(Option.map(decodeLimit(entry.detail), ({ resets }) => Date.parse(resets)))
+        const kept = yield* journal.keyed("usage:")
+        const resetOf = (entry: Kept) => Option.getOrUndefined(Option.map(decodeLimit(entry.detail), ({ resets }) => Date.parse(resets)))
         // What's kept of a window that has reset since tells of nothing now.
         const over = kept.filter((entry) => {
           const reset = resetOf(entry)
@@ -1009,10 +1010,12 @@ export const make = (options: {
             const level = window.usedPercent >= 95 ? 95 : window.usedPercent >= 80 ? 80 : undefined
             if (level === undefined) continue
             const id = window.id ?? `${window.kind}:${window.label}`
-            const same = (entry: (typeof kept)[number], at: number) => entry.key?.startsWith(`usage:${who}:${id}:${at}:`) === true
+            // All that was ever kept of this window, however long ago.
+            const earlier = yield* journal.keyed(`usage:${who}:${id}:`)
+            const same = (entry: Kept, at: number) => entry.key?.startsWith(`usage:${who}:${id}:${at}:`) === true
             // Said for this window already, while its reset is still ahead, or for as long as the shortest lasts when nobody said when.
             const told = (at: number) =>
-              kept.some((entry) => {
+              earlier.some((entry) => {
                 if (!same(entry, at)) return false
                 const was = resetOf(entry)
                 return was === undefined || Number.isNaN(was) ? now - entry.at < lasting : now < was
@@ -1037,8 +1040,7 @@ export const make = (options: {
               const held = !on ? "off" : level === 80 ? "progress" : "quiet"
               const claimed = yield* journal.claim({ ...entry, detail: { ...detail, held, priority: "done" } })
               if (Option.isNone(claimed)) {
-                const since = (yield* Clock.currentTimeMillis) - longest
-                const waiting = (yield* journal.since(since, { kinds: ["notice"], most: 1000 })).filter(
+                const waiting = (yield* journal.keyed(entry.key)).filter(
                   (kept) => kept.key === entry.key && kept.heardAt === undefined && (kept.detail as { readonly held?: unknown } | undefined)?.held === undefined,
                 )
                 if (waiting.length === 0) return
@@ -1072,7 +1074,7 @@ export const make = (options: {
             // What 80 said of the same window is put by once 95 is.
             if (level === 95) {
               yield* journal.markHeard(
-                kept.filter((entry) => same(entry, 80) && entry.heardAt === undefined).map(({ id }) => id),
+                earlier.filter((entry) => same(entry, 80) && entry.heardAt === undefined).map(({ id }) => id),
                 now,
               )
             }
