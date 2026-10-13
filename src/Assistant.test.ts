@@ -11655,6 +11655,41 @@ describe("Assistant memories", () => {
     expect(result.again).toContain("- k1 «rig's T3 Code runs the nightly»")
   })
 
+  test("a fact said again is kept once, so forgetting it forgets it, and it's never kept twice by bringing it back", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(
+          (situation) => {
+            const { heard } = situation.utterance
+            if (heard === "Remember that rig's T3 Code runs the nightly.") return Brain.decision({ act: "remember", how: "fact", text: "rig's T3 Code runs the nightly" })
+            if (heard === "Remember, rig's T3 code runs the nightly!") return Brain.decision({ act: "remember", how: "fact", text: "rig's T3 code runs the nightly" })
+            if (heard === "Forget the one about rig.") {
+              return Brain.decision({ act: "forget", target: Brain.remembered(situation).find(({ text }) => text.includes("rig"))?.handle ?? "" })
+            }
+            return undefined
+          },
+          undefined,
+          { memories: true },
+        )
+        const kept = () => Effect.map(made.memories!.list, (all) => all.map(({ text }) => text))
+        yield* made.dictate("Remember that rig's T3 Code runs the nightly.")
+        yield* made.dictate("Remember, rig's T3 code runs the nightly!")
+        const again = { said: made.spoken().at(-1), kept: yield* kept() }
+        const first = (yield* made.memories!.list)[0]!.id
+        yield* made.dictate("Forget the one about rig.")
+        const forgot = { said: made.spoken().at(-1), kept: yield* kept() }
+        // Said again since, the one forgotten brought back is the one kept.
+        yield* made.dictate("Remember that rig's T3 Code runs the nightly.")
+        const restored = yield* made.memories!.restore(first)
+        return { again, forgot, restored: Option.getOrUndefined(Option.map(restored, (back) => (back._tag === "Kept" ? back.memory.id : back._tag))), kept: yield* made.memories!.list }
+      }),
+    )
+    expect(result.again).toEqual({ said: "Noted, sir.", kept: ["rig's T3 Code runs the nightly"] })
+    expect(result.forgot).toEqual({ said: "Forgotten, sir: rig's T3 Code runs the nightly.", kept: [] })
+    expect(result.kept.map(({ text }) => text)).toEqual(["rig's T3 Code runs the nightly"])
+    expect(result.restored).toBe(result.kept[0]!.id)
+  })
+
   test("a routine's name sends its steps to the focus thread once, as they're written", async () => {
     const steps = "Merge the PR once checks pass, then update the dev worktree and reinstall yapd."
     const result = await run(
