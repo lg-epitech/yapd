@@ -25,6 +25,7 @@ import * as Recent from "./Recent.ts"
 import type * as Reminders from "./Reminders.ts"
 import { RelayError, Relays, type Thread } from "./Relay.ts"
 import type { Handle } from "./Server.ts"
+import * as T3Actions from "./T3Actions.ts"
 import * as T3Code from "./T3Code.ts"
 import * as Threads from "./Threads.ts"
 import { extension, Voice } from "./Voice.ts"
@@ -420,11 +421,14 @@ export const make = (
   const tell = (notice: Inbox.Notice, since?: number) => {
     /** Whether it was queued, after which it's done with only once it's taken out to be said, or dropped. */
     let queued = false
+    // What could give a secret away, like an answer saying back one he dictated, which the journal never keeps, is said, but never logged.
+    const revealing = T3Actions.revealing(notice.spoken)
+    const what = revealing ? "something that could give a secret away" : `"${notice.spoken}"`
     return Effect.gen(function* () {
       const now = yield* switched
       const turns = since ?? now.turns
       // Off, what yapd would bring up of its own accord isn't even rendered.
-      if (notice.kind === "notice" && (!now.on || now.turns !== turns)) return yield* Effect.logInfo(`Not saying "${notice.spoken}", since yapd is off`)
+      if (notice.kind === "notice" && (!now.on || now.turns !== turns)) return yield* Effect.logInfo(`Not saying ${what}, since yapd is off`)
       const audio = join(dir, `${crypto.randomUUID()}${extension}`)
       yield* soon
       yield* voice.render(notice.spoken, audio).pipe(Effect.onError(() => removeFile(audio)))
@@ -440,11 +444,11 @@ export const make = (
       )
       if (!queued) {
         yield* removeFile(audio)
-        return yield* Effect.logInfo(`Not saying "${notice.spoken}", since yapd is off`)
+        return yield* Effect.logInfo(`Not saying ${what}, since yapd is off`)
       }
-      yield* Effect.logInfo(`Ready: ${notice.spoken}`)
+      yield* Effect.logInfo(`Ready: ${revealing ? "something that could give a secret away" : notice.spoken}`)
     }).pipe(
-      Effect.catchAllCause((cause) => Effect.logError(`Could not say "${notice.spoken}"`, cause)),
+      Effect.catchAllCause((cause) => Effect.logError(`Could not say ${what}`, cause)),
       Effect.ensuring(Effect.suspend(() => (queued ? Effect.void : (notice.gone ?? Effect.void)))),
     )
   }

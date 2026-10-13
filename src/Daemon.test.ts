@@ -1220,6 +1220,28 @@ describe("Daemon", () => {
     })
   })
 
+  test.each([
+    ["an answer, said", "answer", true],
+    ["a notice, not said while yapd is off", "notice", false],
+  ] as const)("what could give a secret away, %s, is never logged", async (_, kind, on) => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { made, wait, power, played, logged } = yield* make()
+        if (!on) yield* power(false)
+        const { turns } = yield* made.power
+        const spoken = "I won't keep sk-live-4f9a8b7c6d5e, sir. Type it into T3 Code."
+        yield* made.tell({ id: "n1", kind, priority: "needs-you", spoken, at: yield* Clock.currentTimeMillis, stale: Effect.succeed(false) }, turns)
+        yield* wait(5)
+        return { played: [...played], logged: logged.filter((line) => line.includes("4f9a8b7c6d5e") || line.includes("a secret away")) }
+      }),
+    )
+    expect(result).toEqual(
+      on
+        ? { played: ["I won't keep sk-live-4f9a8b7c6d5e, sir. Type it into T3 Code."], logged: ["Ready: something that could give a secret away"] }
+        : { played: [], logged: ["Not saying something that could give a secret away, since yapd is off"] },
+    )
+  })
+
   test("a reply after the thread was given something else since is held back with a spoken reason", async () => {
     const result = await run(
       Effect.gen(function* () {
