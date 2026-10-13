@@ -11368,7 +11368,7 @@ describe("Assistant reminders", () => {
             if (heard.startsWith("Remind me")) return Brain.decision({ act: "remind", how: "at", when: local(soon), text: "call the bank" })
             // He names no thread, so the model names none.
             if (heard === "No, undo that please.") return Brain.decision({ act: "undo" })
-            if (heard === "Take back the message to the Tezos one.") return Brain.decision({ act: "undo", target: handle(situation, tezos) })
+            if (heard === "Take back the message to the Tezos one.") return Brain.decision({ act: "undo", target: handle(situation, tezos), how: "message" })
             return undefined
           },
           undefined,
@@ -11412,7 +11412,7 @@ describe("Assistant reminders", () => {
             const { heard } = situation.utterance
             if (heard.startsWith("Tell the Tezos one")) return Brain.decision({ act: "send", target: handle(situation, tezos), text: "Use the fee table.", how: "now", rest: "let me know when it finishes" })
             if (heard === "let me know when it finishes") return Brain.decision({ act: "remind", how: "finished", target: handle(situation, tezos) })
-            if (heard === "Take back the message to the Tezos one.") return Brain.decision({ act: "undo", target: handle(situation, tezos) })
+            if (heard === "Take back the message to the Tezos one.") return Brain.decision({ act: "undo", target: handle(situation, tezos), how: "message" })
             if (heard === "Tell the Mina one to rebase.") return Brain.decision({ act: "send", target: handle(situation, mina), text: "Rebase.", how: "now" })
             if (heard === "Cancel that reminder.") return Brain.decision({ act: "undo", how: "reminder" })
             return undefined
@@ -11442,6 +11442,41 @@ describe("Assistant reminders", () => {
     expect(result.reminder.pending).toBe(0)
     // Nothing went to take back the message to Mina.
     expect(result.reminder.sent).toEqual(["message.dispatch", "message.dispatch"])
+  })
+
+  test("undo that takes back the reminder set since, whatever thread the model filled in, and withdraw that message the message, though a reminder is newer", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(
+          (situation) => {
+            const { heard } = situation.utterance
+            if (heard === "Tell the Tezos one to use the fee table.") return Brain.decision({ act: "send", target: handle(situation, tezos), text: "Use the fee table.", how: "now" })
+            if (heard === "Let me know when it finishes.") return Brain.decision({ act: "remind", how: "finished", target: handle(situation, tezos) })
+            // He names no thread, and the model fills in the one he's on about.
+            if (heard === "No, undo that please.") return Brain.decision({ act: "undo", target: handle(situation, tezos) })
+            if (heard === "Withdraw that message.") return Brain.decision({ act: "undo", how: "message" })
+            return undefined
+          },
+          undefined,
+          { reminders: true },
+        )
+        const types = () => made.dispatched.map(({ type }) => type)
+        yield* made.dictate("Tell the Tezos one to use the fee table.")
+        yield* made.dictate("Let me know when it finishes.")
+        yield* made.dictate("No, undo that please.")
+        const undone = { said: made.spoken().at(-1), pending: (yield* made.reminders!.pending).length, sent: types() }
+        yield* made.dictate("Let me know when it finishes.")
+        yield* made.dictate("Withdraw that message.")
+        return { undone, withdrawn: { said: made.spoken().at(-1), pending: (yield* made.reminders!.pending).length } }
+      }),
+    )
+    // The reminder is taken back, and the message stays sent.
+    expect(result.undone.said).toBe("Cancelled your reminder for when Migrate Tezos Integration finishes, sir.")
+    expect(result.undone.pending).toBe(0)
+    expect(result.undone.sent).toEqual(["message.dispatch"])
+    // The message is what's taken back, and the reminder stays.
+    expect(result.withdrawn.said).toMatch(/already read it, sir\. Shall I tell it to ignore that\?$/)
+    expect(result.withdrawn.pending).toBe(1)
   })
 })
 

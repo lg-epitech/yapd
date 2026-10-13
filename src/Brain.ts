@@ -81,7 +81,7 @@ export const Decision = Schema.Struct({
   /** With OPEN shown: "answers" if this answers it, "replaces" if it's something new. "" without OPEN. */
   pending: Schema.Literal("answers", "replaces", ""),
   /** send: now|after|restart · decide: accept|session|decline · again: same|more|instead|which · dismiss: later
-   *  · reply: skip · find: threads|journal · mute: mute|unmute|clear|undo · catchup: more|muted
+   *  · reply: skip · find: threads|journal · mute: mute|unmute|clear|undo · catchup: more|muted · undo: reminder|message|carry
    *  mode: focus|quiet|normal|brief|full · remember: fact|routine · remind and offer: at|finished|asked
    *  tidy: archive|unarchive|rename|snooze|settle|pin · show: threads|thread|pr|usage|missed|said|hide|memories */
   how: Schema.String,
@@ -1716,6 +1716,13 @@ export const newest = (situation: Pick<Situation, "acted" | "muteChange" | "note
   return changes.reduce<(typeof changes)[number] | undefined>((latest, change) => (latest === undefined || change.at > latest.at ? change : latest), undefined)?.what
 }
 
+/**
+ * What an undo takes back, as the model took him to mean it: the reminder or
+ * offer, what was done to a thread, a message or a stop, or, for no more
+ * than "scratch that", whatever was done last.
+ */
+export const undoes = (how: string): "reminder" | "thread" | "last" => (how === "reminder" ? "reminder" : how === "message" || how === "carry" ? "thread" : "last")
+
 /** A time the model gave, as his clock reads it, or with an offset; NaN for anything else. */
 export const instant = Mutes.instant
 
@@ -1951,8 +1958,9 @@ const writing = (
   const { utterance, desk } = situation
   // Said over something, too little speech is talk or noise nearby, never something to do.
   if (murmured(choice, utterance)) return { _tag: "Do", plan: { decision: { ...choice, act: "resume" }, target: Option.none() } }
-  // Taking back what was just done needs no thread named: it's what was just done.
-  if (choice.act === "undo" && Option.isNone(target)) return { _tag: "Do", plan: { decision: { ...choice, target: "" }, target } }
+  // Taking back what was just done needs no thread named: it's what was just done. Nor does whatever was done last, whatever thread
+  // the model filled in.
+  if (choice.act === "undo" && (Option.isNone(target) || undoes(choice.how) === "last")) return { _tag: "Do", plan: { decision: { ...choice, target: "" }, target: Option.none() } }
   if (Option.isNone(target)) return candidates.length >= 2 ? ask(candidates) : { _tag: "Say", spoken: lines.cantTell }
   const listed = target.value
   if (choice.act === "stop" && !stoppable(listed)) return { _tag: "Say", spoken: `${capital(listed.called)} isn't doing anything right now${addressed(lines)}.` }
@@ -2062,7 +2070,7 @@ const contract = `Reply with only a JSON object with the keys "act", "target", "
 - "start": new work: a change, a fix, an investigation, a review, a question that needs the web, the code or time. "text" is the request in his words. yapd works out where it goes and starts it.
 - "send": a message for a thread, like an instruction, a correction or an answer to what it asked. "target" is the thread, "text" the message as he'd type it. "how" is "now"; "after" when he says after, once it's done or when it finishes; "restart" when he says to drop what it's doing and do this instead. A message he wants sent at a later time, like "at five" or "in an hour", is "offer" at that time, never "send": yapd only asks him then.
 - "stop": stop a thread's run, when he says to stop the thread, the run or the work. "target" is the thread.
-- "undo": take back what you just did for him, as LATELY shows it: the message you just sent, or the reminder or offer you just set or cancelled. "how" is "reminder" when it's the reminder or offer he wants taken back, "carry" when he wants a thread you stopped to carry on, "" otherwise: what you did to a thread, or, when he says no more than "scratch that", whatever you did last. "target" is the thread, when he names one.
+- "undo": take back what you just did for him, as LATELY shows it: the message you just sent, or the reminder or offer you just set or cancelled. "how" is which he means: "reminder" for the reminder or offer, "message" for the message you sent a thread, "carry" when he wants a thread you stopped to carry on, and "" only when he says no more than "scratch that" or "undo that": whatever you did last. "target" is the thread, when he names one; "" when "how" is "".
 - "decide": he allows, or turns down, what a thread waits for him to allow, in WAITING ON YOU or OPEN. "target" is the thread; "how" is "accept", "session" only when he says for the session or from now on, or "decline".
 - "reply": he answers a thread's question, in WAITING ON YOU or OPEN. "target" is the thread; "text" is his answer: the option he picked, as it's written, or his own words. A question in several parts is answered a part at a time: "text" answers only the part he's at, and yapd asks him the rest. "text" empty when he wants to hear a thread's question before answering: yapd reads it to him.
 - "dismiss": he wants you to stop talking, or it needs nothing: thanks, okay, an acknowledgement, or no to OPEN, unless OPEN asks a thread's question, which a no answers.

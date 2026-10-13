@@ -1726,7 +1726,7 @@ export const make = (options: {
       asks?: Asks,
     ): Hands.Act | undefined => {
       const to = Option.map(target, ({ ref }) => ref)
-      // Taking back a stop is letting it carry on.
+      // Taking back a stop is letting it carry on, unless he means a message.
       const stopped = Option.exists(
         last,
         (row) =>
@@ -1749,7 +1749,7 @@ export const make = (options: {
         case "stop":
           return Option.isNone(to) ? undefined : { _tag: "Stop", to: to.value }
         case "undo":
-          return { _tag: "Undo", to, carry: decision.how === "carry" || stopped }
+          return { _tag: "Undo", to, carry: decision.how === "carry" || (decision.how !== "message" && stopped) }
         case "decide": {
           if (Option.isNone(to) || asks?._tag !== "Approval") return undefined
           // Allowed only with "approve" as his answer, however it came here, never a plain yes, nor with more after it, nor in the rest of a
@@ -2977,35 +2977,37 @@ export const make = (options: {
       })
 
     /**
-     * Takes back what he just did, as the model took him to mean it: the
-     * reminder or offer he just set or cancelled, when it says that's what
-     * he means, and nothing else then; otherwise what yapd last did to a
-     * thread, or a mute. Of the thread the model took him to name, only what
-     * was changed of it, and never a reminder, so a message he names is never
-     * left for a reminder or a mute made since. With no thread named, as
-     * "scratch that", the newest change he made, so a message sent a minute
-     * before a reminder is never withdrawn in its place. Carrying on after a
-     * stop is always the thread's.
+     * Takes back what he just did, as the model said he meant it, never as
+     * whether it filled in a thread: the reminder or offer he just set or
+     * cancelled, of the thread he named if he did, and nothing else then;
+     * what yapd last did to a thread, a message or a stop, of the thread he
+     * named if he did, never a reminder or a mute made since; and for no
+     * more than "scratch that", the newest change he made, whatever thread
+     * the model filled in, so a message sent a minute before a reminder is
+     * never withdrawn in its place.
      */
     const undoing = (plan: Brain.Plan, thought: Thought, said: Lines, at: Stepping): Effect.Effect<Outcome> =>
       Effect.gen(function* () {
         const { situation } = thought
-        const on = Option.getOrUndefined(plan.target)?.ref
+        const taking = Brain.undoes(plan.decision.how)
+        if (taking === "thread") return yield* write(plan, thought, said, at)
         const last = Option.getOrUndefined(situation.noted ?? Option.none())
-        if (plan.decision.how === "reminder") {
-          const noted = Brain.newest({ noted: situation.noted ?? Option.none(), acted: Option.none(), muteChange: Option.none() }, on) === "noted"
-          const outcome = noted && last !== undefined ? yield* retracting(last, thought, said) : reply(`There's nothing to take back${addressed(said)}.`, thought.subject)
-          return yield* onward(thought, outcome, Brain.about(outcome.subject), at.step + 1, said)
-        }
-        const latest = Brain.newest(on === undefined ? situation : { ...situation, noted: Option.none() }, on)
-        if (plan.decision.how !== "carry" && latest === "noted" && last !== undefined) {
+        const latest =
+          taking === "reminder"
+            ? Brain.newest({ noted: situation.noted ?? Option.none(), acted: Option.none(), muteChange: Option.none() }, Option.getOrUndefined(plan.target)?.ref)
+            : Brain.newest(situation)
+        if (latest === "noted" && last !== undefined) {
           return yield* Effect.flatMap(retracting(last, thought, said), (outcome) => onward(thought, outcome, Brain.about(outcome.subject), at.step + 1, said))
         }
-        if (plan.decision.how !== "carry" && latest === "mute" && options.controls !== undefined) {
+        if (taking === "reminder") {
+          const outcome = reply(`There's nothing to take back${addressed(said)}.`, thought.subject)
+          return yield* onward(thought, outcome, Brain.about(outcome.subject), at.step + 1, said)
+        }
+        if (latest === "mute" && options.controls !== undefined) {
           const mute = { ...plan, decision: { ...plan.decision, act: "mute" as const, how: "undo" } }
           return yield* Effect.flatMap(muting(mute, thought, said), (outcome) => onward(thought, outcome, Brain.about(outcome.subject), at.step + 1, said))
         }
-        return yield* write(plan, thought, said, at)
+        return yield* write({ decision: { ...plan.decision, target: "" }, target: Option.none() }, thought, said, at)
       })
 
     /** Does what was decided and checked: a step of its request, which changes a thread under that step's ids. */
