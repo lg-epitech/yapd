@@ -12602,6 +12602,50 @@ describe("Assistant memories", () => {
     }
   })
 
+  test("a routine that gives a pin, a login, a key or a token a value with a digit in it isn't kept, read back nor journaled, while one that only names a key is", async () => {
+    const refused: Readonly<Record<string, string>> = {
+      "When I say staging, enter the pin 4827.": "staging: enter the pin 4827",
+      "When I say staging, sign in with the login hunter2.": "staging: sign in with the login hunter2",
+      "When I say staging, use the API key abc123.": "staging: use the API key abc123",
+      "When I say staging, set the token to hunter2.": "staging: set the token to hunter2",
+    }
+    const kept: Readonly<Record<string, string>> = {
+      "When I say ship, check the tests pass, then deploy.": "ship: check the tests pass, then deploy",
+      "When I say review it, review the code and push the fixes.": "review it: review the code and push the fixes",
+      "When I say rotate, rotate the deploy key.": "rotate: rotate the deploy key",
+    }
+    const routines = { ...refused, ...kept }
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(
+          (situation) => {
+            const text = routines[situation.utterance.heard]
+            return text === undefined ? Brain.decision({ act: "answer", spoken: "Nothing else, sir." }) : Brain.decision({ act: "remember", how: "routine", text })
+          },
+          undefined,
+          { memories: true },
+        )
+        const said: Array<string | undefined> = []
+        for (const heard of Object.keys(routines)) {
+          yield* made.dictate(heard)
+          said.push(made.spoken().at(-1))
+        }
+        return {
+          said,
+          spoken: made.spoken().join(" "),
+          kept: (yield* made.memories!.list).map(({ name, text }) => `${name}: ${text}`),
+          journal: JSON.stringify(yield* made.journal.since(0)),
+        }
+      }),
+    )
+    expect(result.said.slice(0, 4)).toEqual(Object.keys(refused).map(() => "I won't keep that, sir. It looks like a secret."))
+    expect(result.kept).toEqual(Object.values(kept))
+    for (const value of ["4827", "hunter2", "abc123"]) {
+      expect(result.spoken).not.toContain(value)
+      expect(result.journal).not.toContain(value)
+    }
+  })
+
   test("a secret the model's answer says back is said, but kept in the journal and logged nowhere", async () => {
     const lines: Array<string> = []
     const logger = Logger.make(({ message }) => {

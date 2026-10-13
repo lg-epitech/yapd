@@ -2456,6 +2456,30 @@ const strongCredentials = [
 const namesStrongly = (words: string) => strongCredentials.some((pattern) => pattern.test(words))
 
 /**
+ * Any word that names one, or may well, in any case: a password, as it's
+ * said or as Whisper writes it down, a pass, a PIN, a login, creds, a key, a
+ * token, a secret, a code or a cookie, never the code an app's name ends in,
+ * like T3 Code's; and the rest of its word and the three words after it.
+ */
+const nearCredential = new RegExp(
+  String.raw`(?<![a-z0-9])(?:${[
+    String.raw`pass(?:words?|wds?|codes?|phrases?|es)?|pass[ -]phrases?|pwords?|pwds?|pws?`,
+    String.raw`p(?:\. ?| )i(?:\. ?| )n\.?|pins?|log-?ins?|credentials?|creds`,
+    String.raw`keys?|tokens?|secrets?|(?<!\b(?:${T3Actions.codeApps}) )codes?|cookies?`,
+  ].join("|")})(?![a-z0-9])(?=(\S*(?:\s+\S+){0,3}))`,
+  "gi",
+)
+
+/**
+ * Whether what's said has a word that names one with a value close after it,
+ * as a word with a digit in it within three words, like "the pin 4827", "the
+ * login hunter2" or "set the token to hunter2": taken for one whenever it
+ * could be, so "rotate the deploy key for Node 22" is too. A value as
+ * `givesValue` has it is one anywhere.
+ */
+const nearValue = (words: string) => [...words.matchAll(nearCredential)].some(({ 1: after }) => /\d/.test(after!))
+
+/**
  * Whether what he asked to be kept in mind may give a secret away, in all he
  * said or in what the model made of it. A fact is refused broadly, since a
  * secret kept is in every prompt: one that gives a value or mentions a
@@ -2463,15 +2487,16 @@ const namesStrongly = (words: string) => strongCredentials.some((pattern) => pat
  * word that names it, like "the garage opens with 4827", gets through. A
  * routine's steps are words to an agent, where a code, a key or a token is
  * everyday, as in "when I say ship, push the code", so a routine is refused
- * for what gives a value, or for naming what only ever is one, like a
- * password, a PIN or a door code, value or not. It's refused as a secret
+ * for what gives a value, for naming what only ever is one, like a password,
+ * a PIN or a door code, value or not, or for any word that names one with a
+ * digit close after it, like "the API key abc123". It's refused as a secret
  * before anything else would turn it down, since only that keeps his words
  * out of the journal.
  */
 export const secretive = (choice: Pick<Decision, "how" | "text">, utterance: Pick<Assistant.Utterance, "heard" | "whole">) => {
   const routine = choice.how === "routine" && routineOf(choice.text) !== undefined
   return [utterance.heard, utterance.whole ?? "", choice.text].some(
-    (words) => givesValue(words) || (routine ? namesStrongly(words) : mentionsCredential(words)),
+    (words) => givesValue(words) || (routine ? namesStrongly(words) || nearValue(words) : mentionsCredential(words)),
   )
 }
 
