@@ -11976,11 +11976,22 @@ describe("Assistant memories", () => {
           }
         }),
       )
-    // Its name before its steps or after them, with a word to yapd around them, as he said them.
-    const kept = { said: "Noted, sir. Ship: merge the PR, then deploy.", kept: ["ship: merge the PR, then deploy"], sent: [] }
-    for (const heard of ["When I say ship, merge the PR, then deploy.", "Merge the PR, then deploy, when I say ship, thanks.", "Please, when I say ship, merge the PR, then deploy."]) {
-      expect([heard, await saving(heard)]).toEqual([heard, kept])
+    // Its name before its steps or after them, with a word to yapd around them, the steps kept as he said them.
+    const kept = (steps: string) => ({ said: `Noted, sir. Ship: ${steps}.`, kept: [`ship: ${steps}`], sent: [] })
+    for (const [heard, steps] of [
+      ["When I say ship, merge the PR, then deploy.", "merge the PR, then deploy"],
+      ["Merge the PR, then deploy, when I say ship, thanks.", "Merge the PR, then deploy"],
+      ["Please, when I say ship, merge the PR, then deploy.", "merge the PR, then deploy"],
+    ] as const) {
+      expect([heard, await saving(heard)]).toEqual([heard, kept(steps)])
     }
+    // Only as he said them, symbols and all: the model's "C" for his "C++" keeps nothing, which would go to an agent as he never said it.
+    expect(await saving("When I say refactor, use C++ for the parser.", "refactor: use C for the parser")).toEqual({
+      said: "I couldn't keep the steps in your own words, sir: I didn't hear 'C' from you, so I didn't save it.",
+      kept: [],
+      sent: [],
+    })
+    expect(await saving("When I say refactor, use C++ for the parser.", "refactor: use C++ for the parser")).toMatchObject({ kept: ["refactor: use C++ for the parser"] })
     // His words, but not all he said of them: a don't or an if they leave out, or another request with them, which isn't done either.
     const refused = "I couldn't keep the steps in your own words, sir. Say it as one request: when I say ship, then the steps."
     for (const heard of [
@@ -12012,11 +12023,21 @@ describe("Assistant memories", () => {
       sent: [],
     })
     expect(await saving("When I say let's ship it, merge the PR.", "let's ship it: merge the PR")).toMatchObject({ kept: ["let's ship it: merge the PR"] })
-    // A fact is kept as his words wherever they are in what he said, with the rest of it done after.
-    expect(await saving("Remember that rig runs the nightly, and tell the Mina one to rebase.", "rig runs the nightly", "fact")).toMatchObject({
-      kept: ["rig runs the nightly"],
-      sent: ["Rebase."],
+    // A fact is all he said, as he said it, but for a "remember that": the model's "C" for his "C++" keeps nothing, nor does what leaves
+    // out a "never", or another request with it, which isn't done either.
+    expect(await saving("Remember that rig uses C++ for the parser.", "rig uses C for the parser", "fact")).toEqual({
+      said: "I couldn't keep that in your own words, sir: I didn't hear 'C' from you, so I didn't save it.",
+      kept: [],
+      sent: [],
     })
+    const alone = "I couldn't keep that in your own words, sir. Say it as one request: remember that, then the fact."
+    expect(await saving("Remember that we never use C++ for the parser.", "use C++ for the parser", "fact")).toEqual({ said: alone, kept: [], sent: [] })
+    expect(await saving("Remember that rig runs the nightly, and tell the Mina one to rebase.", "rig runs the nightly", "fact")).toEqual({
+      said: `${alone} I left the rest: tell the Mina one to rebase.`,
+      kept: [],
+      sent: [],
+    })
+    expect(await saving("Okay, remember that Rig uses C++ for the parser, thanks.", "rig uses C++ for the parser", "fact")).toMatchObject({ kept: ["Rig uses C++ for the parser"] })
   })
 
   test("a routine's steps go only when he says its whole name, whichever the model picks, said or in his preferences", async () => {

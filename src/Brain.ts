@@ -1970,7 +1970,81 @@ export const asSaid = (words: string, said: string) => {
 }
 
 /** Words to yapd that may come around all he asked for, as words compare, and are no part of it. */
-const aside = "(?:remember that|remember|note that|please|thanks|thank you|sir|jarvis|okay|ok)"
+const asides = ["remember that", "remember", "note that", "please", "thanks", "thank you", "sir", "jarvis", "okay", "ok"]
+const aside = `(?:${asides.join("|")})`
+
+/**
+ * Words as they compare once what they say is all that counts: in any case,
+ * spacing and quotes, but without a mark that only ends a word, like a comma
+ * or a full stop; a symbol is never left out, so "C++" is never "C", nor
+ * ".NET" "NET".
+ */
+export const worded = (text: string) =>
+  text
+    .toLowerCase()
+    .replace(/[\u2018\u2019\u201b]/gu, "'")
+    .replace(/[\u201c\u201d\u201e]/gu, '"')
+    .replace(/[,;:!?.\u2026]+(?=\s|$)/gu, "")
+    .replace(/\s+/gu, " ")
+    .trim()
+
+/** What's between words as speech recognition writes them and no part of any: a space, or a mark that ends one, never a symbol like the "." of ".NET". */
+const gap = String.raw`\s|[,;:!?\u2026]|\.(?![\p{L}\p{N}])`
+
+/** Any of `phrases` in words as they're written, as whole words, whatever marks are between them. */
+const phrased = (phrases: ReadonlyArray<string>) =>
+  String.raw`(?<![\p{L}\p{N}])(?:${phrases.map((phrase) => phrase.split(" ").join(String.raw`[^\p{L}\p{N}]+`)).join("|")})(?![\p{L}\p{N}])`
+
+/** All of some words as they're written that are only `phrases`, and the spaces and marks between them. */
+const only = (phrases: ReadonlyArray<string>) => new RegExp(`^(?:${gap}|${phrased(phrases)})*$`, "iu")
+
+/**
+ * His words in `said` that the model's `words` say the same as, symbols and
+ * all, as speech recognition wrote them: all of `said` but for as many words
+ * to yapd at either end, `before` and `after` it, as the model left out,
+ * never any other, nor the spaces and marks around it. None when no such
+ * part of it says the same.
+ */
+const inHisWords = (said: string, words: string, before: ReadonlyArray<string>, after: ReadonlyArray<string>) => {
+  const wanted = worded(words)
+  const [leading, trailing] = [only(before), only(after)]
+  const breaks = [0, ...Array.from(said.matchAll(/\s+/gu), (space) => [space.index, space.index + space[0].length]).flat(), said.length]
+  const starts = breaks.filter((at) => leading.test(said.slice(0, at)))
+  const ends = breaks.filter((at) => trailing.test(said.slice(at)))
+  for (const start of starts) {
+    for (const end of ends) {
+      const part = said.slice(start, end)
+      if (end > start && worded(part) === wanted) return part.replace(new RegExp(`^(?:${gap})+|(?:${gap})+$`, "gu"), "")
+    }
+  }
+  return undefined
+}
+
+/**
+ * A fact as he said it, which the model's `fact` says the same as: all he
+ * said but for a "remember that" and words to yapd around it, marks and
+ * symbols kept. So what's kept is all he asked to be, never less of it, like
+ * his "we never use C++" without its "never", nor more.
+ */
+const spokenFact = (said: string, fact: string) => inHisWords(said, fact, asides, asides)
+
+/**
+ * A routine's steps as he said them, which the model's `steps` say the same
+ * as: all he said after where he paused after its name, or before "when I
+ * say" when he said its name last, but for words to yapd around them, marks
+ * and symbols kept. None when he said no name, or nothing after it.
+ */
+const spokenSteps = (said: string, steps: string) => {
+  const found = calling.exec(said)
+  if (found === null) return undefined
+  const before = said.slice(0, found.index)
+  if (!only([...asides, "so"]).test(before)) return inHisWords(before, steps, [...asides, "so"], [...asides, "then"])
+  const after = said.slice(found.index + found[0].length)
+  // From the first word of its name to his pause, as `spokenName` reads it.
+  const named = after.slice(Math.max(0, after.search(/[\p{L}\p{N}]/u)))
+  const pause = named.search(/[,;:.?!]/u)
+  return pause < 0 ? undefined : inHisWords(named.slice(pause), steps, [...asides, "then"], asides)
+}
 
 /**
  * Whether a routine is all he asked for, word for word: as words compare,
@@ -2001,8 +2075,12 @@ export const wholeRoutine = (routine: { readonly name: string; readonly steps: s
  * order. Only to tell him, never to keep anything.
  */
 export const unheard = (words: string, said: string) => {
-  const his = new Set(Ledger.digest(said).split(" "))
-  const theirs = words.split(/[^\p{L}\p{N}]+/u).filter((word) => word !== "" && !his.has(word.toLowerCase()))
+  // Symbols and all, so his "C++" never stands for the model's "C".
+  const his = new Set(worded(said).split(" "))
+  const theirs = words
+    .split(/\s+/u)
+    .map((word) => word.replace(/[,;:!?.\u2026]+$/u, ""))
+    .filter((word) => word !== "" && !his.has(worded(word)))
   const missing = theirs.filter((word, index) => theirs.findIndex((other) => other.toLowerCase() === word.toLowerCase()) === index)
   return missing.length === 0 || missing.length > 3 ? undefined : missing.join(" ")
 }
@@ -2046,6 +2124,8 @@ const rememberLines = (lines: Pick<Lines, "address">) => {
   const which = (missing: string | undefined) => (missing === undefined ? "," : `: I didn't hear '${missing}' from you,`)
   return {
     words: (missing?: string) => `I couldn't keep that in your own words${sir}${which(missing)} so I didn't save it.`,
+    // His words, but with more than what the model would keep, it's how to say it so they're all of it.
+    alone: `I couldn't keep that in your own words${sir}. Say it as one request: remember that, then the fact.`,
     steps: (missing?: string) => `I couldn't keep the steps in your own words${sir}${which(missing)} so I didn't save it.`,
     // His words, but with more than the steps, it's how to say it so they're all of it, by its name as he said it.
     whole: (name?: string) => `I couldn't keep the steps in your own words${sir}. Say it as one request: when I say ${name ?? "its name"}, then the steps.`,
@@ -2263,8 +2343,19 @@ export const check = (given: Decision, situation: Situation, lines: Lines): Chec
         if ((situation.memories?.written ?? []).some(({ name }) => name.toLowerCase() === routine.name.toLowerCase())) return { _tag: "Say", spoken: said.written }
         if (answersTo(routine.name)) return { _tag: "Say", spoken: said.answered }
       }
-      // About him, never a thread.
-      return doing({ decision: { ...choice, target: "" }, target: Option.none() })
+      // About him, never a thread. What's kept is his words, never the model's: a routine's steps as he said them after its name's pause,
+      // or before "when I say", and a fact as all he said but for a "remember that" and words to yapd around it, every mark and symbol
+      // kept. The model's words only have to say the same, symbols and all, so its "C" for his "C++" keeps nothing, as does a fact said
+      // with more than it, like another request in the same breath, or a "never" it leaves out.
+      if (utterance.echo !== undefined || heard === "") return doing({ decision: { ...choice, target: "" }, target: Option.none() })
+      const his = routine === undefined ? spokenFact(heard, text) : spokenSteps(heard, text)
+      if (his === undefined) {
+        const missing = unheard(text, heard)
+        if (routine !== undefined) return { _tag: "Say", spoken: said.steps(missing) }
+        // All of it his, symbols and all, but not all he said.
+        return { _tag: "Say", spoken: missing === undefined && ` ${worded(heard)} `.includes(` ${worded(text)} `) ? said.alone : said.words(missing) }
+      }
+      return doing({ decision: { ...choice, target: "", text: routine === undefined ? his : `${routine.name}: ${his}` }, target: Option.none() })
     }
     case "show":
       switch (choice.how) {
@@ -2451,7 +2542,7 @@ const contract = `Reply with only a JSON object with the keys "act", "target", "
 - "mode": he wants you to change how and when you talk. "how" is "focus" to say only what needs him for a while, "quiet" for the night, like "goodnight", "I'm off to bed" or "turn yourself off", which also says only what needs him, "normal" when he's back, like "I'm back" or "you can talk normally again", which gives him the catch-up, "brief" to say only headlines again, like "talk shorter", or "full" to say every update in full, like "give me everything" or "stop giving me the short version". "when" is when focus or quiet ends, if he says, worked out from NOW as his clock reads it, "YYYY-MM-DDTHH:mm", like three o'clock today for "till three". It's about you, never a message for a thread, and never "mute", which is one thread. "stop", "quiet" or "be quiet" on their own only mean stop talking: "dismiss".
 - "remind": he wants to be told something later. At a time: "how" is "at", and "when" the time worked out from NOW, as his clock reads it, "YYYY-MM-DDTHH:mm" with no offset, like "2026-10-12T15:00" for three this afternoon. Or once a thread finishes its turn, "how" "finished", or asks him something, "how" "asked", with "target" that thread. "text" is what to tell him then, in a few words, like "call the bank", or "" when it's only that the thread finished or asks. "rest" keeps its meaning: what he wants done now, in the same breath, like "and tell the Mina one to rebase". Not "send" with "after", which tells the thread itself once it's done; something he wants offered to a thread then is "offer". You don't watch pull requests: told to say when one's checks pass or it's merged, "answer" that you don't.
 - "offer": he wants you to offer, at a time or when a thread finishes or asks him something, to send a thread a message. "how" and "when" as for "remind"; "target" is the thread told, and the one watched; "text" is the message as "send" writes it. yapd asks him then, and only his yes sends it. One that watches one thread and tells another, you can't: "answer" so.
-- "remember": he wants you to keep something in mind from now on. "how" is "fact" for something that's so about him or his work, like "remember that rig's T3 Code runs the nightly", with "text" the fact copied from what he said word for word, mistakes and all, like "rig's T3 Code runs the nightly". Or "routine" for steps to send a thread whenever he says a name, like "when I say review it, have Sol review it until it's clean", with "text" "name: steps", each copied from what he said word for word, like "review it: have Sol review it until it's clean". The name is only what he'll say for it, three words at most, and all else he asked of the steps is in them. The name ends where he paused, at the first comma, colon or full stop after "when I say" in his words. Either is copied as it came through, names too: what "hearing" says of misheard names never applies to it, and a word you put right isn't his, so nothing is kept. A routine's steps go to an agent as they're kept, so when a name in them came through as another word, like "Saul" for Sol, keep nothing: "answer" that the name didn't come through as he said it, and that a routine typed in his preferences keeps it as he writes it. Said again with other steps, it's the same name: yapd changes it. "target" is "". Being told something at a time, or once a thread does something, is "remind".
+- "remember": he wants you to keep something in mind from now on. "how" is "fact" for something that's so about him or his work, like "remember that rig's T3 Code runs the nightly", with "text" the fact copied from what he said word for word, mistakes and symbols and all, like "rig's T3 Code runs the nightly". Or "routine" for steps to send a thread whenever he says a name, like "when I say review it, have Sol review it until it's clean", with "text" "name: steps", each copied from what he said word for word, like "review it: have Sol review it until it's clean". The name is only what he'll say for it, three words at most, and all else he asked of the steps is in them. The name ends where he paused, at the first comma, colon or full stop after "when I say" in his words. Either is copied as it came through, names too: what "hearing" says of misheard names never applies to it, and a word you put right isn't his, so nothing is kept. A routine's steps go to an agent as they're kept, so when a name in them came through as another word, like "Saul" for Sol, keep nothing: "answer" that the name didn't come through as he said it, and that a routine typed in his preferences keeps it as he writes it. Said again with other steps, it's the same name: yapd changes it. "target" is "". Being told something at a time, or once a thread does something, is "remind".
 - "forget": he wants one of REMINDERS cancelled, or one of MEMORIES forgotten. "target" is its handle there, like r2, k1 or p3. "sure" is "high" when his words point at one of them; when another fits nearly as well, it's lower, with the rest in "others". Of REMINDERS, yapd asks him which, like between two that say the same. Of MEMORIES, one is forgotten only when his words point at it: otherwise yapd tells him it couldn't tell which, and asks nothing. "Forget it" or "never mind" on its own is "dismiss".
 - This you can't do yet, but name it when it's what he wants, with "target" and "text" filled in, and yapd tells him: "tidy" a thread away, like archiving or renaming it.`
 
