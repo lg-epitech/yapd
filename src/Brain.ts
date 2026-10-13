@@ -10,6 +10,7 @@ import { Model } from "./Model.ts"
 import * as Mutes from "./Mutes.ts"
 import { addressed, type Lines, unaddressed } from "./Persona.ts"
 import * as Questions from "./Questions.ts"
+import type * as Reminders from "./Reminders.ts"
 import { agreed, enough, gist, hallucinated, type Line, morePlease, noted } from "./Responder.ts"
 import * as T3Actions from "./T3Actions.ts"
 import * as Threads from "./Threads.ts"
@@ -28,14 +29,17 @@ export const Act = Schema.Literal(
   "decide", "reply",
   "mode",
   "catchup",
-  "remember", "forget", "remind", "tidy",
+  "remember", "forget", "remind", "offer", "tidy",
   "show",
   "mute",
 )
 export type Act = typeof Act.Type
 
 /** What it can do so far. The rest are understood, and answered with "not yet". */
-export const enabled: ReadonlySet<Act> = new Set<Act>(["dismiss", "resume", "answer", "look", "find", "again", "clarify", "start", "send", "stop", "undo", "decide", "reply", "show", "mute", "mode", "catchup"])
+export const enabled: ReadonlySet<Act> = new Set<Act>([
+  "dismiss", "resume", "answer", "look", "find", "again", "clarify", "start", "send", "stop", "undo", "decide", "reply", "show", "mute", "mode", "catchup",
+  "remind", "offer", "forget",
+])
 
 /** Acts that only read, which go ahead on a fair guess and say which thread they took. Catching up only reads what yapd kept. */
 const reads: ReadonlySet<Act> = new Set<Act>(["answer", "look", "find", "show", "catchup"])
@@ -49,9 +53,10 @@ const writes: ReadonlySet<Act> = new Set<Act>(["send", "stop", "undo", "decide",
 /**
  * Acts that are only done on his word, which may not be his when it's faint
  * or said over yapd's own voice: whatever changes a thread, muting one, which
- * changes nothing there but what he hears of it, and changing how yapd talks.
+ * changes nothing there but what he hears of it, changing how yapd talks, and
+ * setting, offering or cancelling what he's to be told later.
  */
-const ownWord = (act: Act) => writes.has(act) || act === "mute" || act === "mode"
+const ownWord = (act: Act) => writes.has(act) || act === "mute" || act === "mode" || act === "remind" || act === "offer" || act === "forget"
 
 /** Whether it's a write said over something with too little speech to be his: talk or noise nearby, never acted on, nor taken as an answer. */
 export const murmured = (decided: Pick<Decision, "act">, utterance: Pick<Assistant.Utterance, "via" | "voiced">) =>
@@ -77,12 +82,12 @@ export const Decision = Schema.Struct({
   pending: Schema.Literal("answers", "replaces", ""),
   /** send: now|after|restart · decide: accept|session|decline · again: same|more|instead|which · dismiss: later
    *  · reply: skip · find: threads|journal · mute: mute|unmute|clear|undo · catchup: more|muted
-   *  mode: focus|quiet|normal|brief|full · remember: fact|routine · remind: at|finished|asked|checks|merged
+   *  mode: focus|quiet|normal|brief|full · remember: fact|routine · remind and offer: at|finished|asked
    *  tidy: archive|unarchive|rename|snooze|settle|pin · show: threads|thread|pr|usage|missed|said|hide|memories */
   how: Schema.String,
-  /** ISO 8601 with offset, for remind/snooze/mode until, or when a mute ends; "" otherwise. */
+  /** As his clock reads it, "YYYY-MM-DDTHH:mm" with no offset, for remind, offer, snooze, mode until, when a mute ends or since when; "" otherwise. */
   when: Schema.String,
-  /** send: the message as he'd type it · reply: the answer to the part being asked, several options one a line · remember: the fact,
+  /** send and offer: the message as he'd type it · reply: the answer to the part being asked, several options one a line · remember: the fact,
    *  or "name: steps" for a routine · remind: what to say · tidy rename: the title · find: the words to search
    *  · start: the request in his words. */
   text: Schema.String,
@@ -105,6 +110,13 @@ export const decision = (given: Partial<Decision> & Pick<Decision, "act">): Deci
   rest: "",
   ...given,
 })
+
+/** A reminder he just set, or cancelled, kept in mind for "scratch that". */
+export interface Noted {
+  readonly at: number
+  readonly kind: "reminder" | "forgot"
+  readonly id: number
+}
 
 /** All the brain goes by, gathered from memory before it's asked. */
 export interface Situation {
@@ -134,6 +146,10 @@ export interface Situation {
   readonly asked: ReadonlyArray<string>
   /** What yapd last did for him in the last two minutes, whatever it was, which "scratch that" means. */
   readonly acted: Option.Option<Ledger.Row>
+  /** What he asked to be told later and is still to come, newest first. */
+  readonly reminders?: ReadonlyArray<Reminders.Reminder>
+  /** The reminder he last set or cancelled, in the last two minutes, which "scratch that" means when it's the newest change he made. */
+  readonly noted?: Option.Option<Noted>
   readonly now: number
   /** The title of the card on his screen, while an app is there to show it. */
   readonly showing?: string
@@ -1588,17 +1604,12 @@ const glimpsed = (situation: Situation, lines: Lines): Decision | undefined => {
   if (stopping.has(said) && Option.isSome(on) && stoppable(on.value) && !optioned) {
     return decision({ act: "stop", target: on.value.handle, pending: replacing })
   }
-  // With a question open, "cancel that" is a no to it. A mute made since whatever else yapd last did is what it takes back.
-  const muteChange = situation.muteChange
-  if (
-    scratching.has(said) &&
-    Option.isNone(open) &&
-    Option.isSome(muteChange) &&
-    Option.match(situation.acted, { onNone: () => true, onSome: ({ at }) => muteChange.value.at >= at })
-  ) {
-    return decision({ act: "mute", how: "undo" })
-  }
-  if (scratching.has(said) && Option.isNone(open) && Option.isSome(situation.acted)) {
+  // With a question open, "cancel that" is a no to it. Otherwise it takes back the newest change he made: a mute, a reminder he set or
+  // cancelled, or whatever else yapd last did.
+  const latest = newest(situation)
+  if (scratching.has(said) && Option.isNone(open) && latest === "mute") return decision({ act: "mute", how: "undo" })
+  if (scratching.has(said) && Option.isNone(open) && latest === "noted") return decision({ act: "undo" })
+  if (scratching.has(said) && Option.isNone(open) && latest === "acted" && Option.isSome(situation.acted)) {
     const acted = situation.acted.value
     const listed = desk.threads.find(({ ref }) => ref.machine === acted.machine && ref.id === acted.thread)
     return decision({ act: "undo", target: listed?.handle ?? "", how: acted.kind === "stop" ? "carry" : "" })
@@ -1682,6 +1693,57 @@ const glimpsed = (situation: Situation, lines: Lines): Decision | undefined => {
 }
 
 // ---------------------------------------------------------------- checks
+
+/**
+ * The newest change he made that "scratch that" or "undo that" can take
+ * back, of those in the last two minutes: a mute, a reminder he set or
+ * cancelled, or whatever else yapd did for him, as the ledger has it. Made
+ * at the same time, a mute or a reminder is taken for the later, as it's
+ * noted once what it went with is done.
+ */
+export const newest = (situation: Pick<Situation, "acted" | "muteChange" | "noted">): "mute" | "noted" | "acted" | undefined => {
+  const changes = [
+    ...Option.toArray(Option.map(situation.noted ?? Option.none(), ({ at }) => ({ what: "noted" as const, at }))),
+    ...Option.toArray(Option.map(situation.muteChange, ({ at }) => ({ what: "mute" as const, at }))),
+    ...Option.toArray(Option.map(situation.acted, ({ at }) => ({ what: "acted" as const, at }))),
+  ]
+  return changes.reduce<(typeof changes)[number] | undefined>((latest, change) => (latest === undefined || change.at > latest.at ? change : latest), undefined)?.what
+}
+
+/** A time the model gave, as his clock reads it, or with an offset; NaN for anything else. */
+export const instant = Mutes.instant
+
+/** What a reminder goes by in REMINDERS, for the model to name it: r1, r2, by where it's listed. */
+export const remindedHandle = (index: number) => `r${index + 1}`
+
+/** How many reminders the model is shown at most. */
+const remindersShown = 10
+
+/** The reminder a handle in REMINDERS stands for. */
+export const remindedBy = (handle: string, situation: Pick<Situation, "reminders">): Option.Option<Reminders.Reminder> => {
+  const found = /^r(\d+)$/.exec(handle.trim())
+  const index = found === null ? -1 : Number(found[1]) - 1
+  return Option.fromNullable(index >= 0 && index < remindersShown ? situation.reminders?.[index] : undefined)
+}
+
+/** How far off a reminder can be set. */
+export const furthest = 30 * 24 * 60 * 60_000
+
+/** How soon a reminder can be set for, at least: one sooner would be said before what set it. */
+const soonest = 30_000
+
+/** What's said of what can't be done about a reminder. */
+const reminderLines = (lines: Pick<Lines, "address">) => {
+  const sir = addressed(lines)
+  return {
+    when: `I couldn't tell when you meant${sir}.`,
+    past: `That time's already gone${sir}.`,
+    tooFar: `That's further out than I keep reminders${sir}.`,
+    pullRequests: `I don't watch pull requests${sir}.`,
+    nothing: `There's nothing to offer it${sir}.`,
+    asking: (called: string) => `${capital(called)} is asking you something now${sir}.`,
+  }
+}
 
 /** The handles named in a decision's "others". */
 const handles = (text: string) => text.split(/[\s,]+/).filter((handle) => /^t\d+$/.test(handle))
@@ -1807,6 +1869,33 @@ export const check = (choice: Decision, situation: Situation, lines: Lines): Che
       if (Option.isSome(target)) return choice.sure === "low" && candidates.length >= 2 ? ask(candidates) : doing({ decision: choice, target })
       // With nothing named, it's what he's on about, which only "mute it" said in so many words can mean.
       return candidates.length >= 2 ? ask(candidates) : doing({ decision: choice, target })
+    case "remind":
+    case "offer": {
+      // Said over something, too little speech is talk or noise nearby, never something to do.
+      if (murmured(choice, situation.utterance)) return doing({ decision: { ...choice, act: "resume" }, target: Option.none() })
+      const said = reminderLines(lines)
+      if (choice.how === "checks" || choice.how === "merged") return { _tag: "Say", spoken: said.pullRequests }
+      if (choice.how !== "at" && choice.how !== "finished" && choice.how !== "asked") return { _tag: "Say", spoken: lines.cantTell }
+      if (choice.act === "offer" && choice.text.trim() === "") return { _tag: "Say", spoken: said.nothing }
+      if (choice.how === "at") {
+        // Only a time of day it can tell, to come, and not too far off: whether it's the one he meant is the model's.
+        const due = instant(choice.when)
+        if (Number.isNaN(due) || !/T\d{2}:\d{2}/.test(choice.when)) return { _tag: "Say", spoken: said.when }
+        if (due - situation.now < soonest) return { _tag: "Say", spoken: said.past }
+        if (due - situation.now > furthest) return { _tag: "Say", spoken: said.tooFar }
+        if (choice.act === "remind") return doing({ decision: { ...choice, target: "" }, target: Option.none() })
+      }
+      // A thread watched, or told: the one he plainly meant, as for a message.
+      const checked = writing(choice, target, candidates, situation, lines, ask)
+      if (checked._tag !== "Do" || choice.how !== "asked") return checked
+      // Asking him something already, he's told so now, and nothing is kept.
+      const listed = Option.getOrUndefined(checked.plan.target)
+      return listed !== undefined && (listed.state === "question" || listed.state === "approval") ? { _tag: "Say", spoken: said.asking(listed.called) } : checked
+    }
+    case "forget":
+      if (murmured(choice, situation.utterance)) return doing({ decision: { ...choice, act: "resume" }, target: Option.none() })
+      // Only one of REMINDERS, by its handle there.
+      return Option.isSome(remindedBy(choice.target, situation)) ? doing({ decision: choice, target: Option.none() }) : { _tag: "Say", spoken: lines.cantTell }
     case "show":
       switch (choice.how) {
         case "thread":
@@ -1950,8 +2039,8 @@ export const readable = (text: string) => unreadable.every(([pattern]) => text.s
 const contract = `Reply with only a JSON object with the keys "act", "target", "sure", "spoken", "others", "machine", "pending", "how", "when", "text" and "rest", in that order. Every key is always there: "" where it doesn't apply.
 
 "act", what he wants:
-- "answer": he asked something you can answer from THREADS, WAITING ON YOU, LATELY, UNHEARD and USAGE, or from what you know yourself. "spoken" is the answer. "target" is the thread it's about, if it's about one.
-- "catchup": he wants to hear what he hasn't heard or missed, or what came in while he was away or had you off, about everything or one thread, project or machine, however he puts it, even when UNHEARD could answer it. yapd gathers it from what it kept and briefs him; only yapd knows what he has heard. "target" is a handle from THREADS, UNHEARD or MUTED for one thread, a muted one too; "text" is a project as written in UNHEARD, for all of it; "machine" is one machine; "when" is ISO 8601 with offset for "since …"; leave them "" for everything, which leaves out the threads he muted. "how" is "more" when he wants more of the catch-up he just heard, "muted" for what his muted threads said. "spoken" is "". A question about it that isn't asking to be caught up, like whether a thread finished or how much he missed, is "answer" from UNHEARD. Catching up is only ever about what he hears: telling a thread something, even put as catching it up, bringing it up to speed or filling it in on a decision, is "send" to that thread.
+- "answer": he asked something you can answer from THREADS, WAITING ON YOU, LATELY, UNHEARD, USAGE and REMINDERS, or from what you know yourself. "spoken" is the answer. "target" is the thread it's about, if it's about one.
+- "catchup": he wants to hear what he hasn't heard or missed, or what came in while he was away or had you off, about everything or one thread, project or machine, however he puts it, even when UNHEARD could answer it. yapd gathers it from what it kept and briefs him; only yapd knows what he has heard. "target" is a handle from THREADS, UNHEARD or MUTED for one thread, a muted one too; "text" is a project as written in UNHEARD, for all of it; "machine" is one machine; "when" is the time for "since …", as his clock reads it, "YYYY-MM-DDTHH:mm"; leave them "" for everything, which leaves out the threads he muted. "how" is "more" when he wants more of the catch-up he just heard, "muted" for what his muted threads said. "spoken" is "". A question about it that isn't asking to be caught up, like whether a thread finished or how much he missed, is "answer" from UNHEARD. Catching up is only ever about what he hears: telling a thread something, even put as catching it up, bringing it up to speed or filling it in on a decision, is "send" to that thread.
 - "look": he asked what a thread is doing right now, or for detail none of the lines below give. "target" is the thread; "spoken" is empty. You'll be shown what it's doing and asked again.
 - "find": he named something specific that nothing in THREADS fits, or asked what was said or done a while ago. "text" is the words to search for, "how" is "threads" to search what was written in the threads, or "journal" for what you heard and said. You'll be shown what's found and asked again.
 - "again": he wants to hear what you said last again. "how" is "same"; "spoken" is that line.
@@ -1959,15 +2048,18 @@ const contract = `Reply with only a JSON object with the keys "act", "target", "
 - "start": new work: a change, a fix, an investigation, a review, a question that needs the web, the code or time. "text" is the request in his words. yapd works out where it goes and starts it.
 - "send": a message for a thread, like an instruction, a correction or an answer to what it asked. "target" is the thread, "text" the message as he'd type it. "how" is "now"; "after" when he says after, once it's done or when it finishes; "restart" when he says to drop what it's doing and do this instead.
 - "stop": stop a thread's run, when he says to stop the thread, the run or the work. "target" is the thread.
-- "undo": take back what you just did for him, as LATELY shows it. "how" is "carry" when he wants a thread you stopped to carry on, "" to withdraw the message you just sent, like "scratch that". "target" is the thread, when he names one.
+- "undo": take back what you just did for him, as LATELY shows it: the message you just sent, or the reminder or offer you just set or cancelled. "how" is "carry" when he wants a thread you stopped to carry on, "" otherwise, like "scratch that". "target" is the thread, when he names one.
 - "decide": he allows, or turns down, what a thread waits for him to allow, in WAITING ON YOU or OPEN. "target" is the thread; "how" is "accept", "session" only when he says for the session or from now on, or "decline".
 - "reply": he answers a thread's question, in WAITING ON YOU or OPEN. "target" is the thread; "text" is his answer: the option he picked, as it's written, or his own words. A question in several parts is answered a part at a time: "text" answers only the part he's at, and yapd asks him the rest. "text" empty when he wants to hear a thread's question before answering: yapd reads it to him.
 - "dismiss": he wants you to stop talking, or it needs nothing: thanks, okay, an acknowledgement, or no to OPEN, unless OPEN asks a thread's question, which a no answers.
 - "resume": it wasn't meant for you: talk with someone else, noise, or words that make no sense.
-- "mute": he wants you to stop reading a thread's progress and finished work aloud, or start again. "how" "mute" or "unmute"; "target" the thread, or the handle of one in MUTED that has one, like m1, which isn't in THREADS; "when" the time it ends, if he says, as ISO 8601 with offset worked out from NOW, like an hour from now for "for an hour". What needs him still comes through. Not "mode", which is how you talk, nor "tidy", which snoozes it in T3 Code. "how" "clear" unmutes every thread.
+- "mute": he wants you to stop reading a thread's progress and finished work aloud, or start again. "how" "mute" or "unmute"; "target" the thread, or the handle of one in MUTED that has one, like m1, which isn't in THREADS; "when" the time it ends, if he says, worked out from NOW as his clock reads it, "YYYY-MM-DDTHH:mm", like an hour from now for "for an hour". What needs him still comes through. Not "mode", which is how you talk, nor "tidy", which snoozes it in T3 Code. "how" "clear" unmutes every thread.
 - "show": he wants to see something on his screen, or to stop seeing it. "how" is "threads" for what's going on across his threads, "thread" for one thread, "pr" for a thread's pull request, which opens it in his browser too, "usage" for his limits, "missed" for what he hasn't heard, "said" for what you said last, or "hide" to take down what's on his screen. "target" is the thread for "thread" and "pr". yapd says what's on it.
-- "mode": he wants you to change how and when you talk. "how" is "focus" to say only what needs him for a while, "quiet" for the night, like "goodnight", "I'm off to bed" or "turn yourself off", which also says only what needs him, "normal" when he's back, like "I'm back" or "you can talk normally again", which gives him the catch-up, "brief" to say only headlines again, like "talk shorter", or "full" to say every update in full, like "give me everything" or "stop giving me the short version". "when" is when focus or quiet ends, if he says, as ISO 8601 with offset worked out from NOW, like three o'clock today for "till three". It's about you, never a message for a thread, and never "mute", which is one thread. "stop", "quiet" or "be quiet" on their own only mean stop talking: "dismiss".
-- These you can't do yet, but name them when they're what he wants, with "target" and "text" filled in, and yapd tells him: "remember" or "forget" something; "remind" him later, or do something once a thread finishes; "tidy" a thread away, like archiving or renaming it.`
+- "mode": he wants you to change how and when you talk. "how" is "focus" to say only what needs him for a while, "quiet" for the night, like "goodnight", "I'm off to bed" or "turn yourself off", which also says only what needs him, "normal" when he's back, like "I'm back" or "you can talk normally again", which gives him the catch-up, "brief" to say only headlines again, like "talk shorter", or "full" to say every update in full, like "give me everything" or "stop giving me the short version". "when" is when focus or quiet ends, if he says, worked out from NOW as his clock reads it, "YYYY-MM-DDTHH:mm", like three o'clock today for "till three". It's about you, never a message for a thread, and never "mute", which is one thread. "stop", "quiet" or "be quiet" on their own only mean stop talking: "dismiss".
+- "remind": he wants to be told something later. At a time: "how" is "at", and "when" the time worked out from NOW, as his clock reads it, "YYYY-MM-DDTHH:mm" with no offset, like "2026-10-12T15:00" for three this afternoon. Or once a thread finishes its turn, "how" "finished", or asks him something, "how" "asked", with "target" that thread. "text" is what to tell him then, in a few words, like "call the bank", or "" when it's only that the thread finished or asks. "rest" keeps its meaning: what he wants done now, in the same breath, like "and tell the Mina one to rebase". Not "send" with "after", which tells the thread itself once it's done; something he wants offered to a thread then is "offer". You don't watch pull requests: told to say when one's checks pass or it's merged, "answer" that you don't.
+- "offer": he wants you to offer, at a time or when a thread finishes or asks him something, to send a thread a message. "how" and "when" as for "remind"; "target" is the thread told, and the one watched; "text" is the message as "send" writes it. yapd asks him then, and only his yes sends it. One that watches one thread and tells another, you can't: "answer" so.
+- "forget": he wants one of REMINDERS cancelled. "target" is its handle there, like r2. "Forget it" or "never mind" on its own is "dismiss".
+- These you can't do yet, but name them when they're what he wants, with "target" and "text" filled in, and yapd tells him: "remember" something; "tidy" a thread away, like archiving or renaming it.`
 
 const hearing = `What he says comes through speech recognition, and names get mangled. A word that doesn't fit the sentence, or sounds like nothing he'd say, is most likely a name misheard: a thread's subject, a project, a machine or a model in THREADS or OTHER THREADS that sounds like it, like a coin, a client or a tool he works on coming out as an everyday word or a made-up one. Weigh such a word above the ordinary ones around it, like "migration" or "status", which fit many threads. His own words get mangled the same way: "appd" and "YAPT" are yapd, "Wig" is rig, "Saul" is Sol, "masterwork tree" is master worktree, "poll request" is pull request. Match threads by how they sound and by what the work is about, never by spelling. Short words like "no", "now", "on" and "not" are the least reliable of all.`
 
@@ -1985,7 +2077,7 @@ When OPEN asks yes or no to doing something, it says what a yes does. A plain ye
 When OPEN asks a thread's question, a no is its answer, never "dismiss": the option it comes to, like "Leave the changelog", or his own words, like "No".`
 
 const answering = `Answers:
-- Answer from THREADS, WAITING ON YOU, LATELY, UNHEARD and USAGE. Never make up a state: say what you don't know.
+- Answer from THREADS, WAITING ON YOU, LATELY, UNHEARD, USAGE and REMINDERS. Never make up a state: say what you don't know.
 - Use "look" only for what's happening right now, or for detail the lines don't have.
 - Plain knowledge you answer yourself. Anything that needs the web, the code or time is "start".
 - When you picked the thread from several, or weren't sure, start by naming it by what it's about, so he can put you right.
@@ -2003,7 +2095,7 @@ const safety = `Safety:
 
 const speaking = `"spoken", for answer, look, find and again only. He's listening, not reading.
 ${aloud}
-- Empty for clarify, dismiss, resume, start, send, stop, undo, decide, reply, show, mute, mode, catchup and every act you can't do yet: yapd says what came of those itself.
+- Empty for clarify, dismiss, resume, start, send, stop, undo, decide, reply, show, mute, mode, catchup, remind, offer, forget and every act you can't do yet: yapd says what came of those itself.
 - Never ask him anything or offer to do something, like "Shall I…?" or "Want me to…?": yapd asks its own questions.
 - Never a handle like t4: say what the thread is about.`
 
@@ -2147,7 +2239,12 @@ export const past = (at: number, now: number) => {
 const missedShown = 15
 
 /** What a thread he missed is called, for the model and in a brief: as the desk calls it, or by its project. */
-export const missedName = (group: Pick<Missed.Group, "called" | "project">) => group.called || group.project || "a session"
+export const missedName = (group: Pick<Missed.Group, "called" | "project"> & { readonly rows?: ReadonlyArray<Pick<Kept, "detail">> }) => {
+  const detail = group.rows?.[0]?.detail as { readonly reminder?: unknown; readonly usage?: unknown } | null | undefined
+  // What's about no thread or session, like a reminder or how much of a limit is used, by what it is.
+  const own = typeof detail !== "object" || detail === null ? undefined : detail.reminder !== undefined ? "a reminder" : detail.usage !== undefined ? "your usage" : undefined
+  return group.called || group.project || own || "a session"
+}
 
 /** How he missed what he did of a thread, in a few words each: what needs him, what came while yapd was off, and so on. */
 const how = (group: Missed.Group) =>
@@ -2223,6 +2320,29 @@ const entry = (desk: Threads.Desk, now: number) => (kept: Kept) => {
     }
   })()
   return `- ${lasted(now - kept.at)} ago, ${what}`
+}
+
+/**
+ * What he asked to be told later, as the model sees it, newest first, each by
+ * its handle, what it's about in his own words as the model put them, and
+ * when: at a time, or once a thread finishes or asks him something.
+ */
+const reminding = (reminders: ReadonlyArray<Reminders.Reminder>, desk: Threads.Desk, now: number) => {
+  if (reminders.length === 0) return "REMINDERS, what he asked you to tell him later: None."
+  const line = (reminder: Reminders.Reminder, index: number) => {
+    const handle = handleOf(desk, reminder.machine, reminder.thread)
+    const thread = `${handle === undefined ? "" : `${handle} `}${fenced(reminder.called ?? "a thread", 60)}`
+    const when =
+      reminder.event === undefined
+        ? ` due ${new Date(reminder.due ?? now).toLocaleString("en-US", { weekday: "long", month: "long", day: "numeric", hour: "numeric", minute: "2-digit" })}`
+        : reminder.event === "asked" ? ` when ${thread} asks him something` : ` when ${thread} finishes`
+    return reminder.propose !== undefined
+      ? `- ${remindedHandle(index)} offer ${fenced(reminder.propose, 160)} to ${thread}${when}`
+      : `- ${remindedHandle(index)}${reminder.text.trim() === "" ? "" : ` ${fenced(reminder.text, 160)}`}${when}`
+  }
+  const shown = reminders.slice(0, remindersShown).map(line)
+  const more = reminders.length - shown.length
+  return `REMINDERS, what he asked you to tell him later, newest first:\n${[...shown, ...(more > 0 ? [`- and ${more} more`] : [])].join("\n")}`
 }
 
 /** What an update not tied to a thread is about, as the model sees it: its project, or work outside his projects, kept with none. */
@@ -2431,7 +2551,7 @@ export const prompt = (situation: Situation, style: Option.Option<string>) => {
   return [
     instructions,
     ...Option.toArray(Option.map(style, styled)),
-    `NOW: ${date.toLocaleString("en-US", { weekday: "long", month: "long", day: "numeric", hour: "numeric", minute: "2-digit" })}.\nMACHINES: ${machines || "none seen"}${desk.away.map(({ machine, reason }) => `; ${machine} is away: ${reason}`).join("")}${
+    `NOW: ${date.toLocaleString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric", hour: "numeric", minute: "2-digit" })}.\nMACHINES: ${machines || "none seen"}${desk.away.map(({ machine, reason }) => `; ${machine} is away: ${reason}`).join("")}${
       situation.showing === undefined ? "" : `\nON HIS SCREEN: ${fenced(situation.showing, 90)}`
     }${moding(situation.mode, now)}`,
     `USAGE:\n${usageLines(situation.usage, now)}`,
@@ -2457,6 +2577,7 @@ export const prompt = (situation: Situation, style: Option.Option<string>) => {
             .join(", ")}`,
         ]),
     unheardLines(situation.missed, now, muted),
+    reminding(situation.reminders ?? [], desk, now),
     `FOCUS, what "it" means:\n${focus(situation)}${
       lines.length === 0 ? "" : `\nThis exchange so far:\n${lines.map((line) => (line.speaker === "yapd" ? `You: ${line.text}` : `He: ${line.text}${ownVoice(line)}`)).join("\n")}`
     }`,
