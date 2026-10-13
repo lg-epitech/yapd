@@ -119,6 +119,7 @@ Live on `dev` now: everything below, headline first, focus and quiet, off keepin
 - After a restart, a research thread's answer whose hook can't find its thread in time and that's rated an ordinary update is said as one, held in focus, or for the digest if rated progress, rather than as the answer to what you asked. It's kept, never lost.
 - A research answer whose hook reaches yapd more than twenty seconds after T3 Code says its turn ended, can't be tied to its thread in time and is rated slight isn't said. It's kept unheard, so a catch-up has it.
 - After a restart, if a research answer was said from its hook but couldn't be tied to its thread, and T3 Code then can't be reached for over a day, it can be said a second time once T3 Code is back.
+- If work yapd started fails while it can't hear, and you'd asked to be told when it finishes, the failure can be said twice after it reconnects: once with your reminder, and once on its own about ten seconds later.
 
 - With exactly two lines of your own for going ahead, one picked for something that never plays can let the other come twice in a row.
 - After a message was moved from the queue into the turn under way, "I sent that a minute ago. Again?" can be asked for its same words until ten minutes have passed.
