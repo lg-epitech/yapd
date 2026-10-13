@@ -3020,15 +3020,23 @@ export const make = (options: {
      * Sets aside, unheard, what a catch-up of everything would tell him now,
      * muted threads aside, as the menu counts it: never what's being told him
      * or waiting to be, which isn't missed, nor what a thread waits on him for,
-     * which isn't in a catch-up. Noted in the journal with what it set aside,
-     * as said, `line`, when it's said, and as the change he made last, which
-     * "scratch that" takes back. What came in while yapd was off isn't offered
-     * after. How many it set aside, as of `now`, when it was asked.
+     * which isn't in a catch-up. Asked by voice, by `utterance`, what he said
+     * it `over`, like a catch-up or a digest being read, by the entries it
+     * told him of, is set aside too: cut off, it's no longer being told him,
+     * whether it's dropped yet or put back. Noted in the journal with what it
+     * set aside, as said, `line`, when it's said, and as the change he made
+     * last, which "scratch that" takes back. What came in while yapd was off
+     * isn't offered after. How many it set aside, as of `now`, when it was
+     * asked.
      */
-    const clearing = (now: number, line?: (cleared: number) => string, utterance?: string) =>
+    const clearing = (
+      now: number,
+      voiced?: { readonly line: (cleared: number) => string; readonly utterance: string; readonly over: ReadonlyArray<number> },
+    ) =>
       Effect.gen(function* () {
         if (offered?.kind === "missed") offered = undefined
-        const missed = yield* Missed.gather(journal, { now, spoke: yield* lastSpoke(now), coming: yield* beingTold, desk: nowhere })
+        const coming = (yield* beingTold).filter((id) => !(voiced?.over.includes(id) ?? false))
+        const missed = yield* Missed.gather(journal, { now, spoke: yield* lastSpoke(now), coming, desk: nowhere })
         const aside = yield* journal.setAside(
           missed.groups.flatMap(({ rows }) => rows.filter((kept) => !Missed.muted(kept)).map(({ id }) => id)),
           now,
@@ -3037,8 +3045,7 @@ export const make = (options: {
         const entry = yield* journal.write({
           at: now,
           kind: "action",
-          ...(line === undefined ? {} : { said: line(aside.length) }),
-          ...(utterance === undefined ? {} : { utterance }),
+          ...(voiced === undefined ? {} : { said: voiced.line(aside.length), utterance: voiced.utterance }),
           detail: { cleared: aside.length, ids: aside },
         })
         noted = { at: now, kind: "cleared", id: Option.getOrElse(entry, () => 0), about: Option.none(), ids: aside }
@@ -3046,11 +3053,17 @@ export const make = (options: {
         return aside.length
       })
 
-    /** Clears the catch-up, as he asked by voice, and says how much it set aside, or that there was nothing to. */
+    /**
+     * Clears the catch-up, as he asked by voice, with what "it" told him of,
+     * like the catch-up or the digest he said it over, and says how much it
+     * set aside, or that there was nothing to.
+     */
     const clearingUp = (thought: Thought, said: Lines) =>
       Effect.gen(function* () {
         const lines = Brain.catchupLines(said)
-        const cleared = yield* clearing(yield* Clock.currentTimeMillis, lines.cleared, thought.utterance.id)
+        const { subject } = thought
+        const over = subject._tag === "Answer" ? (subject.missed ?? []) : []
+        const cleared = yield* clearing(yield* Clock.currentTimeMillis, { line: lines.cleared, utterance: thought.utterance.id, over })
         return cleared === 0 ? reply(lines.nothingToClear, thought.subject) : ({ ...reply(lines.cleared(cleared), thought.subject), kind: "done" } satisfies Outcome)
       })
 
@@ -4684,7 +4697,8 @@ export const make = (options: {
               saying: Effect.gen(function* () {
                 // Only now, so what one that's never said would have covered comes up in the next.
                 yield* options.modes?.briefed(until) ?? Effect.void
-                answered = { subject, at: now, turns: power.turns }
+                // "It" as it starts being said, like an answer, not as it was summed up: an update read while it waited isn't "it" over it.
+                answered = { subject, at: yield* Clock.currentTimeMillis, turns: power.turns }
                 if (entry === undefined) entry = yield* journal.write({ at: yield* Clock.currentTimeMillis, kind: "brief", said: spoken, detail: { covered } })
               }),
               // Cut off, what it covered is still his to catch up on.

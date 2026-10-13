@@ -293,6 +293,8 @@ const assistant = (
     readonly briefs?: (held: ReadonlyArray<Journal.Kept>, brief: Brain.Brief) => string | undefined
     /** Where yapd turned on or off as the menu does goes, which "Mute." and, while it's off, "unmute" by the shortcut do: nothing does without it. */
     readonly turning?: Array<boolean>
+    /** Whether what each notice told tells him of counts as being told him, as if each were still being said or waiting to be. */
+    readonly telling?: boolean
   } = {},
 ) =>
   Effect.gen(function* () {
@@ -517,6 +519,9 @@ const assistant = (
       queued: (spoken) => Effect.succeed(given.queued?.has(spoken) === true),
       skip: () => Effect.void,
       upcoming: Effect.succeed([]),
+      ...(given.telling === true
+        ? { telling: Effect.map(Effect.forEach(said, (notice) => notice.telling ?? Effect.succeed<ReadonlyArray<number>>([])), (all) => all.flat()) }
+        : {}),
       compose,
     }).pipe(
       Effect.provide(
@@ -11088,6 +11093,38 @@ describe("Assistant catching up", () => {
     // Only what it set aside comes back, never what came in since.
     expect(result.back).toEqual({ said: "Brought it back, sir.", counted: [result.first, result.second] })
     expect(result.nothing).toEqual(["Cleared, sir: two updates set aside.", "There's nothing to catch up on, sir."])
+  })
+
+  test("a clear said over a catch-up or a digest as it's read sets aside what that was telling him too, and the digest is never read after", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant((situation) => Brain.decision({ act: "catchup", how: situation.utterance.heard === "Catch me up." ? "" : "clear" }), undefined, {
+          waiting: true,
+          telling: true,
+          briefs: (rows) => `${rows.length} done, sir.`,
+        })
+        const { journal } = made
+        yield* kept(journal, 90, tezos.id, "The Tezos migration is done.")
+        yield* kept(journal, 60, mina.id, "The Mina tickets are filed.")
+        yield* made.dictate("Catch me up.")
+        yield* made.cut()
+        yield* made.followUp("Skip the catch-up.")
+        const over = { said: made.spoken().at(-1), unheard: yield* unheard(journal) }
+        // A digest that waited its turn behind an update, which a dictation cut off, put back to be read again.
+        yield* kept(journal, 30, distractors[0]!.id, "The loader is fixed.", { priority: "done", held: "focus" })
+        yield* made.digest(yield* journal.held(0))
+        const digest = made.notices().at(-1)!
+        yield* made.reading("std", "std's cache is fixed.")
+        yield* made.wait(5)
+        yield* made.ended
+        yield* made.wait(1)
+        yield* made.cut(digest)
+        yield* made.dictate("Clear the catch-up.")
+        return { over, dictated: { said: made.spoken().at(-1), unheard: yield* unheard(journal), stale: yield* digest.stale } }
+      }),
+    )
+    expect(result.over).toEqual({ said: "Cleared, sir: two updates set aside.", unheard: [] })
+    expect(result.dictated).toEqual({ said: "Cleared, sir: one update set aside.", unheard: [], stale: true })
   })
 })
 
