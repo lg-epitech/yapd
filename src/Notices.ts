@@ -917,8 +917,9 @@ export const make = (options: {
      * still ahead, isn't again, even when when it resets moves a little. 95 is
      * kept for the morning in quiet, said in focus as at any other time, and
      * not while a limit a thread hit holds, which says more; said, what 80
-     * said of the same window is put by. What was kept of a window that has
-     * reset since is put by too, so a catch-up never tells of it.
+     * said of the same window is put by. While yapd is off, it's kept for a
+     * catch-up alone. What was kept of a window that has reset since is put
+     * by too, so a catch-up never tells of it.
      */
     const using = (usage: Threads.Usage) =>
       Effect.gen(function* () {
@@ -965,8 +966,11 @@ export const make = (options: {
             const entry = { at: now, kind: "notice" as const, said: spoken, key: key.used(who, id, level, hour) }
             const quiet = level === 95 && Option.contains(yield* (options.holding ?? Effect.succeedNone), "quiet")
             if (level === 80 || quiet) {
-              // Kept for the digest, or for the morning in quiet: not something that needs him.
-              const claimed = yield* journal.claim({ ...entry, detail: { ...detail, held: level === 80 ? "progress" : "quiet", priority: "done" } })
+              // Kept for the digest, or for the morning in quiet: not something that needs him. While yapd is off, it's kept as what came in
+              // then is, for a catch-up alone, never brought up by the digest or the rundown once it's on.
+              const { on } = yield* options.power
+              const held = !on ? "off" : level === 80 ? "progress" : "quiet"
+              const claimed = yield* journal.claim({ ...entry, detail: { ...detail, held, priority: "done" } })
               if (Option.isSome(claimed)) yield* Effect.logInfo(`Kept for later: ${spoken}`)
             } else {
               // Only while it's still as high, in the same window, by the time it's said.

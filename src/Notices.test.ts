@@ -1439,4 +1439,37 @@ describe("Notices of usage", () => {
     expect(result.heldAfter).toBe(0)
     expect(result.next).toHaveLength(1)
   })
+
+  test("a threshold passed while yapd is off is kept for a catch-up alone, never for the digest or the morning", async () => {
+    const usage = () => [
+      {
+        instanceId: "claudeAgent",
+        displayName: "Claude",
+        enabled: true,
+        status: "ready",
+        usageLimits: {
+          checkedAt: new Date(now).toISOString(),
+          windows: [
+            { id: "claude-session", kind: "session", label: "5h", usedPercent: 84, resetsAt: new Date(now + 2 * 60 * 60_000).toISOString() },
+            { id: "claude-weekly", kind: "weekly", label: "Weekly", usedPercent: 97, resetsAt: new Date(now + 3 * 24 * 60 * 60_000).toISOString() },
+          ],
+        },
+      },
+    ]
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* notices({ view: [], bounded: {}, usage, power: { on: false, turns: 2 }, holding: () => Option.some("quiet") })
+        yield* made.usage
+        return {
+          told: made.told,
+          // What the digest and the morning's rundown read.
+          held: (yield* made.journal.held(0, 200, { except: ["off"] })).length,
+          kept: (yield* made.journal.since(0, { kinds: ["notice"] })).map((entry) => (entry.detail as { readonly held?: unknown }).held),
+        }
+      }),
+    )
+    expect(result.told).toEqual([])
+    expect(result.held).toBe(0)
+    expect(result.kept).toEqual(["off", "off"])
+  })
 })
