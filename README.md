@@ -126,6 +126,14 @@ A routine is steps sent to a thread whenever you say its name. "When I say revie
 
 yapd keeps forty at most, about four thousand characters in all, since everything you ask reads them; past that it asks you to forget something first, rather than leave any out. Nothing faint, said over yapd's own voice or that looks like a secret is kept, and it tells you why. Said over an update, keeping or forgetting something, or a routine's name, gets you asked to use the shortcut, never sent to its agent, unless it's a plain yes like "ship it" to what the agent just asked. They're kept through restarts, and work while yapd is off.
 
+## Tidying threads
+
+Ask yapd to tidy a T3 Code thread, however you put it: "archive the Mina tickets thread" gives "Archived, sir: the Mina tickets.", and "unarchive it" or "scratch that" brings it back. "Rename it to Mina fee tables", "snooze the Tezos one until tomorrow morning", "settle it", "pin the std fix", and "unsnooze", "unsettle" and "unpin" work too. The line always names the thread. Archiving one drops the reminders you set on it, and says so; taking it back brings them back.
+
+Several at once, to archive, settle or snooze them, up to six: "archive all the finished Tezos threads" gives "That's four threads, sir: the Tezos importer, the Tezos fees, the Tezos wallets and the Tezos docs. Archive them all?", with the list on your screen when the app is there. "Yes" archives all four, each once, and "yes, but not the Tezos fees" the other three. One that started working again before your yes, or went, is left out, and said.
+
+A thread at work is never archived without your yes, since archiving it stops what it's doing: "The Tezos importer is still working, sir, and archiving it stops what it's doing. Archive it anyway?" One that's busy, or waiting on you, can't be settled, and yapd says so. A title that isn't your words as heard, or a thread yapd isn't sure you meant, is asked about first. "Scratch that" right after takes a tidy back as far as T3 Code lets it: a snooze or a settle that pinning cleared is put back, but what archiving stopped stays stopped, and unsettling marks a thread active rather than as T3 Code would have it. Tidying never deletes a thread, and needs a [T3 Code token](#where-follow-ups-go).
+
 ## Dictating
 
 Press ctrl+option+cmd+space from any app and talk to yapd, then press it again to send, or Escape to drop it. A short rising sound says it's listening, a higher one that it's sent, a falling one that it's dropped. Take your time: pausing to think doesn't end it, only the shortcut does. What you said becomes [new work](#starting-new-work).
