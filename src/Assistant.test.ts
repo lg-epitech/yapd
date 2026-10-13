@@ -23,6 +23,7 @@ import type { Line } from "./Responder.ts"
 import * as Show from "./Show.ts"
 import * as Settings from "./Settings.ts"
 import * as Store from "./Store.ts"
+import * as Switching from "./Switching.ts"
 import * as T3Actions from "./T3Actions.ts"
 import * as T3CodeServer from "./T3CodeServer.ts"
 import * as T3Live from "./T3Live.ts"
@@ -471,11 +472,11 @@ const assistant = (
     /** What each brief was asked to sum up, and each brief as it was asked. */
     const briefed: Array<ReadonlyArray<string>> = []
     const briefings: Array<Brain.Brief> = []
-    /** Turning yapd on or off as the menu does, once it's made, which drops what's under way for what he asked before. */
-    let switching = (_: boolean): Effect.Effect<void> => Effect.void
+    /** Turning yapd on or off as the menu does, once it's made, by what the shortcut's press `press` began, if it was. */
+    let switching = (_: boolean, __?: number): Effect.Effect<void> => Effect.void
     const made = yield* Assistant.make({
       ...(modes === undefined ? {} : { modes }),
-      ...(given.turning === undefined ? {} : { turn: (on: boolean) => Effect.suspend(() => switching(on)) }),
+      ...(given.turning === undefined ? {} : { turn: (on: boolean, press?: number) => Effect.suspend(() => switching(on, press)) }),
       ...(reminders === undefined ? {} : { reminders }),
       // This Mac is Rosie.
       ...(mutes === undefined || controls === undefined
@@ -535,14 +536,22 @@ const assistant = (
         ),
       ),
     )
-    switching = (on) =>
-      Effect.zipRight(
-        made.drop,
+    // As yapd serves it: what's under way for what he asked before is dropped before it turns, and it's back before what's said on coming
+    // back, which here never ends.
+    const switcher = Switching.switcher({
+      power: Effect.sync(() => power),
+      dictations: Effect.void,
+      drop: made.drop,
+      turn: (on) =>
         Effect.sync(() => {
           given.turning?.push(on)
           power = { on, turns: power.turns + 1 }
         }),
-      )
+      shortcut: Effect.void,
+      back: Effect.never,
+    })
+    const lifetime = yield* Effect.scope
+    switching = (on, press) => Switching.promptly((switched) => switcher.turn(on, press, switched), lifetime)
     // Lets the fibers catch up on what the test did, since the clock only moves when told to.
     const flush = Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 20)))
     /** Lets the fibers catch up until `ready` says they have, like a command T3 Code was sent, however slowly they run. */
@@ -618,6 +627,10 @@ const assistant = (
       /** Its turn came, and a dictation cut it off before the end. */
       cut: (notice = said.at(-1)) => voice(notice).pipe(Effect.zipRight(notice?.saying ?? Effect.void), Effect.zipRight(flush)),
       wait: (seconds: number) => TestClock.adjust(`${seconds} seconds`).pipe(Effect.zipRight(flush)),
+      /** Whether yapd is on, and how many times it's been turned on or off. */
+      power: Effect.sync(() => power),
+      /** How many times yapd had been turned on or off as the shortcut's `press` was made, `turns`, as what it began is taken, as yapd serves it. */
+      turns: switcher.turns,
       /** Turned on or off from the menu bar, which drops what's under way for what he asked before, as yapd serves it. */
       toggle: (on: boolean) =>
         made.drop.pipe(
@@ -11040,6 +11053,29 @@ describe("Assistant turned off and on", () => {
     expect(result.on).toEqual({ turning: [], worked: ["Unmute."] })
     expect(result.turning).toEqual([true, true])
     expect(result.worked).toEqual(["Unmute."])
+  })
+
+  test("'unmute' and what he pressed for right after, both handed on only once he'd said the second, go in the order he said them, so that's worked out with yapd on", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const turning: Array<boolean> = []
+        const { heard, prepare, toggle, power, turns, seen, flush } = yield* assistant(() => Brain.decision({ act: "answer", spoken: "Nothing came in, sir." }), undefined, {
+          turning,
+        })
+        yield* toggle(false)
+        // He pressed for "unmute", then again right after, both while yapd was off.
+        yield* prepare(1, 2)
+        yield* prepare(2, 2)
+        const at = yield* TestClock.currentTimeMillis
+        yield* Switching.dictations(Stream.make({ press: 1, heard: "Unmute." }, { press: 2, heard: "What did I miss?" }), power, ({ press, heard: words }) =>
+          heard({ heard: words, via: "shortcut", at, voiced: 2, turns: turns(press, 2) }, press),
+        )
+        yield* flush
+        yield* flush
+        return { turning, on: (yield* power).on, worked: seen.map(({ utterance }) => utterance.heard) }
+      }),
+    )
+    expect(result).toEqual({ turning: [true], on: true, worked: ["What did I miss?"] })
   })
 
   test("turned on with what came in while it was off, it offers the catch-up once, and a yes gives it", async () => {

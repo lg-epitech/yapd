@@ -701,7 +701,8 @@ export const make = (options: {
    * Turns yapd on or off as the menu does: "Mute." said by the shortcut turns
    * it off, and "unmute" or "turn on" said by it while it's off, on, with
    * nothing worked out of either, by what the shortcut's press `press` began,
-   * when it was. Without it, they're worked out as anything else is.
+   * when it was. It's back once yapd is on or off, never waiting on what's
+   * said on coming back. Without it, they're worked out as anything else is.
    */
   readonly turn?: (on: boolean, press?: number) => Effect.Effect<void>
   /** What he asked to be told later, which he sets and cancels by voice. Without them, that's something yapd can't do yet. */
@@ -4098,13 +4099,12 @@ export const make = (options: {
           if (yield* outdated(utterance.turns)) return yield* Effect.as(kept?.arrived ?? Effect.void, Option.none<string>())
           // "Mute." is his emergency off, and "unmute" or "turn on" while yapd is off turns it back on: either is done as the menu does
           // it, at once, with nothing worked out or said for it, and carried through however this ends. Off, before what the press held
-          // is let go of, so what it held, like a thread's question, is dropped as turning off drops it. On, nothing waits for what
-          // turning on says, so what he says next doesn't either.
+          // is let go of, so what it held, like a thread's question, is dropped as turning off drops it. On, before what he dictated
+          // after is handed on, so it's taken for said once yapd is on, never waiting for what turning on says.
           const switching = switches(utterance.heard, (yield* options.power).on)
           if (options.turn !== undefined && switching !== undefined) {
             yield* Effect.logInfo(switching ? `Turned on: he said ${once(utterance.heard)}` : "Turned off: he said mute")
-            const turning = yield* Effect.forkIn(options.turn(switching, press), scope)
-            if (!switching) yield* Fiber.join(turning)
+            yield* Fiber.join(yield* Effect.forkIn(options.turn(switching, press), scope))
             return yield* Effect.as(kept?.arrived ?? Effect.void, Option.some(utterance.id))
           }
           const arrived = kept?.arrived ?? (yield* options.awaiting)

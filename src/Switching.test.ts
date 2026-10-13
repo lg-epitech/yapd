@@ -66,21 +66,18 @@ describe("Handing on what he dictates", () => {
           const handed: Array<string> = []
           const done: Array<string> = []
           const thinking = yield* Deferred.make<void>()
-          const transcripts = yield* Queue.unbounded<string>()
+          const transcripts = yield* Queue.unbounded<{ readonly heard: string }>()
           const flush = Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 20)))
           yield* Effect.forkScoped(
-            Switching.dictations(
-              Stream.fromQueue(transcripts),
-              (heard) => Effect.succeed(heard === "Mute."),
-              (heard) =>
-                Effect.gen(function* () {
-                  handed.push(heard)
-                  if (heard === "What's Tezos doing?") yield* Deferred.await(thinking)
-                  done.push(heard)
-                }),
+            Switching.dictations(Stream.fromQueue(transcripts), Effect.succeed({ on: true }), ({ heard }) =>
+              Effect.gen(function* () {
+                handed.push(heard)
+                if (heard === "What's Tezos doing?") yield* Deferred.await(thinking)
+                done.push(heard)
+              }),
             ),
           )
-          yield* Queue.offerAll(transcripts, ["What's Tezos doing?", "Tell it to merge.", "Mute."])
+          yield* Queue.offerAll(transcripts, ["What's Tezos doing?", "Tell it to merge.", "Mute."].map((heard) => ({ heard })))
           yield* flush
           const meanwhile = { handed: [...handed], done: [...done] }
           yield* Deferred.succeed(thinking, undefined)

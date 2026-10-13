@@ -1,4 +1,5 @@
-import { Effect, Queue, Stream } from "effect"
+import { Deferred, Effect, Queue, type Scope, Stream } from "effect"
+import { switches } from "./Responder.ts"
 
 // Turning yapd on or off, from the menu bar, the API, as it starts or by
 // voice, kept apart from `yapd serve` so what it drops, and what it doesn't
@@ -31,13 +32,15 @@ export interface Parts {
  * "unmute", the dictations still under way are kept, as he may have pressed
  * again right after to ask something, and `turns` takes the presses after
  * that one, made while yapd was still off, for made once it's on, so what
- * they began isn't dropped as said while it was off.
+ * they began isn't dropped as said while it was off. `switched` runs once
+ * it's on or off as asked, before the shortcut is kept and what's said on
+ * coming back.
  */
 export const switcher = (parts: Parts) => {
   /** The press that last turned yapd on by voice, and how many times it had been turned on or off just before and just after. */
   let woke: { readonly press: number; readonly before: number; readonly after: number } | undefined
   return {
-    turn: (on: boolean, press?: number) =>
+    turn: (on: boolean, press?: number, switched: Effect.Effect<void> = Effect.void) =>
       Effect.flatMap(parts.power, (power) => {
         const switching = power.on !== on
         const voiced = on && press !== undefined
@@ -51,7 +54,7 @@ export const switcher = (parts: Parts) => {
           ),
         )
         const dropping = switching ? [...(voiced ? [] : [parts.dictations]), parts.drop, turned] : []
-        return Effect.all(on ? [...dropping, parts.shortcut, parts.back] : [parts.shortcut, ...dropping], { discard: true })
+        return Effect.all(on ? [...dropping, switched, parts.shortcut, parts.back] : [parts.shortcut, ...dropping, switched], { discard: true })
       }),
     /** How many times yapd had been turned on or off as `press` was made, `turns`, as what it began is to be taken. */
     turns: (press: number, turns: number) => (woke !== undefined && press > woke.press && turns === woke.before ? woke.after : turns),
@@ -59,21 +62,37 @@ export const switcher = (parts: Parts) => {
 }
 
 /**
- * Hands on what he dictates one at a time, in the order he said it, each
- * once the one before has been dealt with, since one can build on another;
- * but what `switches` yapd off or on, like "Mute.", at once, never waiting
- * behind what's still being worked out for one before, which turning off
- * then stops, as the menu's Turn Off does.
+ * Runs `turn` in `scope`, coming back as soon as yapd is on or off, which it
+ * tells by running what it's given, or once it's ended however it did: what
+ * it does after that, like what's said on coming back, carries on unwaited.
  */
-export const dictations = <A>(
+export const promptly = (turn: (switched: Effect.Effect<void>) => Effect.Effect<void>, scope: Scope.Scope) =>
+  Effect.gen(function* () {
+    const switched = yield* Deferred.make<void>()
+    const done = Deferred.succeed(switched, undefined)
+    yield* turn(Effect.asVoid(done)).pipe(Effect.ensuring(done), Effect.forkIn(scope))
+    yield* Deferred.await(switched)
+  })
+
+/**
+ * Hands on what he dictates one at a time, in the order he said it, each
+ * once the one before has been dealt with, since one can build on another,
+ * like what he asks right after "unmute" once yapd is on; but "Mute." while
+ * yapd is on, as `power` has it, at once, never waiting behind what's still
+ * being worked out for one before, which turning off then stops, as the
+ * menu's Turn Off does.
+ */
+export const dictations = <A extends { readonly heard: string }>(
   transcripts: Stream.Stream<A>,
-  switches: (transcript: A) => Effect.Effect<boolean>,
+  power: Effect.Effect<{ readonly on: boolean }>,
   hand: (transcript: A) => Effect.Effect<unknown>,
 ) =>
   Effect.gen(function* () {
     const waiting = yield* Queue.unbounded<A>()
     yield* Effect.forkScoped(Stream.runForEach(Stream.fromQueue(waiting), hand))
     return yield* Stream.runForEach(transcripts, (transcript) =>
-      Effect.flatMap(switches(transcript), (switching) => (switching ? Effect.asVoid(Effect.forkScoped(hand(transcript))) : Queue.offer(waiting, transcript))),
+      Effect.flatMap(power, ({ on }) =>
+        switches(transcript.heard, on) === false ? Effect.asVoid(Effect.forkScoped(hand(transcript))) : Queue.offer(waiting, transcript),
+      ),
     )
   })
