@@ -2972,25 +2972,20 @@ export const make = (options: {
 
     /**
      * Takes back the newest change he made, as "scratch that" or "undo that"
-     * means it: the reminder he just set or cancelled, or a mute, made since
-     * what yapd last did to a thread, or else that. Naming a thread, it's what
-     * was done to that thread, unless the reminder is about it; carrying on
-     * after a stop is always the thread's.
+     * means it, whatever thread the model named: the reminder he just set or
+     * cancelled, or a mute, made since what yapd last did to a thread, or else
+     * that, so a message sent a minute before a reminder is never withdrawn in
+     * its place. Carrying on after a stop is always the thread's.
      */
     const undoing = (plan: Brain.Plan, thought: Thought, said: Lines, at: Stepping): Effect.Effect<Outcome> =>
       Effect.gen(function* () {
         const { situation } = thought
         const latest = Brain.newest(situation)
-        const named = Option.getOrUndefined(plan.target)
         const last = Option.getOrUndefined(situation.noted ?? Option.none())
-        if (plan.decision.how !== "carry" && latest === "noted" && last !== undefined && options.reminders !== undefined) {
-          const reminder = yield* options.reminders.get(last.id)
-          const about = Option.flatMap(reminder, Reminders.ref)
-          if (named === undefined || Option.exists(about, (ref) => Threads.same(ref, named.ref))) {
-            return yield* Effect.flatMap(retracting(last, thought, said), (outcome) => onward(thought, outcome, Brain.about(outcome.subject), at.step + 1, said))
-          }
+        if (plan.decision.how !== "carry" && latest === "noted" && last !== undefined) {
+          return yield* Effect.flatMap(retracting(last, thought, said), (outcome) => onward(thought, outcome, Brain.about(outcome.subject), at.step + 1, said))
         }
-        if (plan.decision.how !== "carry" && latest === "mute" && named === undefined && options.controls !== undefined) {
+        if (plan.decision.how !== "carry" && latest === "mute" && options.controls !== undefined) {
           const mute = { ...plan, decision: { ...plan.decision, act: "mute" as const, how: "undo" } }
           return yield* Effect.flatMap(muting(mute, thought, said), (outcome) => onward(thought, outcome, Brain.about(outcome.subject), at.step + 1, said))
         }

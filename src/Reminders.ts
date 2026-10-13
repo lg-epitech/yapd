@@ -195,8 +195,15 @@ export const make = (store: Store.Store["Type"], journal: Pick<Journal["Type"], 
 /** A desk with nothing on it, for words said with no thread to name in them. */
 const nowhere: Threads.Desk = { threads: [], away: [] }
 
-/** Words of the model's said as they can be, without the mark that ends them, which the line puts back. */
-const words = (text: string) => Brain.speakable(text, nowhere).replace(/[.!?]+$/, "").trim()
+/**
+ * Words of the model's said as they can be, after a colon, without the mark
+ * that ends them, which the line puts back: a sentence's first word without
+ * its capital, but a name's or "I".
+ */
+const words = (text: string) => {
+  const said = Brain.speakable(text, nowhere).replace(/[.!?]+$/, "").trim()
+  return /^(I\b|I'|[A-Z][A-Z\d])/.test(said) ? said : `${said.charAt(0).toLowerCase()}${said.slice(1)}`
+}
 
 const capital = (text: string) => Brain.capital(text)
 

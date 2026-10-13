@@ -6,6 +6,7 @@ import type { Notice } from "./Inbox.ts"
 import * as Journal from "./Journal.ts"
 import * as Notices from "./Notices.ts"
 import * as Persona from "./Persona.ts"
+import * as Reminders from "./Reminders.ts"
 import * as Store from "./Store.ts"
 import * as T3Actions from "./T3Actions.ts"
 import type * as Server from "./T3CodeServer.ts"
@@ -89,6 +90,8 @@ const notices = (
     readonly dropping?: boolean
     /** The work yapd started, as the ledger has it. */
     readonly started?: ReadonlyArray<{ readonly at: number; readonly thread: string; readonly messageId: string | null }>
+    /** Whether he can be reminded of things, kept in the same database, offers asked as they come due kept in `offers`. */
+    readonly reminding?: boolean
   },
 ) =>
   Effect.gen(function* () {
@@ -157,6 +160,9 @@ const notices = (
     /** The threads whose turn no hook told of was overtaken, by starting again or going. */
     const overtaken: Array<string> = []
     const power = given.power ?? { on: true, turns: 1 }
+    const reminders = given.reminding === true ? Reminders.make(store, kept) : undefined
+    /** The offers handed over to be asked, by what they'd send. */
+    const offers: Array<string> = []
     const tell = (notice: Notice) =>
       Effect.gen(function* () {
         if (given.dropping === true) {
@@ -194,6 +200,7 @@ const notices = (
       returned: (machine) => Effect.sync(() => void returned.push(machine)),
       ...(given.started === undefined ? {} : { started: (_, since) => Effect.succeed((given.started ?? []).filter(({ at }) => at >= since)) }),
       shortest: 60_000,
+      ...(reminders === undefined ? {} : { reminders, offered: (reminder) => Effect.sync(() => void offers.push(reminder.propose ?? "")) }),
     }).pipe(Effect.provide(Layer.merge(persona, condenser(rewritten))))
     yield* Effect.forkScoped(made.follow)
     const flush = Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 20)))
@@ -201,6 +208,9 @@ const notices = (
       ...made,
       store,
       journal,
+      reminders,
+      offers,
+      power,
       told,
       beingSaid,
       asked,
@@ -1216,5 +1226,80 @@ describe("Notices while yapd is off", () => {
     )
     expect(result.off).toEqual([])
     expect(result.on).toEqual(["A question on Migrate Tezos Integration, sir: Which fee table?"])
+  })
+})
+
+describe("Notices of reminders", () => {
+  /** Set an hour before now, for a time `due`, to say "call the bank". */
+  const bank = (due: number): Reminders.Asked => ({ at: now - 60 * 60_000, heard: "Remind me to call the bank.", text: "call the bank", due })
+
+  test("a reminder due while yapd was down is said once after the restart", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const before = yield* notices({ view: [], bounded: {}, reminding: true })
+        yield* before.reminders!.add(bank(now - 10 * 60_000))
+        // yapd restarts after it was due: what was handed over before, and what's due, are looked at, then looked at again.
+        const after = yield* notices({ view: [], bounded: {}, reminding: true, store: before.store })
+        yield* after.retell
+        yield* after.due
+        yield* after.wait(15)
+        yield* after.due
+        const once = [...after.told]
+        // And again, after another restart.
+        const again = yield* notices({ view: [], bounded: {}, reminding: true, store: before.store })
+        yield* again.retell
+        yield* again.due
+        return { once, again: again.told, pending: (yield* again.reminders!.pending).length }
+      }),
+    )
+    expect(result.once).toHaveLength(1)
+    // It names the time it was due, so it reads right however late.
+    expect(result.once[0]).toMatch(/^You asked me to remind you at .*, sir: call the bank\.$/)
+    expect(result.again).toEqual([])
+    expect(result.pending).toBe(0)
+  })
+
+  test("a reminder due while yapd is off is kept unheard and never said on its own", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const off = yield* notices({ view: [], bounded: {}, reminding: true, power: { on: false, turns: 1 } })
+        yield* off.reminders!.add(bank(now - 60_000))
+        yield* off.due
+        // Turned on, it isn't said then either, nor after a restart.
+        off.power.on = true
+        off.power.turns = 2
+        yield* off.wait(15)
+        yield* off.due
+        const restarted = yield* notices({ view: [], bounded: {}, reminding: true, store: off.store })
+        yield* restarted.retell
+        yield* restarted.due
+        // It's what he missed while yapd was off.
+        const missed = yield* off.journal.missed(now - 24 * 60 * 60_000, now - 24 * 60 * 60_000)
+        return { told: [...off.told, ...restarted.told], missed: missed.map(({ said, heardAt, detail }) => ({ said, heardAt, held: (detail as { held?: string }).held })) }
+      }),
+    )
+    expect(result.told).toEqual([])
+    expect(result.missed).toHaveLength(1)
+    expect(result.missed[0]).toMatchObject({ heardAt: undefined, held: "off" })
+    expect(result.missed[0]!.said).toMatch(/: call the bank\.$/)
+  })
+
+  test("a reminder is said even after older ones were pruned", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* notices({ view: [], bounded: {}, reminding: true })
+        const first = yield* made.reminders!.add(bank(now - 60_000))
+        yield* made.due
+        // What's said is pruned, and the next one set takes no id it had.
+        yield* made.reminders!.prune(now + 1)
+        const next = yield* made.reminders!.add({ ...bank(now + 60_000), text: "pick up the parcel" })
+        yield* made.wait(75)
+        yield* made.due
+        return { told: made.told, ids: [first.id, next.id] }
+      }),
+    )
+    expect(result.ids[1]).not.toBe(result.ids[0])
+    expect(result.told).toHaveLength(2)
+    expect(result.told[1]).toMatch(/: pick up the parcel\.$/)
   })
 })

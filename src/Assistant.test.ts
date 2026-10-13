@@ -18,6 +18,7 @@ import * as Mutes from "./Mutes.ts"
 import { Model, ModelError } from "./Model.ts"
 import * as Notices from "./Notices.ts"
 import * as Persona from "./Persona.ts"
+import * as Reminders from "./Reminders.ts"
 import type { Line } from "./Responder.ts"
 import * as Show from "./Show.ts"
 import * as Settings from "./Settings.ts"
@@ -279,6 +280,8 @@ const assistant = (
     readonly muting?: boolean
     /** Whether how yapd talks can be changed, kept in the same database. */
     readonly modes?: boolean
+    /** Whether he can be reminded of things later, kept in the same database. */
+    readonly reminders?: boolean
     /** What the model briefs him with on what was held or what he missed, from what it's given, or none when it can't be asked. */
     readonly briefs?: (held: ReadonlyArray<Journal.Kept>, brief: Brain.Brief) => string | undefined
   } = {},
@@ -462,11 +465,13 @@ const assistant = (
     const mutes = given.muting === true ? yield* Mutes.make(store) : undefined
     const controls = mutes === undefined ? undefined : Mutes.controls({ mutes, journal, silence: (keys) => Effect.sync(() => void silenced.push(keys)) })
     const modes = given.modes === true ? yield* Modes.make({ settings: Settings.fromStore(store), journal }) : undefined
+    const reminders = given.reminders === true ? Reminders.make(store, journal) : undefined
     /** What each brief was asked to sum up, and each brief as it was asked. */
     const briefed: Array<ReadonlyArray<string>> = []
     const briefings: Array<Brain.Brief> = []
     const made = yield* Assistant.make({
       ...(modes === undefined ? {} : { modes }),
+      ...(reminders === undefined ? {} : { reminders }),
       // This Mac is Rosie.
       ...(mutes === undefined || controls === undefined
         ? {}
@@ -538,6 +543,7 @@ const assistant = (
       mutes,
       silenced,
       modes,
+      reminders,
       briefed,
       briefings,
       told: said,
@@ -11261,6 +11267,117 @@ describe("Assistant turned off and on", () => {
     )
     expect(result.off).toEqual(["Two running, sir.", "Migrate Tezos Integration or Open Mina SSV2 Bug Tickets, sir?"])
     expect(result.on).toEqual(["A question on Cloud deployment discovery, sir: Which colour should the test use? Red or Blue? I'd go with Blue."])
+  })
+})
+
+/** A time as his clock reads it, as the model is told to give it. */
+const local = (at: number) => {
+  const date = new Date(at)
+  const pad = (n: number) => String(n).padStart(2, "0")
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`
+}
+
+describe("Assistant reminders", () => {
+  /** Two hours on, and three, to the minute, as his clock reads them. */
+  const soon = Math.floor((now + 2 * 60 * 60_000) / 60_000) * 60_000
+  const later = soon + 60 * 60_000
+
+  test("what he asks for after a reminder in the same breath is done now, and an offer waits for his yes, for the thread he named", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(
+          (situation) => {
+            const { heard } = situation.utterance
+            if (heard.startsWith("Remind me")) return Brain.decision({ act: "remind", how: "at", when: local(soon), text: "call the bank", rest: "tell the Mina one to rebase" })
+            if (heard === "tell the Mina one to rebase") return Brain.decision({ act: "send", target: handle(situation, mina), text: "Rebase.", how: "now" })
+            if (heard.startsWith("Later, offer")) return Brain.decision({ act: "offer", how: "at", when: local(later), target: handle(situation, tezos), text: "Ship it." })
+            return undefined
+          },
+          undefined,
+          { reminders: true },
+        )
+        const messages = () => made.dispatched.filter(({ type }) => type === "message.dispatch").map(({ threadId, text }) => `${threadId}: ${text}`)
+        yield* made.dictate("Remind me in a couple of hours to call the bank, and tell the Mina one to rebase.")
+        const set = { spoken: made.spoken(), messages: messages(), pending: (yield* made.reminders!.pending).map(({ text, due, heard }) => ({ text, due, heard })) }
+        yield* made.dictate("Later, offer to tell the Tezos one to ship it.")
+        const offering = { said: made.spoken().at(-1), messages: messages() }
+        // Due, it's asked: a no sends nothing.
+        const fire = (at: number) =>
+          Effect.gen(function* () {
+            for (const reminder of yield* made.reminders!.due(at)) {
+              if (reminder.propose === undefined) continue
+              const kept = yield* made.reminders!.fire(reminder, { at, kind: "notice", said: "offer", detail: { reminder: reminder.id } })
+              yield* made.offered(reminder, Option.flatten(kept))
+            }
+            yield* made.flush
+          })
+        yield* fire(later)
+        const asked = made.spoken().at(-1)
+        yield* made.answer("No.")
+        const afterNo = messages()
+        // Set again and due again, a yes sends it, once, under ids of its own.
+        yield* made.dictate("Later, offer to tell the Tezos one to ship it.")
+        yield* fire(later)
+        yield* made.answer("Yes.")
+        const sent = made.dispatched.filter(({ type, threadId }) => type === "message.dispatch" && threadId === tezos.id)
+        return { set, offering, asked, afterNo, sent: sent.map(({ text, commandId }) => ({ text, commandId })), last: made.spoken().at(-1) }
+      }),
+    )
+    // Set, and said so with what was kept, then the rest done at once, in the same breath.
+    expect(result.set.spoken).toHaveLength(1)
+    expect(result.set.spoken[0]).toMatch(/^I'll remind you .*, sir: call the bank\. /)
+    expect(result.set.messages).toEqual([`${mina.id}: Rebase.`])
+    expect(result.set.pending).toEqual([{ text: "call the bank", due: soon, heard: "Remind me in a couple of hours to call the bank, and tell the Mina one to rebase." }])
+    // The offer names the thread and what it would send, and sends nothing as it's set.
+    expect(result.offering.said).toMatch(/I'll offer to tell Migrate Tezos Integration: ship it, sir\.$/)
+    expect(result.offering.messages).toEqual([`${mina.id}: Rebase.`])
+    expect(result.asked).toBe("Shall I tell Migrate Tezos Integration: ship it, sir?")
+    expect(result.afterNo).toEqual([`${mina.id}: Rebase.`])
+    expect(result.sent).toHaveLength(1)
+    expect(result.sent[0]!.text).toBe("Ship it.")
+    // Under the yes's own ids, never the offer's.
+    expect(result.sent[0]!.commandId).toMatch(/^yapd:u/)
+    expect(result.last).toBe("On it, sir.")
+  })
+
+  test("scratch that, or undo that, right after a reminder cancels it, not the last message", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(
+          (situation) => {
+            const { heard } = situation.utterance
+            if (heard === "Tell the Tezos one to use the fee table.") return Brain.decision({ act: "send", target: handle(situation, tezos), text: "Use the fee table.", how: "now" })
+            if (heard.startsWith("Remind me")) return Brain.decision({ act: "remind", how: "at", when: local(soon), text: "call the bank" })
+            if (heard === "No, undo that please.") return Brain.decision({ act: "undo", target: handle(situation, tezos) })
+            return undefined
+          },
+          undefined,
+          { reminders: true },
+        )
+        const types = () => made.dispatched.map(({ type }) => type)
+        yield* made.dictate("Tell the Tezos one to use the fee table.")
+        yield* made.wait(10)
+        yield* made.dictate("Remind me in a couple of hours to call the bank.")
+        yield* made.dictate("Scratch that.")
+        const scratched = { said: made.spoken().at(-1), pending: (yield* made.reminders!.pending).length, sent: types() }
+        // Scratched again, it's back.
+        yield* made.dictate("Scratch that.")
+        const back = { said: made.spoken().at(-1), pending: (yield* made.reminders!.pending).length }
+        yield* made.dictate("Remind me in a couple of hours to call the bank.")
+        yield* made.dictate("No, undo that please.")
+        return { scratched, back, undone: { said: made.spoken().at(-1), pending: (yield* made.reminders!.pending).length, sent: types() } }
+      }),
+    )
+    expect(result.scratched.said).toMatch(/^Cancelled your reminder .*, sir: call the bank\.$/)
+    expect(result.scratched.pending).toBe(0)
+    // The message stays sent, and nothing else went.
+    expect(result.scratched.sent).toEqual(["message.dispatch"])
+    expect(result.back.said).toMatch(/^Kept your reminder .*, sir: call the bank\.$/)
+    expect(result.back.pending).toBe(1)
+    // The model's undo, naming the thread the message went to, still takes back the reminder he set since.
+    expect(result.undone.said).toMatch(/^Cancelled your reminder .*, sir: call the bank\.$/)
+    expect(result.undone.pending).toBe(1)
+    expect(result.undone.sent).toEqual(["message.dispatch"])
   })
 })
 
