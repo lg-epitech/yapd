@@ -27,9 +27,10 @@ import Foundation
 
 /// The menu shows everything the menu bar has shown, in the same order, each item turned on and off by the same rules, with
 /// Clear Catch-Up under Catch Me Up, and the recent rows opening a panel each instead of the Mute menu, which offers hearing the
-/// thread again, muting it, for an hour too, or taking the mute off, a subagent's its own, having its subagents read, checked
-/// while they are, on a T3 Code thread's, a subagent's by the thread it's part of, and its pull request when it has an https
-/// one; and it keeps each item by an id from one state to the next, so the open menu changes in place.
+/// thread again, muting it, for an hour too, or taking the mute off, a subagent's its own, or saying it's muted with the thread
+/// it's part of, having its subagents read, checked while they are, on a T3 Code thread's, a subagent's by the thread it's part
+/// of, and its pull request when it has an https one; and it keeps each item by an id from one state to the next, so the open
+/// menu changes in place.
 @MainActor func checkMenu() {
   let decoded = { (json: String) in try? JSONDecoder().decode(Status.self, from: Data(json.utf8)) }
   let utc = TimeZone(identifier: "UTC")!
@@ -157,6 +158,29 @@ import Foundation
   check(Menu.panel(for: alone, details: nil).map(\.id) == loud.map(\.id) && Menu.panel(for: head, details: nil).map(\.id) == loud.map(\.id), "keeps a panel's items by the same ids, its subagents read or not, or not to be")
   check(Menu.panel(for: head, details: nil).first { $0.title == "Read Subagents" }.map { $0.enabled && !$0.hidden } == true, "lets him choose Read Subagents on a thread's panel")
   check(Menu.panel(for: second, details: nil).first { $0.title == "Read Subagents" }?.hidden == true, "never offers to read a session's subagents, nor a yapd's from before it")
+
+  // A subagent muted with the thread it's part of only says so where Unmute was, by the same id, since taking its own mute off
+  // would leave it muted, and Mute for an Hour stays hidden; muted on its own, it offers Unmute, which takes that off; and from a
+  // yapd that doesn't say whether the thread is muted, it's as before.
+  let mutedPart = { (head: String) in
+    let subagent = row("t3:Rosie:7", "Sol review: release blockers", #", "muted": true, "replayable": false, "subagents": true, "head": \#(head)"#)
+    return decoded(#"{"on": true, "activity": "idle", "recent": [\#(subagent)]}"#).flatMap { menu($0, true).rows.first }
+  }
+  let ofTezos = { (muted: String) in #"{"key": "t3:Rosie:1", "title": "Migrate the Tezos integration"\#(muted)}"# }
+  guard let withHead = mutedPart(ofTezos(#", "muted": true"#)), let onItsOwn = mutedPart(ofTezos(#", "muted": false"#)), let unsaid = mutedPart(ofTezos("")),
+    let longHead = mutedPart(#"{"key": "t3:Rosie:1", "title": "Reimagine Yapd as a Jarvis Companion, with subagents read aloud", "muted": true}"#)
+  else {
+    return check(false, "lists a muted subagent")
+  }
+  let withHeadPanel = Menu.panel(for: withHead, details: nil)
+  check(drawn(withHeadPanel) == ["[card Sol review: release blockers]", "---", "Hear Again [off]", "(Muted with Migrate the Tezos integration)", "Read Subagents ✓"], "says a subagent is muted with its thread rather than offer Unmute, not \(drawn(withHeadPanel))")
+  check(withHeadPanel.first { $0.id == "t3:Rosie:7 mute" }.map { $0.kind == .line && !$0.enabled } == true, "can't choose it")
+  check(withHeadPanel.map(\.id) == Menu.panel(for: part, details: nil).map(\.id) && withHeadPanel.map(\.id) == Menu.panel(for: onItsOwn, details: nil).map(\.id), "keeps the same ids, so the open panel follows its thread's mute in place")
+  check(withHeadPanel.first { $0.title == "Mute for an Hour" }?.hidden == true, "offers no Mute for an Hour while it's muted with its thread")
+  check(drawn(Menu.panel(for: onItsOwn, details: nil)) == ["[card Sol review: release blockers]", "---", "Hear Again [off]", "Unmute", "Read Subagents ✓"] && does(onItsOwn)["Unmute"] == .unmute(onItsOwn.recent), "takes off a subagent's own mute, not \(drawn(Menu.panel(for: onItsOwn, details: nil)))")
+  check(does(unsaid)["Unmute"] == .unmute(unsaid.recent), "offers Unmute as before from a yapd that doesn't say whether its thread is muted")
+  let cut = Menu.panel(for: longHead, details: nil).first { $0.id == "t3:Rosie:7 mute" }?.title ?? ""
+  check(cut == "Muted with Reimagine Yapd as a Jarvis Companion, with subag…" && cut.count == 60, "cuts a long thread's title short, as a row's label, not \(cut)")
 
   // What the icon tells VoiceOver.
   let told: [(Status?, String)] = [

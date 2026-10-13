@@ -2,7 +2,7 @@ import Foundation
 
 /// The menu reads the threads with the latest updates from any yapd, old or new, draws each icon it's sent, or the monogram it
 /// carries, in T3 Code's colours as yapd makes them, tells how long ago each ended, mutes and replays a thread by its key, and
-/// has its subagents read, a subagent's by the key of the thread it's part of.
+/// has its subagents read, a subagent's by the key of the thread it's part of, which it reads whether it's muted.
 @MainActor func checkRecent() {
   let decoded = { (json: String) in try? JSONDecoder().decode(Status.self, from: Data(json.utf8)) }
   let row = """
@@ -51,6 +51,11 @@ import Foundation
   check(first?.subagents == nil && first?.head == nil && session?.subagents == nil, "reads neither from a yapd from before them, nor of a session")
   check(fields(#", "subagents": "yes", "head": {"key": 7}"#).map { $0.subagents == nil && $0.head == nil } == true, "reads a row whose subagents and head it can't read as one with neither")
   check(fields(#", "subagents": true, "head": "t3:Rosie:850299f8""#).map { $0.subagents == nil && $0.head == nil } == true, "offers nothing to read for a subagent whose thread it can't read, rather than its own")
+  // Whether the thread a subagent is part of is muted, which mutes it too; not from a yapd from before it, nor what can't be read.
+  let headMuted = { (muted: String) in fields(#", "muted": true, "subagents": true, "head": {"key": "t3:Rosie:850299f8", "title": "Migrate the Tezos integration"\#(muted)}"#)?.head }
+  check(headMuted(#", "muted": true"#) == Status.Recent.Head(key: "t3:Rosie:850299f8", title: "Migrate the Tezos integration", muted: true), "reads that a subagent's thread is muted, not \(String(describing: headMuted(#", "muted": true"#)))")
+  check(headMuted(#", "muted": false"#)?.muted == false && part?.head?.muted == false, "reads that it isn't, and takes it as not from a yapd from before it")
+  check(headMuted(#", "muted": "yes""#) == Status.Recent.Head(key: "t3:Rosie:850299f8", title: "Migrate the Tezos integration"), "reads a thread's mute it can't read as none, keeping the thread")
 
   // Whether a row can be heard again, as yapd says, and a row it can't still listed and muted as before.
   let says = { (replayable: String) in

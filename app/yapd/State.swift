@@ -56,11 +56,29 @@ struct Status: Decodable {
       }
     }
 
-    /// The thread a subagent's row is part of, which its subagents being read goes by.
+    /// The thread a subagent's row is part of, which its subagents being read goes by, and whether it's muted.
     struct Head: Decodable, Equatable {
       /// What its subagents are read by, as a name, never taken apart.
       let key: String
       let title: String
+      /// Whether that thread is muted, which mutes the subagent too, whatever its own mute. Not from a yapd from before it, or
+      /// what the app can't read of it.
+      let muted: Bool
+
+      private enum CodingKeys: String, CodingKey { case key, title, muted }
+
+      init(key: String, title: String, muted: Bool = false) {
+        self.key = key
+        self.title = title
+        self.muted = muted
+      }
+
+      init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        key = try container.decode(String.self, forKey: .key)
+        title = try container.decode(String.self, forKey: .title)
+        muted = (try? container.decodeIfPresent(Bool.self, forKey: .muted)) ?? false
+      }
     }
 
     /// What it's muted and heard again by, as a name, never taken apart.

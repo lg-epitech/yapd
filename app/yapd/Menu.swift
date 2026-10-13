@@ -163,22 +163,33 @@ struct Menu: Equatable {
   }
 
   /// What the panel beside a recent row offers: its card, then hearing it again, the same as clicking the row, muting it until
-  /// he takes it off or for an hour, or taking the mute off, a subagent's row its own, having its subagents read to him, checked
-  /// while they are, on every T3 Code thread's, a subagent's by the thread it's part of, and opening its pull request, when
-  /// yapd's `details` of it have one with an https address. Muting it and reading its subagents work while yapd is off, and for
-  /// a row it can't say again. The same items whether it's muted or not, a thread's or a session's, and has a pull request or
-  /// not, what isn't offered hidden, so the open panel follows a mute that ends, one set by voice, subagents read by voice, or a
+  /// he takes it off or for an hour, or taking the mute off, a subagent's row its own, or, for a subagent muted with the thread
+  /// it's part of, which taking its own off would leave muted, only saying so, having its subagents read to him, checked while
+  /// they are, on every T3 Code thread's, a subagent's by the thread it's part of, and opening its pull request, when yapd's
+  /// `details` of it have one with an https address. Muting it and reading its subagents work while yapd is off, and for a row
+  /// it can't say again. The same items whether it's muted or not, a thread's or a session's, and has a pull request or not,
+  /// what isn't offered hidden, so the open panel follows a mute that ends, one set by voice, subagents read by voice, or a
   /// pull request yapd tells of, in place.
   static func panel(for row: Row, details: Details?) -> [Item] {
     let key = row.recent.key
     let muted = row.recent.muted
+    // Muted with the thread it's part of, Unmute would take off only its own mute, if it has one, and leave it muted: it's
+    // only said, cut short when it's long, as a row's label is.
+    let inherited = row.recent.head.flatMap { head -> String? in
+      guard muted && head.muted else { return nil }
+      let line = "Muted with \(head.title)"
+      return line.count > 60 ? "\(line.prefix(59))…" : line
+    }
     let reading = row.recent.subagents == true
     let pr = details?.pr.flatMap { pr in pr.address.map { (number: pr.number, address: $0) } }
     return [
       Item(id: "\(key) card", kind: .card(row), title: row.recent.title, enabled: false),
       .separator(key),
       Item(id: "\(key) hear", kind: .action(.hear(row.recent)), title: "Hear Again", enabled: row.hearable),
-      Item(id: "\(key) mute", kind: .action(muted ? .unmute(row.recent) : .mute(row.recent, forAnHour: false)), title: muted ? "Unmute" : "Mute", enabled: true),
+      Item(
+        id: "\(key) mute", kind: inherited == nil ? .action(muted ? .unmute(row.recent) : .mute(row.recent, forAnHour: false)) : .line,
+        title: inherited ?? (muted ? "Unmute" : "Mute"), enabled: inherited == nil
+      ),
       Item(id: "\(key) mute for an hour", kind: .action(.mute(row.recent, forAnHour: true)), title: "Mute for an Hour", enabled: true, hidden: muted),
       // Never on a session's row, which T3 Code runs no subagents for, nor from a yapd from before it.
       Item(
