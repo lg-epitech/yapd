@@ -13,7 +13,7 @@ import { addressed, type Lines, unaddressed } from "./Persona.ts"
 import type * as Preferences from "./Preferences.ts"
 import * as Questions from "./Questions.ts"
 import * as Reminders from "./Reminders.ts"
-import { agreed, enough, gist, hallucinated, halts, type Line, morePlease, noted, wakes } from "./Responder.ts"
+import { agreed, enough, gist, hallucinated, halts, type Line, morePlease, noted, padding, wakes } from "./Responder.ts"
 import * as T3Actions from "./T3Actions.ts"
 import * as Threads from "./Threads.ts"
 
@@ -1978,7 +1978,17 @@ export const asSaid = (words: string, said: string) => {
 const asides = ["please", "thanks", "thank you", "sir", "jarvis", "okay", "ok"]
 
 /** What asks yapd to keep a fact in mind, like "remember that". */
-const keeping = ["remember that", "remember", "note that"]
+const keeping = ["remember that", "remember", "note that", "keep in mind that", "keep in mind"]
+
+/**
+ * Everyday ways to start asking, before "remember that" or "when I say", and
+ * no part of what he asks: words to yapd, a pause filled, like "uh", or
+ * "hey Jarvis", "so" or "can you".
+ */
+const openers = [...asides, ...padding, "hey jarvis", "so", "can you", "could you", "would you", "i want you to"]
+
+/** What joins one request on to another, like the "and" of "remember that rig runs the nightly, and tell the Mina one to rebase". */
+const joiners = ["and", "then", "also"]
 
 /**
  * Words as they compare once what they say is all that counts: in any case,
@@ -2051,16 +2061,17 @@ const inHisWords = (said: string, words: string, before: RegExp, after: RegExp) 
   return undefined
 }
 
-/** A fact said: what may come before it, "remember that" and words to yapd before that, and after it, words to yapd a pause sets off. */
+/** A fact said: what may come before it, "remember that" and an everyday way of asking before that, and after it, words to yapd a pause sets off. */
 const aroundFact = {
-  ahead: ahead(`(?:(?:${gap}|${phrased(asides)})*${phrased(keeping)})?(?:${gap})*`),
+  ahead: ahead(`(?:(?:${gap}|${phrased(openers)})*${phrased(keeping)})?(?:${gap})*`),
   behind: behind(keeping),
 }
 
 /**
  * A fact as he said it, which the model's `fact` says the same as: all he
- * said after a "remember that" and words to yapd before it, but for words to
- * yapd a pause sets off from it, marks and symbols kept. So what's kept is
+ * said after a "remember that" and an everyday way of asking before it, like
+ * "hey Jarvis, can you", but for words to yapd a pause sets off from it,
+ * marks and symbols kept. So what's kept is
  * all he asked to be, never less of it, like his "we never use C++" without
  * its "never", or "the magic word is please" without its "please", nor more.
  */
@@ -2083,7 +2094,7 @@ const spokenSteps = (said: string, steps: string) => {
   const found = calling.exec(said)
   if (found === null) return undefined
   const before = said.slice(0, found.index)
-  if (!only([...asides, ...keeping, "so"]).test(before)) return inHisWords(before, steps, aroundSteps.before.ahead, aroundSteps.before.behind)
+  if (!only([...openers, ...keeping]).test(before)) return inHisWords(before, steps, aroundSteps.before.ahead, aroundSteps.before.behind)
   const after = said.slice(found.index + found[0].length)
   // From the first word of its name to his pause, as `spokenName` reads it.
   const named = after.slice(Math.max(0, after.search(/[\p{L}\p{N}]/u)))
@@ -2092,11 +2103,34 @@ const spokenSteps = (said: string, steps: string) => {
 }
 
 /**
+ * Whether the model's `words`, all his, are all of a part of what he said
+ * that stands apart from the rest of it: after "remember that", a pause or an
+ * "and", or at its start, and before a pause, an "and" or its end. So he's
+ * told to say it as one request only when what the model left out is all
+ * outside it, never words of his within it, like the "never" of "we never use
+ * C++", which he's told it couldn't keep as he said it.
+ */
+const standsApart = (said: string, words: string) => {
+  const wanted = worded(words)
+  const { starts, ends } = edges(said)
+  return starts.some(
+    (start) =>
+      apart.start.test(said.slice(0, start)) && ends.some((end) => end > start && apart.end.test(said.slice(end)) && worded(said.slice(start, end)) === wanted),
+  )
+}
+
+/** Where a part of what he said may start apart from what's before it, and end apart from what's after it. */
+const apart = {
+  start: new RegExp(`(?:^|${phrased(keeping)}|${pause}|${phrased(joiners)})(?:${gap})*$`, "iu"),
+  end: new RegExp(`^\\s*(?:$|${pause}|${phrased(joiners)})`, "iu"),
+}
+
+/**
  * Whether a routine is all he asked for, word for word: as words compare,
  * what he said is "when", "whenever" or "if I say" and its name as the model
  * gave it, then its steps, or its steps, then that, with nothing else but
- * words to yapd around it, like "remember that", "so" before it or "thanks"
- * after it, or between its name and its steps, like "then". So a "don't" or
+ * words to yapd around it, like "remember that", "hey Jarvis, can you" before
+ * it or "thanks" after it, or between its name and its steps, like "then". So a "don't" or
  * an "if the checks are green" that the steps leave out, or another request
  * in the same breath, keeps nothing, never the part of it that's the steps;
  * nor does a "so" or a "then" he trailed off on. A check that turns down,
@@ -2110,7 +2144,7 @@ export const wholeRoutine = (routine: { readonly name: string; readonly steps: s
   const called = `(?:when|whenever|if) i say ${name}`
   const aside = `(?:${[...asides, ...keeping].join("|")})`
   const between = `(?: (?:${aside}|then))*`
-  return new RegExp(`^(?:(?:${aside}|so) )*(?:${called}${between} ${steps}|${steps}${between} ${called})(?: ${aside})*$`, "u").test(Ledger.digest(said))
+  return new RegExp(`^(?:(?:${[...openers, ...keeping].join("|")}) )*(?:${called}${between} ${steps}|${steps}${between} ${called})(?: ${aside})*$`, "u").test(Ledger.digest(said))
 }
 
 /**
@@ -2405,8 +2439,9 @@ export const check = (given: Decision, situation: Situation, lines: Lines): Chec
       if (his === undefined) {
         const missing = unheard(text, heard)
         if (routine !== undefined) return { _tag: "Say", spoken: said.steps(missing) }
-        // All of it his, symbols and all, but not all he said.
-        return { _tag: "Say", spoken: missing === undefined && ` ${worded(heard)} `.includes(` ${worded(text)} `) ? said.alone : said.words(missing) }
+        // All of it his, symbols and all, but with more of his around it, which saying it on its own keeps; not all he said within it,
+        // like a "never", which he's told isn't kept as he said it.
+        return { _tag: "Say", spoken: missing === undefined && standsApart(heard, text) ? said.alone : said.words(missing) }
       }
       return doing({ decision: { ...choice, target: "", text: routine === undefined ? his : `${routine.name}: ${his}` }, target: Option.none() })
     }

@@ -128,7 +128,7 @@ export const prompt = ({ project, turn, needsYou, lines, heard, echo, afterPause
   ].join("\n\n")
 
 /** What only fills a pause or asks nicely, which is never what was said. */
-const padding = ["uh", "um", "erm", "oh", "ah", "hmm", "sir", "please"]
+export const padding = ["uh", "um", "erm", "oh", "ah", "hmm", "sir", "please"]
 
 /** What he calls yapd, which is only how he addresses it, unless it's all he said. */
 const names = ["jarvis", "yapd"]

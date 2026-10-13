@@ -12012,6 +12012,7 @@ describe("Assistant memories", () => {
       ["When I say ship, merge the PR, then deploy.", "merge the PR, then deploy"],
       ["Merge the PR, then deploy, when I say ship, thanks.", "Merge the PR, then deploy"],
       ["Please, when I say ship, merge the PR, then deploy.", "merge the PR, then deploy"],
+      ["Hey Jarvis, can you remember that when I say ship, merge the PR, then deploy?", "merge the PR, then deploy"],
     ] as const) {
       expect([heard, await saving(heard)]).toEqual([heard, kept(steps)])
     }
@@ -12062,8 +12063,11 @@ describe("Assistant memories", () => {
       kept: [],
       sent: [],
     })
+    // He's told to say it as one request only for more of his outside it: within it, it's that it couldn't keep his words.
     const alone = "I couldn't keep that in your own words, sir. Say it as one request: remember that, then the fact."
-    expect(await saving("Remember that we never use C++ for the parser.", "use C++ for the parser", "fact")).toEqual({ said: alone, kept: [], sent: [] })
+    const unsaved = { said: "I couldn't keep that in your own words, sir, so I didn't save it.", kept: [], sent: [] }
+    expect(await saving("Remember that we never use C++ for the parser.", "use C++ for the parser", "fact")).toEqual(unsaved)
+    expect(await saving("Actually, remember that rig runs the nightly.", "rig runs the nightly", "fact")).toEqual({ said: alone, kept: [], sent: [] })
     expect(await saving("Remember that rig runs the nightly, and tell the Mina one to rebase.", "rig runs the nightly", "fact")).toEqual({
       said: `${alone} I left the rest: tell the Mina one to rebase.`,
       kept: [],
@@ -12075,10 +12079,20 @@ describe("Assistant memories", () => {
     expect(await saving("When I say ping, ask Jarvis.", "ping: ask")).toEqual({ said: "I couldn't keep the steps in your own words, sir, so I didn't save it.", kept: [], sent: [] })
     expect(await saving("When I say ping, ask Jarvis.", "ping: ask Jarvis")).toMatchObject({ kept: ["ping: ask Jarvis"] })
     expect(await saving("When I say ping, ask the team, Jarvis.", "ping: ask the team")).toMatchObject({ kept: ["ping: ask the team"] })
-    expect(await saving("Remember that the magic word is please.", "the magic word is", "fact")).toMatchObject({ kept: [], sent: [] })
+    expect(await saving("Remember that the magic word is please.", "the magic word is", "fact")).toEqual(unsaved)
     expect(await saving("Remember that the magic word is please.", "the magic word is please", "fact")).toMatchObject({ kept: ["the magic word is please"] })
     expect(await saving("Remember that Jarvis runs on Rosie.", "runs on Rosie", "fact")).toMatchObject({ kept: [] })
     expect(await saving("Remember that, Jarvis, rig runs the nightly. Okay.", "rig runs the nightly", "fact")).toMatchObject({ kept: ["rig runs the nightly"] })
+    // Everyday ways of asking before "remember that", or "keep in mind", are no part of the fact; after it, they're his words like any.
+    for (const heard of [
+      "Hey Jarvis, can you remember that rig runs the nightly?",
+      "Um, could you keep in mind that rig runs the nightly.",
+      "So I want you to note that rig runs the nightly.",
+    ]) {
+      expect([heard, await saving(heard, "rig runs the nightly", "fact")]).toEqual([heard, { said: "Noted, sir.", kept: ["rig runs the nightly"], sent: [] }])
+    }
+    expect(await saving("Remember that so rig runs the nightly.", "rig runs the nightly", "fact")).toEqual(unsaved)
+    expect(await saving("Don't remember that rig runs the nightly.", "rig runs the nightly", "fact")).toEqual({ said: alone, kept: [], sent: [] })
   })
 
   test("a routine's steps go only when he says its whole name, whichever the model picks, said or in his preferences", async () => {
