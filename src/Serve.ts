@@ -1,4 +1,4 @@
-import { Clock, Context, Deferred, Effect, Layer, Logger, Option, Stream } from "effect"
+import { Clock, Context, Deferred, Effect, Layer, Logger, Option, Schedule, Stream } from "effect"
 import { hostname } from "node:os"
 import * as Assistant from "./Assistant.ts"
 import { Activity, DeviceAudio } from "./Audio.ts"
@@ -26,6 +26,7 @@ import { ProviderModel } from "./Model.ts"
 import * as Persona from "./Persona.ts"
 import * as Preferences from "./Preferences.ts"
 import * as Relay from "./Relay.ts"
+import * as Reminders from "./Reminders.ts"
 import * as Remote from "./Remote.ts"
 import { ProviderResponder, switches } from "./Responder.ts"
 import * as Server from "./Server.ts"
@@ -91,6 +92,12 @@ const Relays = Layer.effect(
 const remembered = 365 * 24 * 60 * 60_000
 /** How long what yapd did to threads is kept. */
 const done = 90 * 24 * 60 * 60_000
+/** How long a reminder is kept once it's said or cancelled. */
+const reminded = 30 * 24 * 60 * 60_000
+/** How often what he asked to be reminded of at a time is looked at: a poll, so a restart, the Mac sleeping or its clock changing are all the same. */
+const reminding = "15 seconds"
+/** How often how much of his limits is used is looked at. */
+const usage = "5 minutes"
 
 export const serve = Effect.gen(function* () {
   const started = yield* Clock.currentTimeMillis
@@ -99,8 +106,13 @@ export const serve = Effect.gen(function* () {
   const everywhere = yield* machines(Tunnel.masters(tunnels))
   const journal = yield* Journal.Journal
   const ledger = yield* Ledger.Ledger
+  const store = yield* Store.Store
+  // What he asked to be told later, fired through the journal, in the same database.
+  const reminders = Reminders.make(store, journal)
   yield* Effect.forkScoped(
-    Effect.flatMap(Clock.currentTimeMillis, (now) => Effect.zipRight(journal.prune(now - remembered), ledger.prune(now - done))),
+    Effect.flatMap(Clock.currentTimeMillis, (now) =>
+      Effect.all([journal.prune(now - remembered), ledger.prune(now - done), reminders.prune(now - reminded)], { discard: true }),
+    ),
   )
   const token = yield* Config.t3codeToken
   const live = yield* T3Live.T3Live
@@ -120,12 +132,12 @@ export const serve = Effect.gen(function* () {
     actions: Option.map(token, (token) => T3Actions.make(T3CodeServer.connect(token))),
     others,
     journal,
-    store: yield* Store.Store,
+    store,
   })
   const hands = Hands.make({ threads, ledger, started })
   const naming = yield* Journal.naming
   // What he muted, kept quiet whoever tells of it, until he unmutes it.
-  const mutes = yield* Mutes.make(yield* Store.Store)
+  const mutes = yield* Mutes.make(store)
   const settings = yield* Settings.Settings
   // How yapd talks, focus and quiet holding for later what a mute would keep quiet, kept across restarts.
   const modes = yield* Modes.make({ settings, journal })
@@ -135,6 +147,8 @@ export const serve = Effect.gen(function* () {
   /** Turning yapd on or off as the menu does, once that's made, for "Mute." said to it, and "unmute" by the shortcut while it's off. */
   const toggling = yield* Deferred.make<(on: boolean) => Effect.Effect<void>>()
   const power = (on: boolean) => Effect.flatMap(Deferred.await(toggling), (turn) => turn(on))
+  /** What says notices, once it's made, which says a reminder on its own when the update it led is never said. */
+  const noticing = yield* Deferred.make<Effect.Effect.Success<ReturnType<typeof Notices.make>>>()
   // Hooks on this machine are tied to the thread they came from, so what's said of each is kept with it, and what he says over it goes to it.
   // Another machine's are tied to theirs there for what's kept, shown and muted of them only.
   const daemon = yield* Daemon.make({
@@ -158,6 +172,20 @@ export const serve = Effect.gen(function* () {
             return Option.map(yield* actions.ran(to.id, latest.value), ({ userMessageId }) => userMessageId)
           }).pipe(Effect.catchAll((error) => Effect.as(Effect.logWarning("Could not read which message its latest run began with", error), Option.none()))),
       }),
+    // How the turn a Stop told of ended, by its thread's latest run when that's the Stop's own, for what he set on its finishing to say.
+    ending: (to, stop) => {
+      const unknown: Reminders.Ending = { _tag: "Unknown" }
+      return Option.match(threads.actions(to.machine), {
+        onNone: () => Effect.succeed(unknown),
+        onSome: (actions) =>
+          Effect.gen(function* () {
+            const thread = yield* threads.find(to)
+            const latest = Option.flatMap(thread, ({ latestRunId }) => Option.fromNullable(latestRunId))
+            if (Option.isNone(thread) || Option.isNone(latest)) return unknown
+            return Option.match(yield* actions.ran(to.id, latest.value), { onNone: () => unknown, onSome: (run) => Notices.ended(stop, run, thread.value) })
+          }).pipe(Effect.catchAll((error) => Effect.as(Effect.logWarning("Could not read how its run ended", error), unknown))),
+      })
+    },
     holding: modes.holding,
     detail: modes.detail,
     // "Focus", "talk shorter" or "I'm back" said over an update, in so many words: done here, never sent to the agent. Back, what was
@@ -186,6 +214,14 @@ export const serve = Effect.gen(function* () {
         }),
       ),
     off: power(false),
+    // What he asked to hear once a thread finishes leads its update, named as the desk names it, and is said on its own should that never be.
+    finishing: Reminders.finishing({
+      reminders,
+      desk: (ref) => threads.desk(Option.none(), [ref], 1),
+      lines: persona.lines,
+      announce: (spoken, entry, kept, about) =>
+        Effect.flatMap(Deferred.await(noticing), (notices) => notices.announce(spoken, entry, Effect.succeed(true), entry.at, entry.key, Option.getOrUndefined(kept), about)),
+    }),
   })
   const icons = yield* Icons.make({ actions: threads.actions })
   /** What he hasn't heard, as the assistant gathers it for a catch-up, once it's made. */
@@ -245,6 +281,7 @@ export const serve = Effect.gen(function* () {
     naming,
     modes,
     turn: power,
+    reminders,
   })
   yield* Deferred.succeed(welcome, assistant.welcome)
   missing = Effect.map(assistant.missed, ({ groups }) => groups)
@@ -265,8 +302,17 @@ export const serve = Effect.gen(function* () {
     // The work it started, whose first turn may have ended while yapd restarted, with no word of it then.
     started: (machine, since) => ledger.steps(since, { kinds: ["start"], states: ["prepared", "sent", "unknown"], machine }),
     shortest: (yield* Config.minSeconds) * 1000,
+    reminders,
+    offered: assistant.offered,
+    holding: modes.holding,
   })
+  yield* Deferred.succeed(noticing, notices)
   yield* Effect.forkScoped(notices.follow)
+  // What he heard none of that was handed over to be said before the restart is said again, then what he set for a time is said as it
+  // comes, one due while yapd was down at once.
+  yield* Effect.forkScoped(Effect.zipRight(notices.retell, notices.due.pipe(Effect.repeat(Schedule.spaced(reminding)))))
+  // How much of his limits is used, asked of this Mac's T3 Code every few minutes, said or kept once a window as it passes 95 or 80 percent.
+  yield* Effect.forkScoped(Effect.zipRight(threads.refreshUsage, notices.usage).pipe(Effect.repeat(Schedule.spaced(usage))))
   // Once T3 Code has caught up, what never said what came of it before the restart is looked for, and never sent: what didn't get there is offered.
   // New work T3 Code is still getting ready is said once it's waited for, alongside, so none of the rest waits for it. Each machine's once its own
   // T3 Code has, so one that's down holds up none of the rest, and this one's takes in what went to a machine yapd no longer follows.

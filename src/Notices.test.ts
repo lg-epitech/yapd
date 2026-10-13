@@ -6,6 +6,7 @@ import type { Notice } from "./Inbox.ts"
 import * as Journal from "./Journal.ts"
 import * as Notices from "./Notices.ts"
 import * as Persona from "./Persona.ts"
+import * as Reminders from "./Reminders.ts"
 import * as Store from "./Store.ts"
 import * as T3Actions from "./T3Actions.ts"
 import * as Server from "./T3CodeServer.ts"
@@ -87,8 +88,16 @@ const notices = (
     readonly power?: { on: boolean; turns: number }
     /** What's queued is dropped unsaid as yapd is turned off, rather than said. */
     readonly dropping?: boolean
+    /** What's queued waits under its id, as the inbox keeps it, a newer one taking the place of one waiting under the same, till `speak`. */
+    readonly queueing?: boolean
     /** The work yapd started, as the ledger has it. */
     readonly started?: ReadonlyArray<{ readonly at: number; readonly thread: string; readonly messageId: string | null }>
+    /** Whether he can be reminded of things, kept in the same database, offers asked as they come due kept in `offers`. */
+    readonly reminding?: boolean
+    /** What T3 Code says each provider has used of its limits, as it says it, when it's asked. */
+    readonly usage?: () => ReadonlyArray<Record<string, unknown>>
+    /** Focus or quiet, while one is on. */
+    readonly holding?: () => Option.Option<"focus" | "quiet">
     /** Whether reading a thread fails now, as when T3 Code fails a moment. */
     readonly troubled?: (thread: string) => boolean
   },
@@ -111,7 +120,7 @@ const notices = (
     }
     /** Each machine's T3 Code, reading what `bounded` says, and noting which thread each read was of, by machine. */
     const reads: Array<string> = []
-    const reaching = (machine: string, bounded: Readonly<Record<string, Bounded>>): Effect.Effect<Server.Transport, Server.Trouble> =>
+    const reaching = (machine: string, bounded: Readonly<Record<string, Bounded>>, usage = given.usage): Effect.Effect<Server.Transport, Server.Trouble> =>
       Effect.succeed({
         api: (<A, I>(path: string, schema: Schema.Schema<A, I>) => {
           const id = decodeURIComponent(path.split("/").at(-2) ?? "")
@@ -123,9 +132,11 @@ const notices = (
             projection: { runs: read.runs ?? [], messages: read.messages ?? [], turnItems: read.turnItems ?? [], providerThreads, runtimeRequests: read.runtimeRequests ?? [] },
           }).pipe(Effect.orDie)
         }) as Server.Transport["api"],
-        // With no scratch project to tell of.
+        // With no scratch project to tell of, and its providers' usage when the test gives it.
         call: (<A, I>(method: string, _: unknown, schema: Schema.Schema<A, I>) =>
-          method === "server.getConfig" ? Schema.decodeUnknown(schema)({}).pipe(Effect.orDie) : Effect.die("not expected")) as Server.Transport["call"],
+          method === "server.getConfig"
+            ? Schema.decodeUnknown(schema)(usage === undefined ? {} : { providers: usage() }).pipe(Effect.orDie)
+            : Effect.die("not expected")) as Server.Transport["call"],
         asset: () => Effect.die("not expected"),
       })
     /** Whether rig's threads can be seen, and what its T3 Code tells of. */
@@ -160,6 +171,11 @@ const notices = (
     /** The threads whose turn no hook told of was overtaken, by starting again or going. */
     const overtaken: Array<string> = []
     const power = given.power ?? { on: true, turns: 1 }
+    const reminders = given.reminding === true ? Reminders.make(store, kept) : undefined
+    /** The offers handed over to be asked, by what they'd send. */
+    const offers: Array<string> = []
+    /** What waits to be said, by its id. */
+    const waiting = new Map<string, Notice>()
     const tell = (notice: Notice) =>
       Effect.gen(function* () {
         if (given.dropping === true) {
@@ -167,6 +183,11 @@ const notices = (
           power.turns++
           return yield* notice.gone ?? Effect.void
         }
+        if (given.queueing === true) return void waiting.set(notice.id, notice)
+        yield* say(notice)
+      })
+    const say = (notice: Notice) =>
+      Effect.gen(function* () {
         if (yield* notice.stale) return
         yield* notice.saying ?? Effect.void
         told.push(notice.spoken)
@@ -197,6 +218,8 @@ const notices = (
       returned: (machine) => Effect.sync(() => void returned.push(machine)),
       ...(given.started === undefined ? {} : { started: (_, since) => Effect.succeed((given.started ?? []).filter(({ at }) => at >= since)) }),
       shortest: 60_000,
+      ...(reminders === undefined ? {} : { reminders, offered: (reminder) => Effect.sync(() => void offers.push(reminder.propose ?? "")) }),
+      ...(given.holding === undefined ? {} : { holding: Effect.sync(given.holding) }),
     }).pipe(Effect.provide(Layer.merge(persona, condenser(rewritten))))
     yield* Effect.forkScoped(made.follow)
     const flush = Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 20)))
@@ -204,6 +227,9 @@ const notices = (
       ...made,
       store,
       journal,
+      reminders,
+      offers,
+      power,
       told,
       beingSaid,
       asked,
@@ -234,6 +260,22 @@ const notices = (
         }),
       wait: (seconds: number) => TestClock.adjust(`${seconds} seconds`).pipe(Effect.zipRight(flush)),
       flush,
+      /** What waits is taken up to be said, then cut off by a dictation before its end and put back to be said again, as the daemon keeps it. */
+      cut: Effect.gen(function* () {
+        for (const notice of [...waiting.values()]) {
+          if (yield* notice.stale) waiting.delete(notice.id)
+          else yield* notice.saying ?? Effect.void
+        }
+      }),
+      /** What waits is said in turn, and what comes of it, till nothing does. */
+      speak: Effect.gen(function* () {
+        while (waiting.size > 0) {
+          const next = [...waiting.values()]
+          waiting.clear()
+          for (const notice of next) yield* say(notice)
+          yield* flush
+        }
+      }),
     }
   })
 
@@ -1449,5 +1491,427 @@ describe("Notices while yapd is off", () => {
     )
     expect(result.off).toEqual([])
     expect(result.on).toEqual(["A question on Migrate Tezos Integration, sir: Which fee table?"])
+  })
+})
+
+describe("Notices of reminders", () => {
+  /** Set an hour before now, for a time `due`, to say "call the bank". */
+  const bank = (due: number): Reminders.Asked => ({ at: now - 60 * 60_000, heard: "Remind me to call the bank.", text: "call the bank", due })
+
+  test("a reminder due while yapd was down is said once after the restart", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const before = yield* notices({ view: [], bounded: {}, reminding: true })
+        yield* before.reminders!.add(bank(now - 10 * 60_000))
+        // yapd restarts after it was due: what was handed over before, and what's due, are looked at, then looked at again.
+        const after = yield* notices({ view: [], bounded: {}, reminding: true, store: before.store })
+        yield* after.retell
+        yield* after.due
+        yield* after.wait(15)
+        yield* after.due
+        const once = [...after.told]
+        // And again, after another restart.
+        const again = yield* notices({ view: [], bounded: {}, reminding: true, store: before.store })
+        yield* again.retell
+        yield* again.due
+        return { once, again: again.told, pending: (yield* again.reminders!.pending).length }
+      }),
+    )
+    expect(result.once).toHaveLength(1)
+    // It names the time it was due, so it reads right however late.
+    expect(result.once[0]).toMatch(/^You asked me to remind you at .*, sir: call the bank\.$/)
+    expect(result.again).toEqual([])
+    expect(result.pending).toBe(0)
+  })
+
+  test("a reminder due while yapd is off is kept unheard and never said on its own", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const off = yield* notices({ view: [], bounded: {}, reminding: true, power: { on: false, turns: 1 } })
+        yield* off.reminders!.add(bank(now - 60_000))
+        yield* off.due
+        // Turned on, it isn't said then either, nor after a restart.
+        off.power.on = true
+        off.power.turns = 2
+        yield* off.wait(15)
+        yield* off.due
+        const restarted = yield* notices({ view: [], bounded: {}, reminding: true, store: off.store })
+        yield* restarted.retell
+        yield* restarted.due
+        // It's what he missed while yapd was off.
+        const missed = yield* off.journal.missed(now - 24 * 60 * 60_000, now - 24 * 60 * 60_000)
+        return { told: [...off.told, ...restarted.told], missed: missed.map(({ said, heardAt, detail }) => ({ said, heardAt, held: (detail as { held?: string }).held })) }
+      }),
+    )
+    expect(result.told).toEqual([])
+    expect(result.missed).toHaveLength(1)
+    expect(result.missed[0]).toMatchObject({ heardAt: undefined, held: "off" })
+    expect(result.missed[0]!.said).toMatch(/: call the bank\.$/)
+  })
+
+  test("a reminder is said even after older ones were pruned", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* notices({ view: [], bounded: {}, reminding: true })
+        const first = yield* made.reminders!.add(bank(now - 60_000))
+        yield* made.due
+        // What's said is pruned, and the next one set takes no id it had.
+        yield* made.reminders!.prune(now + 1)
+        const next = yield* made.reminders!.add({ ...bank(now + 60_000), text: "pick up the parcel" })
+        yield* made.wait(75)
+        yield* made.due
+        return { told: made.told, ids: [first.id, next.id] }
+      }),
+    )
+    expect(result.ids[1]).not.toBe(result.ids[0])
+    expect(result.told).toHaveLength(2)
+    expect(result.told[1]).toMatch(/: pick up the parcel\.$/)
+  })
+
+  /** Set a minute before now, to hear when the Tezos one finishes, and to call Bob then when `text` says so. */
+  const tezosDone = (text = "", at = now - 60_000): Reminders.Asked => ({ at, heard: "Tell me when the Tezos one finishes.", text, event: "finished", machine: "Rosie", thread: "tezos", called: "the Tezos importer" })
+
+  /** Whether each reminder's entry was heard. */
+  const remindersHeard = (journal: Journal.Journal["Type"]) =>
+    Effect.map(journal.since(0, { kinds: ["notice"] }), (kept) => kept.filter(({ key }) => key?.startsWith("remind:") === true).map(({ heardAt }) => heardAt !== undefined))
+
+  test("asked once its turn had ended, a thread's finishing is told of when it next finishes, never as the turn before's", async () => {
+    const first = thread("tezos", "Migrate Tezos Integration", { latestRunId: "run-1" })
+    const said = [{ id: "a1", runId: "run-1", role: "assistant", text: "Done, the fee table is in.", createdAt: minutes(0) }]
+    const bounded: Record<string, Bounded> = { tezos: { runs: [{ id: "run-1", status: "completed", ordinal: 1, startedAt: minutes(5), userMessageId: "m1" }], messages: said } }
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* notices({ view: [first], bounded, reminding: true })
+        yield* made.hear(ended(first, "run-1"))
+        // Its turn told of, he sends it more work and asks to hear when that's done.
+        yield* made.wait(30)
+        yield* made.reminders!.add(tezosDone("", now + 30_000))
+        yield* made.wait(60)
+        const early = { told: [...made.told], pending: (yield* made.reminders!.pending).length }
+        const next = thread("tezos", "Migrate Tezos Integration", { latestRunId: "run-2" })
+        bounded.tezos = {
+          runs: [...(bounded.tezos?.runs ?? []), { id: "run-2", status: "completed", ordinal: 2, startedAt: new Date(now + 31_000).toISOString(), userMessageId: "m2" }],
+          messages: [...said, { id: "a2", runId: "run-2", role: "assistant", text: "The full suite passes.", createdAt: new Date(now + 90_000).toISOString() }],
+        }
+        yield* made.becomes(next)
+        yield* made.hear(ended(next, "run-2"))
+        yield* made.wait(60)
+        return { early, told: made.told, pending: (yield* made.reminders!.pending).length }
+      }),
+    )
+    expect(result.early).toEqual({ told: [], pending: 1 })
+    expect(result.told).toEqual([expect.stringMatching(/ has finished, sir, as you asked\.$/)])
+    expect(result.pending).toBe(0)
+  })
+
+  test("a thread he asked to hear finish that fails is told as one: the failure, then what he asked to be reminded of, heard together", async () => {
+    const tezos = thread("tezos", "Migrate Tezos Integration", { status: "failed", latestRunId: "run-1", lastErrorClass: "provider_error" })
+    const bounded = {
+      tezos: { runs: [{ id: "run-1", status: "failed", ordinal: 1, startedAt: minutes(5) }], turnItems: [failure("run-1", "provider_error", "API Error: 500 Internal server error")] },
+    }
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* notices({ view: [tezos], bounded, reminding: true })
+        yield* made.reminders!.add(tezosDone("call Bob"))
+        yield* made.hear(ended(tezos, "run-1"))
+        yield* made.wait(10)
+        return { told: made.told, heard: yield* remindersHeard(made.journal) }
+      }),
+    )
+    expect(result.told).toEqual(["Migrate Tezos Integration failed, sir: the model provider had an error. You asked me to remind you then: call Bob."])
+    expect(result.heard).toEqual([true])
+  })
+
+  test("a thread he asked to hear finish that hits a limit said for another thread already is told on its own, with why it stopped", async () => {
+    const limited = (id: string, title: string, runId: string) =>
+      thread(id, title, { status: "failed", latestRunId: runId, lastErrorClass: "usage_limit", usageLimitResetAt: "2026-10-08T23:00:00.000Z" })
+    const std = limited("std", "Fix the std build", "run-1")
+    const tezos = limited("tezos", "Migrate Tezos Integration", "run-2")
+    const limit = (runId: string) => ({
+      runs: [{ id: runId, status: "failed", ordinal: 1, startedAt: minutes(3) }],
+      turnItems: [failure(runId, "usage_limit", "Claude usage limit reached.", "2026-10-08T23:00:00.000Z")],
+    })
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* notices({ view: [std, tezos], bounded: { std: limit("run-1"), tezos: limit("run-2") }, reminding: true })
+        yield* made.reminders!.add(tezosDone("call Bob"))
+        yield* made.hear(ended(std, "run-1"))
+        yield* made.wait(10)
+        // The same window, minutes later.
+        yield* made.hear(ended(tezos, "run-2"))
+        yield* made.wait(10)
+        return { told: made.told, heard: yield* remindersHeard(made.journal) }
+      }),
+    )
+    expect(result.told).toEqual([
+      expect.stringMatching(/^Fix the std build hit Claude's limit, sir; it resets at \d/),
+      "Migrate Tezos Integration stopped, sir, before finishing: it hit Claude's limit. You asked me to remind you then: call Bob.",
+    ])
+    expect(result.heard).toEqual([true])
+  })
+
+  test("what he set on a thread that hit a limit is told, though another thread's limit comes in while that waits to be said", async () => {
+    const limited = (id: string, title: string, runId: string) =>
+      thread(id, title, { status: "failed", latestRunId: runId, lastErrorClass: "usage_limit", usageLimitResetAt: "2026-10-08T23:00:00.000Z" })
+    const tezos = limited("tezos", "Migrate Tezos Integration", "run-1")
+    const std = limited("std", "Fix the std build", "run-2")
+    const limit = (runId: string) => ({
+      runs: [{ id: runId, status: "failed", ordinal: 1, startedAt: minutes(3) }],
+      turnItems: [failure(runId, "usage_limit", "Claude usage limit reached.", "2026-10-08T23:00:00.000Z")],
+    })
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* notices({ view: [tezos, std], bounded: { tezos: limit("run-1"), std: limit("run-2") }, reminding: true, queueing: true })
+        yield* made.reminders!.add(tezosDone("call Bob"))
+        // Both hit the limit seconds apart, while something else is being said.
+        yield* made.hear(ended(tezos, "run-1"))
+        yield* made.wait(10)
+        yield* made.hear(ended(std, "run-2"))
+        yield* made.wait(10)
+        yield* made.speak
+        return { told: made.told, heard: yield* remindersHeard(made.journal) }
+      }),
+    )
+    expect(result.told).toEqual([expect.stringMatching(/^Migrate Tezos Integration hit Claude's limit, sir; it resets at \d.*\. You asked me to remind you then: call Bob\.$/)])
+    expect(result.heard).toEqual([true])
+  })
+
+  test("a reminder riding on a failure waiting to be said has gone off, so what's said of the failure never tells of one he cancelled", async () => {
+    const tezos = thread("tezos", "Migrate Tezos Integration", { status: "failed", latestRunId: "run-1", lastErrorClass: "provider_error" })
+    const bounded = {
+      tezos: { runs: [{ id: "run-1", status: "failed", ordinal: 1, startedAt: minutes(5) }], turnItems: [failure("run-1", "provider_error", "API Error: 500 Internal server error")] },
+    }
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* notices({ view: [tezos], bounded, reminding: true, queueing: true })
+        const bob = yield* made.reminders!.add(tezosDone("call Bob"))
+        yield* made.hear(ended(tezos, "run-1"))
+        yield* made.wait(10)
+        // He cancels it while the failure waits behind something else being said.
+        const cancelled = yield* made.reminders!.cancel(bob.id)
+        yield* made.speak
+        return { cancelled: Option.isSome(cancelled), told: made.told, heard: yield* remindersHeard(made.journal) }
+      }),
+    )
+    expect(result.cancelled).toBe(false)
+    expect(result.told).toEqual(["Migrate Tezos Integration failed, sir: the model provider had an error. You asked me to remind you then: call Bob."])
+    expect(result.heard).toEqual([true])
+  })
+
+  test("what he set on a thread finishing that ended while yapd couldn't hear it goes by how its run ended: a failure says why, and one he stopped keeps it for its next", async () => {
+    const over = new Date(now - 30_000).toISOString()
+    const tezos = thread("tezos", "Migrate Tezos Integration", { status: "interrupted", latestRunId: "run-1", latestRunCompletedAt: over })
+    const std = thread("std", "Fix the std build", { status: "failed", latestRunId: "run-2", latestRunCompletedAt: over, lastErrorClass: "provider_error" })
+    const bounded = {
+      tezos: { runs: [{ id: "run-1", status: "interrupted", ordinal: 1, startedAt: minutes(5) }] },
+      std: { runs: [{ id: "run-2", status: "failed", ordinal: 1, startedAt: minutes(5) }], turnItems: [failure("run-2", "provider_error", "API Error: 500 Internal server error")] },
+    }
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* notices({ view: [tezos, std], bounded, reminding: true })
+        yield* made.reminders!.add(tezosDone("call Bob"))
+        yield* made.reminders!.add({ ...tezosDone(), thread: "std", called: "the std fix" })
+        // yapd restarts, or T3 Code comes back, once both are over.
+        yield* made.reconcileOn("Rosie")
+        yield* made.flush
+        return { told: made.told, pending: (yield* made.reminders!.pending).map(({ thread }) => thread) }
+      }),
+    )
+    expect(result.told).toEqual(["Fix the std build stopped, sir, before finishing: the model provider had an error."])
+    expect(result.pending).toEqual(["tezos"])
+  })
+
+  test("how a Stop's turn ended, for what he set on its finishing, is read only from its own run: a failure says why, and nothing else can tell", () => {
+    const std = thread("std", "Fix the std build", { status: "failed", latestRunId: "run-2", lastErrorClass: "provider_error" })
+    const failed: T3Actions.Ran = {
+      id: "run-2",
+      status: "failed",
+      startedAt: Option.some(now - 60_000),
+      userMessageId: Option.none(),
+      prompt: Option.none(),
+      said: "The provider failed, so I stopped.",
+      final: "The provider failed, so I stopped.",
+      others: [],
+      failure: Option.some({ class: "provider_error", message: "API Error: 500 Internal server error", resetAt: null }),
+      natives: [],
+      previous: Option.none(),
+    }
+    const stop = (message: string): Notices.Stop => ({ at: now, message })
+    expect(Notices.ended(stop("The provider failed, so I stopped."), failed, std)).toEqual({ _tag: "Failed", why: "the model provider had an error." })
+    // In words that aren't its run's, as when the thread is on another run by now, it can't be told how it went.
+    expect(Notices.ended(stop("The build is green again."), failed, std)).toEqual({ _tag: "Unknown" })
+    expect(Notices.ended(stop("The provider failed, so I stopped."), { ...failed, status: "running" }, std)).toEqual({ _tag: "Unknown" })
+  })
+})
+
+describe("Notices of usage", () => {
+  test("a usage threshold is said once per window, however often it's read", async () => {
+    let used = 82
+    let resets = new Date(now + 3 * 24 * 60 * 60_000).toISOString()
+    const usage = () => [
+      {
+        instanceId: "claudeAgent",
+        displayName: "Claude",
+        enabled: true,
+        status: "ready",
+        usageLimits: { checkedAt: new Date(now).toISOString(), windows: [{ id: "claude-weekly", kind: "weekly", label: "Weekly", usedPercent: used, resetsAt: resets }] },
+      },
+    ]
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* notices({ view: [], bounded: {}, usage })
+        /** Read again, as every five minutes, once what was read before is old enough to be asked again. */
+        const read = (made: { readonly usage: Effect.Effect<void>; readonly wait: (seconds: number) => Effect.Effect<void> }) =>
+          Effect.zipRight(made.wait(16 * 60), made.usage)
+        yield* made.usage
+        // At 80 percent it's kept for the digest, never said.
+        const held = (yield* made.journal.held(0)).map(({ said }) => said)
+        used = 96
+        yield* read(made)
+        yield* read(made)
+        // When it resets moves a little from one read to the next: still the same window.
+        resets = new Date(Date.parse(resets) + 40_000).toISOString()
+        yield* read(made)
+        // And after a restart.
+        const restarted = yield* notices({ view: [], bounded: {}, usage, store: made.store })
+        yield* read(restarted)
+        const once = [...made.told, ...restarted.told]
+        const heldAfter = (yield* made.journal.held(0)).length
+        // A new window, once the last one reset, is said again.
+        resets = new Date(now + 10 * 24 * 60 * 60_000).toISOString()
+        yield* restarted.wait(4 * 24 * 60 * 60)
+        yield* read(restarted)
+        return { held, once, heldAfter, next: restarted.told }
+      }),
+    )
+    expect(result.held).toEqual([expect.stringMatching(/^Claude's weekly limit is at 82 percent, sir\. It resets .*\.$/)])
+    expect(result.once).toEqual([expect.stringMatching(/^Claude's weekly limit is at 96 percent, sir\. It resets .*\.$/)])
+    // Said at 95, what was kept at 80 of the same window isn't for the digest any more.
+    expect(result.heldAfter).toBe(0)
+    expect(result.next).toHaveLength(1)
+  })
+
+  test("a monthly window said at 95 percent isn't said again more than a week on, once when it resets moves into the next hour", async () => {
+    // Weeks off, 20 seconds before the hour.
+    const first = Math.floor((now + 20 * 24 * 60 * 60_000) / 3_600_000) * 3_600_000 + 59 * 60_000 + 40_000
+    let resets = new Date(first).toISOString()
+    const usage = () => [
+      {
+        instanceId: "claudeAgent",
+        displayName: "Claude",
+        enabled: true,
+        status: "ready",
+        usageLimits: { checkedAt: new Date(now).toISOString(), windows: [{ id: "claude-monthly", kind: "monthly", label: "Monthly", usedPercent: 96, resetsAt: resets }] },
+      },
+    ]
+    const told = await run(
+      Effect.gen(function* () {
+        const made = yield* notices({ view: [], bounded: {}, usage })
+        yield* made.usage
+        yield* made.wait(8 * 24 * 60 * 60)
+        resets = new Date(first + 40_000).toISOString()
+        yield* made.usage
+        return made.told
+      }),
+    )
+    expect(told).toEqual([expect.stringMatching(/^Claude's monthly limit is at 96 percent, sir\. It resets .*\.$/)])
+  })
+
+  test("a 95 percent warning waiting to be said as quiet begins is kept for the morning, never said that night", async () => {
+    const usage = () => [
+      {
+        instanceId: "claudeAgent",
+        displayName: "Claude",
+        enabled: true,
+        status: "ready",
+        usageLimits: {
+          checkedAt: new Date(now).toISOString(),
+          windows: [{ id: "claude-weekly", kind: "weekly", label: "Weekly", usedPercent: 96, resetsAt: new Date(now + 3 * 24 * 60 * 60_000).toISOString() }],
+        },
+      },
+    ]
+    let mode = Option.none<"focus" | "quiet">()
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* notices({ view: [], bounded: {}, usage, queueing: true, holding: () => mode })
+        yield* made.usage
+        // It waits behind something being said, and he says goodnight.
+        mode = Option.some("quiet")
+        yield* made.speak
+        // Read again later that night.
+        yield* made.wait(16 * 60)
+        yield* made.usage
+        yield* made.speak
+        return { told: made.told, morning: (yield* made.journal.held(0, 200, { only: ["quiet"] })).map(({ said }) => said) }
+      }),
+    )
+    expect(result.told).toEqual([])
+    expect(result.morning).toEqual([expect.stringMatching(/^Claude's weekly limit is at 96 percent, sir\. It resets .*\.$/)])
+  })
+
+  test("a 95 percent warning cut off by a dictation, then taken up again once quiet began, is kept for the morning, never said that night", async () => {
+    const usage = () => [
+      {
+        instanceId: "claudeAgent",
+        displayName: "Claude",
+        enabled: true,
+        status: "ready",
+        usageLimits: {
+          checkedAt: new Date(now).toISOString(),
+          windows: [{ id: "claude-weekly", kind: "weekly", label: "Weekly", usedPercent: 96, resetsAt: new Date(now + 3 * 24 * 60 * 60_000).toISOString() }],
+        },
+      },
+    ]
+    let mode = Option.none<"focus" | "quiet">()
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* notices({ view: [], bounded: {}, usage, queueing: true, holding: () => mode })
+        yield* made.usage
+        // A dictation cuts it off as it's being said, and puts it back; he says goodnight before it's taken up again.
+        yield* made.cut
+        mode = Option.some("quiet")
+        yield* made.speak
+        // Read again later that night.
+        yield* made.wait(16 * 60)
+        yield* made.usage
+        yield* made.speak
+        return { told: made.told, morning: (yield* made.journal.held(0, 200, { only: ["quiet"] })).map(({ said }) => said) }
+      }),
+    )
+    expect(result.told).toEqual([])
+    expect(result.morning).toEqual([expect.stringMatching(/^Claude's weekly limit is at 96 percent, sir\. It resets .*\.$/)])
+  })
+
+  test("a threshold passed while yapd is off is kept for a catch-up alone, never for the digest or the morning", async () => {
+    const usage = () => [
+      {
+        instanceId: "claudeAgent",
+        displayName: "Claude",
+        enabled: true,
+        status: "ready",
+        usageLimits: {
+          checkedAt: new Date(now).toISOString(),
+          windows: [
+            { id: "claude-session", kind: "session", label: "5h", usedPercent: 84, resetsAt: new Date(now + 2 * 60 * 60_000).toISOString() },
+            { id: "claude-weekly", kind: "weekly", label: "Weekly", usedPercent: 97, resetsAt: new Date(now + 3 * 24 * 60 * 60_000).toISOString() },
+          ],
+        },
+      },
+    ]
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* notices({ view: [], bounded: {}, usage, power: { on: false, turns: 2 }, holding: () => Option.some("quiet") })
+        yield* made.usage
+        return {
+          told: made.told,
+          // What the digest and the morning's rundown read.
+          held: (yield* made.journal.held(0, 200, { except: ["off"] })).length,
+          kept: (yield* made.journal.since(0, { kinds: ["notice"] })).map((entry) => (entry.detail as { readonly held?: unknown }).held),
+        }
+      }),
+    )
+    expect(result.told).toEqual([])
+    expect(result.held).toBe(0)
+    expect(result.kept).toEqual(["off", "off"])
   })
 })

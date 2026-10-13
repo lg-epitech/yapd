@@ -12,6 +12,7 @@ import * as Modes from "./Modes.ts"
 import * as Mutes from "./Mutes.ts"
 import { addressed, type Lines, Persona, unaddressed } from "./Persona.ts"
 import * as Questions from "./Questions.ts"
+import * as Reminders from "./Reminders.ts"
 import { enough, type Line, once, switches } from "./Responder.ts"
 import * as Show from "./Show.ts"
 import * as T3Actions from "./T3Actions.ts"
@@ -52,6 +53,12 @@ export interface Utterance {
    * known, as for what he dictates.
    */
   readonly unsaid?: string
+  /**
+   * For the rest of a request, worked out apart from what came before it in
+   * the same breath: all of what he said, as he said it, to keep beside what
+   * the model made of it; "" when some of it may have been yapd's own voice.
+   */
+  readonly whole?: string
 }
 
 /** What's known of yapd's own voice in what he said back: what it was saying around when he began, and only with that, what he said after a pause. */
@@ -224,6 +231,14 @@ export interface Open {
    * leave the news out, and it's still the question asked again (I4).
    */
   readonly question?: string
+  /** For an offer he set to be made later, the reminder it is: a yes sends it as any message he sends goes, checked for one sent just before. */
+  readonly reminder?: number
+  /**
+   * For which of his reminders he meant, its choices, by the ids they're
+   * kept under, in the order they were named: his answer goes to the one he
+   * picked, whatever else he set, cancelled or went off meanwhile.
+   */
+  readonly reminders?: ReadonlyArray<number>
 }
 
 /** What the user meant, worked out, not yet acted on. */
@@ -336,6 +351,12 @@ export class Assistant extends Context.Tag("yapd/Assistant")<
     readonly welcome: Effect.Effect<void>
     /** What he hasn't heard, as a catch-up of everything would gather it, muted threads too, a thread at a time. */
     readonly missed: Effect.Effect<Missed.Missed>
+    /**
+     * An offer he set came due, handed over to be said, with the entry it was
+     * kept under: asked once nothing else is asked and he isn't dictating,
+     * never in place of a question open, and sent only on his yes.
+     */
+    readonly offered: (reminder: Reminders.Reminder, kept: Option.Option<number>) => Effect.Effect<void>
   }
 >() {}
 
@@ -683,6 +704,8 @@ export const make = (options: {
    * else is.
    */
   readonly turn?: (on: boolean) => Effect.Effect<void>
+  /** What he asked to be told later, which he sets and cancels by voice. Without them, that's something yapd can't do yet. */
+  readonly reminders?: Reminders.Reminders
 }) =>
   Effect.gen(function* () {
     const brain = yield* Brain.Brain
@@ -784,6 +807,10 @@ export const make = (options: {
     const putBy = new Set<string>()
     /** What threads wait on him for that he's heard asked, by request, oldest first: answered by dictation, it's done as he says. */
     const known = new Map<string, Heard>()
+    /** Offers he set that came due, waiting their turn to be asked, after what a restart found, with the entry each was kept under. */
+    const proposed: Array<{ readonly reminder: Reminders.Reminder; readonly kept: Option.Option<number> }> = []
+    /** The reminder he last set or cancelled, which "scratch that" takes back while it's the newest change he made. */
+    let noted: Brain.Noted | undefined
 
     /** Whether a thread still waits on him for this request, as T3 Code last said, even behind a newer one. */
     const still = (ref: Threads.Ref, requestId: string) => threads.waiting(ref, requestId)
@@ -976,7 +1003,7 @@ export const make = (options: {
         const pending = Option.match(open, { onNone: () => [], onSome: ({ candidates }) => candidates })
         // A reply is about what he just heard, which is on the desk already.
         const found = utterance.via === "reply" ? [] : yield* searching(utterance.heard)
-        const [shortlist, recent, spoke, usage, asked, coming, acted, mutes, muteChange, mode] = yield* Effect.all([
+        const [shortlist, recent, spoke, usage, asked, coming, acted, mutes, muteChange, mode, reminders] = yield* Effect.all([
           threads.desk(focus, pending, utterance.via === "reply" ? desk.reply : desk.asked, found, desk.named, utterance.heard),
           // Never what was held for later, which he was never told.
           journal.since(now - lately.span, { most: 2 * lately.most, kinds: ["update", "reply", "dictation", "answer", "started", "notice", "sent", "action", "brief"], held: false }),
@@ -989,6 +1016,7 @@ export const make = (options: {
           options.mutes?.list ?? Effect.succeed<ReadonlyArray<Mutes.Mute>>([]),
           options.mutes?.last ?? Effect.succeedNone,
           options.modes === undefined ? Effect.succeedNone : Effect.map(options.modes.current, Option.some),
+          options.reminders?.pending ?? Effect.succeed<ReadonlyArray<Reminders.Reminder>>([]),
         ])
         // What he hasn't heard, a thread at a time: what was never read out, however much he's spoken since, and what was cut off since
         // he last said something, other than catching up, which he may never have heard the answer to, or something only heard as noise,
@@ -1014,6 +1042,8 @@ export const make = (options: {
           second: Option.none(),
           asked,
           acted,
+          reminders,
+          noted: Option.filter(Option.fromNullable(noted), ({ at }) => now - at <= Duration.toMillis(scratchable)),
           now,
           ...Option.match(seen, { onNone: () => ({}), onSome: ({ title }) => ({ showing: title }) }),
         } satisfies Brain.Situation
@@ -1709,7 +1739,7 @@ export const make = (options: {
       asks?: Asks,
     ): Hands.Act | undefined => {
       const to = Option.map(target, ({ ref }) => ref)
-      // Taking back a stop is letting it carry on.
+      // Taking back a stop is letting it carry on, unless he means a message.
       const stopped = Option.exists(
         last,
         (row) =>
@@ -1732,7 +1762,7 @@ export const make = (options: {
         case "stop":
           return Option.isNone(to) ? undefined : { _tag: "Stop", to: to.value }
         case "undo":
-          return { _tag: "Undo", to, carry: decision.how === "carry" || stopped }
+          return { _tag: "Undo", to, carry: decision.how === "carry" || (decision.how !== "message" && stopped) }
         case "decide": {
           if (Option.isNone(to) || asks?._tag !== "Approval") return undefined
           // Allowed only with "approve" as his answer, however it came here, never a plain yes, nor with more after it, nor in the rest of a
@@ -1964,7 +1994,7 @@ export const make = (options: {
       Effect.gen(function* () {
         // What he went on to say after, which yapd's own voice was never in.
         const { echo: _, afterPause: __, ...before } = thought.utterance
-        const utterance: Utterance = { ...before, heard: thought.decision.rest }
+        const utterance: Utterance = { ...before, heard: thought.decision.rest, whole: thought.utterance.whole ?? ownWords(thought.utterance) }
         yield* Effect.logInfo(`Then: ${utterance.heard}`)
         // Working it out has no effect, so it carries on whether or not what's said waits for it, until yapd is turned off, which stops it like the rest of the request.
         // "It" is the step before as it'll be said, part of catching up when that is, so what the rest comes to is too, however late it's said.
@@ -2195,7 +2225,7 @@ export const make = (options: {
             Effect.flatMap(hands.again(commandId, { how: act.how }), (outcome) => told(act, outcome, { ...thought, decision }, said, { step: 0, commandId }, free)),
           )
         }
-        return yield* follow(checked, { ...thought, decision }, said, { step: 0, twice: true })
+        return yield* follow(checked, { ...thought, decision }, said, { step: 0, twice: open.reminder === undefined })
       })
 
     /**
@@ -2717,7 +2747,7 @@ export const make = (options: {
       const project = decision.text.trim()
       const machine = decision.machine.trim()
       // A time to come, as when the model took his clock for another's, is no window at all: everything is gathered rather than nothing.
-      const at = decision.when.trim() === "" ? Number.NaN : Date.parse(decision.when)
+      const at = decision.when.trim() === "" ? Number.NaN : Brain.instant(decision.when)
       const since = at > situation.now ? Number.NaN : at
       const named =
         Option.getOrUndefined(Option.map(target, ({ called }) => called)) ??
@@ -2868,6 +2898,131 @@ export const make = (options: {
     const rundown = (on: Threads.Desk, spoke: number, said: Lines) =>
       Effect.flatMap(Clock.currentTimeMillis, (now) => catchingUp({}, { desk: on, spoke, about: { _tag: "Nothing" }, nothing: Brain.modeLines(said, now).nothing }, said))
 
+    /** Where a reminder is noted in the journal: under its thread, when it's about one. */
+    const under = (reminder: Pick<Reminders.Reminder, "machine" | "thread">) =>
+      Option.match(Reminders.ref(reminder), { onNone: () => ({}), onSome: ({ machine, id }) => ({ machine, thread: id }) })
+
+    /** What's said of a reminder he set, cancelled or took back, which "it" goes on meaning what it was about, if anything. */
+    const remindedOf = (line: string, reminder: Pick<Reminders.Reminder, "machine" | "thread">): Outcome => ({
+      say: line,
+      subject: { _tag: "Answer", said: line, about: Reminders.ref(reminder) },
+      kind: "done",
+    })
+
+    /**
+     * Keeps what he asked to be told later, or to be offered to send a
+     * thread then, as the model put it, with his words as he said them
+     * beside it, and says so once it's kept, reading back what was: when, the
+     * thread by name, and what it's to say or offer. Never anything sent.
+     */
+    const reminding = (plan: Brain.Plan, thought: Thought, said: Lines) =>
+      Effect.gen(function* () {
+        const { reminders } = options
+        if (reminders === undefined) return reply(Brain.notYet(said), thought.subject)
+        const { decision, target } = plan
+        const now = yield* Clock.currentTimeMillis
+        const told = Reminders.lines(said, now)
+        const offer = decision.act === "offer"
+        const event = decision.how === "finished" || decision.how === "asked" ? decision.how : undefined
+        const listed = Option.getOrUndefined(target)
+        const called = listed === undefined ? "" : Reminders.named(listed)
+        const asked: Reminders.Asked = {
+          at: now,
+          utterance: thought.utterance.id,
+          // His words as he said them, all of them for the rest of a request, unless some may have been yapd's own voice, which never stand for his.
+          heard: thought.utterance.whole ?? ownWords(thought.utterance),
+          text: offer ? "" : decision.text.trim(),
+          ...(offer ? { propose: decision.text.trim() } : {}),
+          ...(event === undefined ? { due: Brain.dueAt(decision.when, now) } : { event }),
+          ...(listed === undefined ? {} : { machine: listed.ref.machine, thread: listed.ref.id, called }),
+        }
+        const kept = yield* reminders.add(asked).pipe(Effect.either)
+        if (Either.isLeft(kept)) {
+          yield* Effect.logWarning("Could not keep a reminder", kept.left)
+          return reply(told.unwritten, thought.subject)
+        }
+        noted = { at: now, kind: "reminder", id: kept.right.id, about: Reminders.ref(asked) }
+        // A thread to hear finish that isn't at work now is heard of when it next finishes, which he's told.
+        const running = listed === undefined || ["running", "finishing", "queued", "approval", "question"].includes(listed.state)
+        const line = told.set(asked, called, running)
+        yield* journal.write({ at: now, kind: "action", ...under(asked), said: line, utterance: thought.utterance.id, detail: { reminder: kept.right.id } })
+        return remindedOf(line, asked)
+      })
+
+    /** Cancels one of what he asked to be told later, as he pointed at it, and says which. */
+    const forgetting = (plan: Brain.Plan, thought: Thought, said: Lines) =>
+      Effect.gen(function* () {
+        const { reminders } = options
+        if (reminders === undefined) return reply(Brain.notYet(said), thought.subject)
+        const found = Brain.remindedBy(plan.decision.target, thought.situation)
+        if (Option.isNone(found)) return reply(said.cantTell, thought.subject)
+        const now = yield* Clock.currentTimeMillis
+        const told = Reminders.lines(said, now)
+        const cancelled = yield* reminders.cancel(found.value.id)
+        if (Option.isNone(cancelled)) return reply(told.over, thought.subject)
+        noted = { at: now, kind: "forgot", id: cancelled.value.id, about: Reminders.ref(cancelled.value) }
+        const line = told.cancelled(cancelled.value, Reminders.calling(cancelled.value, thought.situation.desk))
+        yield* journal.write({ at: now, kind: "action", ...under(cancelled.value), said: line, utterance: thought.utterance.id, detail: { forgot: cancelled.value.id } })
+        return remindedOf(line, cancelled.value)
+      })
+
+    /** Takes back the reminder he just set, or brings back the one he just cancelled, and says so, naming it. */
+    const retracting = (last: Brain.Noted, thought: Thought, said: Lines) =>
+      Effect.gen(function* () {
+        const { reminders } = options
+        if (reminders === undefined) return reply(Brain.notYet(said), thought.subject)
+        const now = yield* Clock.currentTimeMillis
+        const told = Reminders.lines(said, now)
+        const changed = last.kind === "reminder" ? yield* reminders.cancel(last.id) : yield* reminders.restore(last.id)
+        if (Option.isNone(changed)) return reply(last.kind === "reminder" ? told.over : `There's nothing to take back${addressed(said)}.`, thought.subject)
+        // Taken back, it's a change of its own, so taking that back too puts it as it was.
+        noted = { at: now, kind: last.kind === "reminder" ? "forgot" : "reminder", id: changed.value.id, about: Reminders.ref(changed.value) }
+        const line = told.cancelled(changed.value, Reminders.calling(changed.value, thought.situation.desk), last.kind === "forgot")
+        yield* journal.write({
+          at: now,
+          kind: "action",
+          ...under(changed.value),
+          said: line,
+          utterance: thought.utterance.id,
+          detail: { undo: last.kind === "reminder" ? { reminder: changed.value.id } : { forgot: changed.value.id } },
+        })
+        return remindedOf(line, changed.value)
+      })
+
+    /**
+     * Takes back what he just did, as the model said he meant it, never as
+     * whether it filled in a thread: the reminder or offer he just set or
+     * cancelled, of the thread he named if he did and it's of one, and
+     * nothing else then; what yapd last did to a thread, a message or a
+     * stop, of the thread he named if he did, never a reminder or a mute
+     * made since; and for no more than "scratch that", the newest change he
+     * made, whatever thread the model filled in, so a message sent a minute
+     * before a reminder is never withdrawn in its place.
+     */
+    const undoing = (plan: Brain.Plan, thought: Thought, said: Lines, at: Stepping): Effect.Effect<Outcome> =>
+      Effect.gen(function* () {
+        const { situation } = thought
+        const taking = Brain.undoes(plan.decision.how)
+        if (taking === "thread") return yield* write(plan, thought, said, at)
+        const last = Option.getOrUndefined(situation.noted ?? Option.none())
+        const latest =
+          taking === "reminder"
+            ? Brain.newest({ noted: situation.noted ?? Option.none(), acted: Option.none(), muteChange: Option.none() }, Option.getOrUndefined(plan.target)?.ref)
+            : Brain.newest(situation)
+        if (latest === "noted" && last !== undefined) {
+          return yield* Effect.flatMap(retracting(last, thought, said), (outcome) => onward(thought, outcome, Brain.about(outcome.subject), at.step + 1, said))
+        }
+        if (taking === "reminder") {
+          const outcome = reply(`There's nothing to take back${addressed(said)}.`, thought.subject)
+          return yield* onward(thought, outcome, Brain.about(outcome.subject), at.step + 1, said)
+        }
+        if (latest === "mute" && options.controls !== undefined) {
+          const mute = { ...plan, decision: { ...plan.decision, act: "mute" as const, how: "undo" } }
+          return yield* Effect.flatMap(muting(mute, thought, said), (outcome) => onward(thought, outcome, Brain.about(outcome.subject), at.step + 1, said))
+        }
+        return yield* write({ decision: { ...plan.decision, target: "" }, target: Option.none() }, thought, said, at)
+      })
+
     /** Does what was decided and checked: a step of its request, which changes a thread under that step's ids. */
     const perform = (plan: Brain.Plan, thought: Thought, said: Lines, at: Stepping = { step: 0, twice: false }): Effect.Effect<Outcome> => {
       const { decision, target } = plan
@@ -2880,8 +3035,15 @@ export const make = (options: {
               : write(plan, thought, said, at, asks),
           )
         case "stop":
-        case "undo":
           return write(plan, thought, said, at)
+        case "undo":
+          return undoing(plan, thought, said, at)
+        case "remind":
+        case "offer":
+          // Kept, then the rest of the request, done now, like "and tell the Mina one to rebase".
+          return Effect.flatMap(reminding(plan, thought, said), (outcome) => onward(thought, outcome, Brain.about(outcome.subject), at.step + 1, said))
+        case "forget":
+          return Effect.flatMap(forgetting(plan, thought, said), (outcome) => onward(thought, outcome, Brain.about(outcome.subject), at.step + 1, said))
         case "answer":
           return answer(decision.spoken, target, thought, said, at.step)
         case "look":
@@ -3029,10 +3191,10 @@ export const make = (options: {
         if (opened === undefined) return yield* follow(Brain.check(decision, decided.situation, said), decided, said)
         // Taking back what he just did, of the question's thread or none named, a message he dictated, taken as the answer to a part of the
         // question, is taken back out of it. That was all he took back, since it never went: he's told so, and the question's asked again
-        // after, from the part it answered. Let go with "scratch that", it's let go without it.
+        // after, from the part it answered. Let go with "scratch that", it's let go without it. Never when the model took him to mean a reminder.
         const undone = decided.situation.desk.threads.find(({ handle }) => handle === decision.target)
         const ours = undone === undefined || opened.open.candidates.some((ref) => Threads.same(ref, undone.ref))
-        const takenBack = ours && (decision.act === "undo" || (decision.act === "dismiss" && Brain.takesBack(utterance.heard)))
+        const takenBack = ours && ((decision.act === "undo" && decision.how !== "reminder") || (decision.act === "dismiss" && Brain.takesBack(utterance.heard)))
         const open = takenBack ? withdrawing(opened.open) : opened.open
         if (open !== opened.open && decision.act === "undo") {
           yield* close(open, "replaced", utterance.id)
@@ -3678,6 +3840,57 @@ export const make = (options: {
       })
 
     /**
+     * Asks whether to send what he set to be offered a thread, now it's due:
+     * the thread found again on the desk, and the message checked as one he
+     * sent now would be, with no new call to the model, since he settled both
+     * as he set it. Only his yes sends it, under ids of its own then. When it
+     * can't be asked, like once its thread is gone, it's said in words. Heard
+     * asked to the end, its entry in the journal is noted as heard.
+     */
+    const propose = (proposal: (typeof proposed)[number], turns: number) =>
+      Effect.gen(function* () {
+        const { reminder, kept } = proposal
+        const said = yield* persona.lines
+        const at = yield* Clock.currentTimeMillis
+        const told = Reminders.lines(said, at)
+        const id = mint(at, "n")
+        const missed = Option.toArray(kept)
+        const about = Reminders.ref(reminder)
+        const tell = (line: string) =>
+          deliver({ say: line, subject: { _tag: "Answer", said: line, about }, kind: "answer", ...(missed.length === 0 ? {} : { missed }) }, { id, turns })
+        // Typed, as it were: nothing of it was heard, so nothing of it can be faint or yapd's own voice.
+        const utterance: Utterance = { id, heard: "", via: "typed", at, voiced: Number.POSITIVE_INFINITY, turns }
+        const situation = yield* situate(utterance, { _tag: "Nothing" }, [])
+        const on = Option.isNone(about) ? situation.desk : yield* threads.desk(about, [about.value], desk.asked)
+        const listed = Option.flatMap(about, (ref) => Option.fromNullable(on.threads.find((listed) => Threads.same(listed.ref, ref))))
+        // Its machine's threads out of sight, like rig's while it can't be reached, it isn't gone: he's told why it can't be asked.
+        const away = Option.isNone(about) ? Option.none<string>() : yield* threads.unseen(about.value.machine)
+        if (Option.isNone(listed) && Option.isSome(away)) return yield* tell(`${told.offer(reminder, reminder.called ?? "that thread")} ${away.value}`)
+        if (Option.isNone(listed) || reminder.propose === undefined) return yield* tell(told.gone(reminder, reminder.called ?? "that thread"))
+        const called = Reminders.named(listed.value)
+        const decision = Brain.decision({ act: "send", target: listed.value.handle, text: reminder.propose, how: "now", sure: "high" })
+        const checked = Brain.check(decision, { ...situation, desk: on }, said)
+        if (checked._tag !== "Do") return yield* tell(`${told.offer(reminder, called)}${checked._tag === "Say" ? ` ${unaddressed(checked.spoken, said)}` : ""}`)
+        const { doing, question } = told.asking(reminder, called)
+        const outcome = yield* opening(
+          {
+            kind: "offer",
+            utterance: id,
+            heard: "",
+            decision,
+            candidates: [listed.value.ref],
+            asked: question,
+            about: doing,
+            material: Option.none(),
+            resend: Option.none(),
+            reminder: reminder.id,
+          },
+          { turns, at },
+        )
+        yield* deliver(missed.length === 0 ? outcome : { ...outcome, missed }, { id, turns })
+      })
+
+    /**
      * Says the next thing a restart found, once nothing else is asked, he
      * isn't dictating and yapd is on: one question at a time, each offered
      * once. A message that didn't get there is offered to be sent again, or,
@@ -3695,6 +3908,12 @@ export const make = (options: {
         // once it goes unanswered.
         const first = offered?.kind === "missed" && offered.asks === undefined ? offered : undefined
         const next = first === undefined ? restarted.shift() : undefined
+        // Then an offer he set that came due, as he asked for it then.
+        const proposal = first === undefined && next === undefined ? proposed.shift() : undefined
+        if (proposal !== undefined) {
+          yield* propose(proposal, power.turns)
+          continue
+        }
         // Then what threads wait on him for, one at a time: the first that's due, or, when none is yet, the soonest once it is. One on a
         // machine whose threads can't be seen waits for them, which it's asked once they're back.
         if (next === undefined) {
@@ -3790,7 +4009,7 @@ export const make = (options: {
       const off = Missed.off(yield* journal.switched(now - Missed.week, Missed.switches))
       if (off === undefined || off.to !== undefined) return 0
       const missed = yield* Missed.gather(journal, { now, spoke: now, coming: yield* beingTold, desk: nowhere })
-      const rows = missed.groups.flatMap(({ rows }) => rows).filter((kept) => !Missed.muted(kept) && (Missed.whileOff(kept) || kept.kind === "notice"))
+      const rows = missed.groups.flatMap(({ rows }) => rows).filter((kept) => !Missed.muted(kept) && (Missed.whileOff(kept) || (kept.kind === "notice" && Missed.needs(kept))))
       const since = off.before ?? now - Missed.week
       const heldAt = (kept: Kept) => (kept.detail as { readonly heldAt?: unknown } | undefined)?.heldAt
       return rows.some((kept) => Math.max(kept.at, Number(heldAt(kept) ?? kept.at) || kept.at) >= since) ? rows.length : 0
@@ -3969,6 +4188,9 @@ export const make = (options: {
         for (const [requestId, heard] of known) {
           if (partway(heard.asks)) known.set(requestId, { ...heard, asks: fromTheStart(heard.asks), through: undefined })
         }
+        // An offer he set that came due and wasn't asked yet is kept for catching up, as anything due while yapd is off is.
+        const offers = proposed.splice(0, proposed.length).flatMap(({ kept }) => Option.toArray(kept))
+        yield* journal.hold(offers, "off")
         // No answer is on its way any more, and the dictations they were for are dropped too.
         const kept = [...presses.values()]
         presses.clear()
@@ -4073,6 +4295,11 @@ export const make = (options: {
         const now = yield* Clock.currentTimeMillis
         return yield* Missed.gather(journal, { now, spoke: yield* lastSpoke(now), coming: yield* beingTold, desk: nowhere })
       }),
+      offered: (reminder, kept) =>
+        Effect.suspend(() => {
+          proposed.push({ reminder, kept })
+          return Effect.asVoid(Effect.forkIn(turn.withPermits(1)(offering), scope))
+        }),
       welcome: Effect.gen(function* () {
         const { on, turns } = yield* options.power
         if (!on) return

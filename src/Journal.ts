@@ -83,8 +83,10 @@ export class Journal extends Context.Tag("yapd/Journal")<
      * Keeps an entry under its key unless one was ever kept under it, so what's
      * said once is said once across restarts: none when one was, otherwise the
      * new entry's id, when the journal could keep it, to note when it's heard.
+     * `alongside` is done in the same transaction, first: when it says not to
+     * go on, nothing is kept, and it's none as if one had been.
      */
-    readonly claim: (entry: Entry & { readonly key: string }) => Effect.Effect<Option.Option<Option.Option<number>>>
+    readonly claim: (entry: Entry & { readonly key: string }, alongside?: (database: Database) => boolean) => Effect.Effect<Option.Option<Option.Option<number>>>
     /**
      * Notes that the user heard these through, answered them or was briefed
      * on them, unless they had already, and with each the entry it took the
@@ -120,11 +122,17 @@ export class Journal extends Context.Tag("yapd/Journal")<
     readonly latest: (at: number, most: number) => Effect.Effect<ReadonlyArray<Kept>>
     /** Notes that these were kept quiet because he muted their thread, like updates dropped as he did. */
     readonly mute: (ids: ReadonlyArray<number>) => Effect.Effect<void>
-    /** Notes that these were held for later, and why, like updates dropped as focus began, and when they were. */
+    /**
+     * Notes that these were held for later, and why, like updates dropped as
+     * focus began, and when they were. A notice held other than as yapd was
+     * off is ranked with finished work from then on, as one held as it comes
+     * in is, since only such a notice is read back as held.
+     */
     readonly hold: (ids: ReadonlyArray<number>, why: Held) => Effect.Effect<void>
     /**
      * The updates held for later since `at` that he hasn't heard, and that
-     * aren't muted, oldest first, the latest `most` of them, held for the
+     * aren't muted, and notices held for a digest, like a limit four-fifths
+     * used, oldest first, the latest `most` of them, held for the
      * reasons `which` counts, or for any. One that came before `at`, but was
      * only held since, like one waiting to be said as focus began, counts as
      * held since. Never one a newer entry about the same turn took the place of.
@@ -144,6 +152,8 @@ export class Journal extends Context.Tag("yapd/Journal")<
     readonly missed: (at: number, spoke: number, most?: number, whenever?: number) => Effect.Effect<ReadonlyArray<Kept>>
     /** These entries, by id, oldest first, heard or not, like the ones a catch-up told him of. */
     readonly rows: (ids: ReadonlyArray<number>) => Effect.Effect<ReadonlyArray<Kept>>
+    /** The entries kept under a key that starts with `prefix`, however long ago, oldest first, the latest `most` of them. */
+    readonly keyed: (prefix: string, most?: number) => Effect.Effect<ReadonlyArray<Kept>>
     /** The times yapd was turned on or off since `at`, newest first, the latest `most` of them, as the entries kept as it was. */
     readonly switched: (at: number, most?: number) => Effect.Effect<ReadonlyArray<Kept>>
     /**
@@ -289,9 +299,10 @@ const holding = (which: Holding = {}) => {
  * Whether a row is one he's never to lose track of while it's unheard: kept
  * as yapd was off, a notice of a failure or a limit, what needs him, or what
  * he's to hear whatever he muted, like the answer to what he asked a thread.
+ * Never a notice only held for a digest, like a limit four-fifths used.
  */
 const unmissable =
-  "(json_extract(detail, '$.held') = 'off' or kind = 'notice' or json_extract(detail, '$.priority') = 'needs-you' or coalesce(json_extract(detail, '$.audible'), 0) = 1)"
+  "(json_extract(detail, '$.held') = 'off' or (kind = 'notice' and coalesce(json_extract(detail, '$.priority'), '') != 'done') or json_extract(detail, '$.priority') = 'needs-you' or coalesce(json_extract(detail, '$.audible'), 0) = 1)"
 
 /**
  * Whether a row tells him something he still has to hear: never one asking
@@ -344,9 +355,10 @@ export const fromStore = (
           Effect.map(({ id }) => Option.some(id)),
           Effect.catchAll((error) => Effect.logWarning("Could not keep this in my journal", error).pipe(Effect.as(Option.none<number>()))),
         ),
-    claim: (entry) =>
+    claim: (entry, alongside) =>
       store
         .transaction((database: Database) => {
+          if (alongside !== undefined && !alongside(database)) return { claimed: Option.none<Option.Option<number>>(), row: undefined }
           const inserted = database.query(`insert or ignore into journal ${columns}`).run(...values(entry, called))
           if (inserted.changes === 0) return { claimed: Option.none<Option.Option<number>>(), row: undefined }
           const id = Number(inserted.lastInsertRowid)
@@ -473,6 +485,12 @@ export const fromStore = (
                   `update journal set detail = json_set(coalesce(detail, '{}'), '$.held', ?, '$.heldAt', ?) where id in (${ids.map(() => "?").join(", ")})`,
                 )
                 .run(why, now, ...ids)
+              if (why === "off") return
+              database
+                .query<never, Array<number>>(
+                  `update journal set detail = json_set(detail, '$.priority', 'done') where kind = 'notice' and id in (${ids.map(() => "?").join(", ")})`,
+                )
+                .run(...ids)
             }),
           ).pipe(mark, Effect.catchAll((error) => Effect.logWarning("Could not note what I held for later in my journal", error))),
     held: (at, most = 200, which) =>
@@ -481,7 +499,7 @@ export const fromStore = (
           const reasons = holding(which)
           return database
             .query<Row, Array<string | number>>(
-              `select * from journal where kind = 'update' and heard_at is null and ${heldBack} and ${quiet} = 0 and ${standing}${reasons.sql} and max(at, coalesce(json_extract(detail, '$.heldAt'), at)) >= ?
+              `select * from journal where (kind = 'update' or (kind = 'notice' and json_extract(detail, '$.priority') = 'done')) and heard_at is null and ${heldBack} and ${quiet} = 0 and ${standing}${reasons.sql} and max(at, coalesce(json_extract(detail, '$.heldAt'), at)) >= ?
                order by at desc, id desc limit ?`,
             )
             .all(...reasons.values, at, most)
@@ -514,6 +532,19 @@ export const fromStore = (
               database
                 .query<Row, Array<number>>(`select * from journal where id in (${ids.map(() => "?").join(", ")}) order by at, id`)
                 .all(...ids)
+                .map(kept),
+            ),
+          ),
+    keyed: (prefix, most = 1000) =>
+      prefix === ""
+        ? Effect.succeed([])
+        : reading(
+            store.transaction((database: Database) =>
+              database
+                // Keys from the prefix on, up to the first that doesn't start with it: what the index on keys finds.
+                .query<Row, [string, string, number]>("select * from journal where key >= ? and key < ? order by at desc, id desc limit ?")
+                .all(prefix, `${prefix.slice(0, -1)}${String.fromCharCode(prefix.charCodeAt(prefix.length - 1) + 1)}`, most)
+                .reverse()
                 .map(kept),
             ),
           ),

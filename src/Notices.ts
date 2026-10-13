@@ -4,10 +4,12 @@ import * as Brain from "./Brain.ts"
 import { Condenser, english } from "./Condenser.ts"
 import * as Hands from "./Hands.ts"
 import type { Notice } from "./Inbox.ts"
-import type { Entry, Journal } from "./Journal.ts"
+import type { Entry, Journal, Kept } from "./Journal.ts"
+import type * as Modes from "./Modes.ts"
 import * as Payload from "./Payload.ts"
 import { addressed, type Lines, Persona } from "./Persona.ts"
 import * as Questions from "./Questions.ts"
+import * as Reminders from "./Reminders.ts"
 import type * as T3Actions from "./T3Actions.ts"
 import * as T3Live from "./T3Live.ts"
 import * as Threads from "./Threads.ts"
@@ -65,6 +67,8 @@ export const key = {
   failed: (machine: string, runId: string) => `fail:${machine}:${runId}`,
   /** One provider's limit, until `window` it resets at, however many threads hit it. */
   limited: (provider: string, window: string) => `limit:${provider}:${window}`,
+  /** How much of one of a provider's windows is used, at `level` percent, once a window, which `resets` names to the hour. */
+  used: (provider: string, window: string, level: number, resets: string) => `usage:${provider}:${window}:${level}:${resets}`,
   done: (machine: string, runId: string) => `done:${machine}:${runId}`,
 }
 
@@ -119,6 +123,10 @@ export const window = (resets: Option.Option<string>, at: number) =>
       onSome: (reset) => new Date(reset).toISOString().slice(0, 16),
     },
   )
+
+/** Whether two reads of when a window resets are the same window: within the hour, as T3 Code's can move a little from one read to the next. */
+const sameWindow = (one: string | undefined, other: string | undefined) =>
+  one === undefined || other === undefined ? one === other : Math.abs(Date.parse(one) - Date.parse(other)) < 60 * 60_000
 
 /** What reads like a sentence once said: no code, paths or markup. */
 const sayable = /^[\p{L}\p{N} ,.'’&:;!?()%+-]+$/u
@@ -242,6 +250,32 @@ export const lines = {
 
 /** A thread as what's said of it names it: with its machine, as "who needs me" has it, when it isn't on this one. */
 export const named = (listed: Pick<Threads.Listed, "called" | "here" | "ref">) => (listed.here ? listed.called : `${listed.called} on ${listed.ref.machine}`)
+
+/** Why a run stopped before finishing, as what he set on its finishing says it: its provider's limit, or its failure's reason. */
+const stopped = (run: Pick<T3Actions.Ran, "failure">, thread: T3Live.Thread) => {
+  const kind = Option.match(run.failure, { onNone: () => thread.lastErrorClass, onSome: (failure) => failure.class })
+  return kind === "usage_limit" ? `it hit ${provider(thread.modelSelection.instanceId)}'s limit.` : reason(run.failure, thread)
+}
+
+/**
+ * How the turn a Stop told of ended, for what he set on its thread finishing:
+ * as its run has it, when that's the Stop's own by its last words, which
+ * finished, failed, with why, or that he stopped; otherwise it can't be told.
+ */
+export const ended = (stop: Stop, run: T3Actions.Ran, thread: T3Live.Thread): Reminders.Ending => {
+  if (whose(stop, run) !== "own") return { _tag: "Unknown" }
+  switch (run.status) {
+    case "completed":
+    case "waiting":
+      return { _tag: "Finished" }
+    case "failed":
+      return { _tag: "Failed", why: stopped(run, thread) }
+    case "interrupted":
+      return { _tag: "Stopped" }
+    default:
+      return { _tag: "Unknown" }
+  }
+}
 
 /** What a request is said to want when it can't be read, or the model can't say. */
 const unworded = (kind: string) => (kind === "user_input" ? "has a question for you" : "wants your go-ahead on something")
@@ -447,6 +481,14 @@ export interface Finished {
   readonly answering?: boolean
 }
 
+/** What he set on a thread finishing, fired as it's handed over with what's said of its failure, to be said with it. */
+interface Along {
+  /** The entries they were fired under, heard with it once it's said. */
+  readonly entries: ReadonlyArray<number>
+  /** What they'd go with isn't said after all: each is said on its own. */
+  readonly apart: Effect.Effect<void>
+}
+
 /**
  * Says what T3 Code's threads need the user for, whenever yapd is on, and
  * what failed and what finished with no hook to tell of it, unless yapd was
@@ -489,6 +531,12 @@ export const make = (options: {
   ) => Effect.Effect<ReadonlyArray<{ readonly at: number; readonly thread: string; readonly messageId: string | null }>>
   /** Turns shorter than this are taken as watched, as hooks' are. */
   readonly shortest: number
+  /** What he asked to be told later, which what threads do and the time coming fire. Without them, nothing is. */
+  readonly reminders?: Reminders.Reminders
+  /** An offer he set came due, to be asked in its turn, with the entry it was kept under. Without it, it's told in words. */
+  readonly offered?: (reminder: Reminders.Reminder, kept: Option.Option<number>) => Effect.Effect<void>
+  /** Focus or quiet, while one is on: in quiet, a limit nearly used up is kept for the morning. */
+  readonly holding?: Effect.Effect<Option.Option<Modes.Hold>>
 }) =>
   Effect.gen(function* () {
     const { threads, journal } = options
@@ -546,19 +594,32 @@ export const make = (options: {
      * off, or was turned off or on since `turns`, it's kept under its key
      * unheard and nothing is said: what came in while it was off is told
      * only in a catch-up, and its key keeps it from being said later. So
-     * is one dropped unsaid as yapd is turned off.
+     * is one dropped unsaid as yapd is turned off. What goes `along` with it,
+     * fired as it was handed over, goes with it once it's claimed, and is
+     * heard with it; when it isn't said after all, or kept as yapd is off,
+     * each is said, or kept, on its own.
      */
     const notify = (
-      ref: Threads.Ref,
+      ref: Threads.Ref | undefined,
       spoken: string,
       entry: Entry & { readonly key: string },
       still: Effect.Effect<boolean>,
       at: number,
       turns: number,
-      id = `t3:${ref.machine}:${ref.id}`,
+      id = ref === undefined ? entry.key : `t3:${ref.machine}:${ref.id}`,
       kept?: number,
+      along?: Along,
     ) => {
       let claimed: Option.Option<Option.Option<number>> | undefined = kept === undefined ? undefined : Option.some(Option.some(kept))
+      /** The entries of what goes along with it, once it's claimed. */
+      let also: ReadonlyArray<number> | undefined
+      /** What goes along with it, said on its own instead, once. */
+      let parted = false
+      const apart = Effect.suspend(() => {
+        if (along === undefined || parted) return Effect.void
+        parted = true
+        return along.apart
+      })
       /** Kept unheard, unless it was kept already or no longer holds. */
       const keep = Effect.suspend(() =>
         claimed !== undefined
@@ -575,7 +636,7 @@ export const make = (options: {
       )
       return Effect.flatMap(options.power, (power) => {
         if (!power.on || power.turns !== turns) {
-          return Effect.zipRight(keep, Effect.logInfo(`Kept unheard, since yapd is off: ${spoken}`))
+          return Effect.zipRight(Effect.zipRight(keep, apart), Effect.logInfo(`Kept unheard, since yapd is off: ${spoken}`))
         }
         return options.tell(
           {
@@ -585,27 +646,177 @@ export const make = (options: {
             spoken,
             at,
             // Claimed once, the first time it comes up still worth saying: put back after a dictation, it's still this one's to say.
+            // What goes along with it goes with it once it is, and is said on its own once it's found not to be said after all.
             stale: Effect.gen(function* () {
-              if (!(yield* still)) return true
+              if (!(yield* still)) return yield* Effect.as(apart, true)
               if (claimed === undefined) claimed = yield* journal.claim(entry)
-              return Option.isNone(claimed)
+              if (Option.isNone(claimed)) return yield* Effect.as(apart, true)
+              if (also === undefined) also = along?.entries ?? []
+              return false
             }),
-            saying: options.mention(ref, spoken),
+            ...(ref === undefined ? {} : { saying: options.mention(ref, spoken) }),
             heard: Effect.suspend(() => {
-              const row = claimed === undefined ? Option.none() : Option.flatten(claimed)
-              return Option.match(row, {
-                onNone: () => Effect.void,
-                onSome: (row) => Effect.flatMap(Clock.currentTimeMillis, (now) => journal.markHeard([row], now)),
-              })
+              const rows = [...(claimed === undefined ? [] : Option.toArray(Option.flatten(claimed))), ...(also ?? [])]
+              return rows.length === 0 ? Effect.void : Effect.flatMap(Clock.currentTimeMillis, (now) => journal.markHeard(rows, now))
             }),
-            // Dropped before it was ever said, as when yapd is turned off, it's kept unheard for catching up.
-            gone: Effect.flatMap(options.power, (now) => (now.on && now.turns === turns ? Effect.void : keep)),
-            telling: Effect.sync(() => (claimed === undefined ? [] : Option.toArray(Option.flatten(claimed)))),
+            // Dropped before it was ever said, as when yapd is turned off, it's kept unheard for catching up, and what was to go along
+            // with it is said, or kept, on its own.
+            gone: Effect.flatMap(options.power, (now) =>
+              Effect.zipRight(now.on && now.turns === turns ? Effect.void : keep, Effect.suspend(() => (also === undefined ? apart : Effect.void))),
+            ),
+            telling: Effect.sync(() => [...(claimed === undefined ? [] : Option.toArray(Option.flatten(claimed))), ...(also ?? [])]),
           },
           turns,
         )
       })
     }
+
+    /** Reminders handed over to be said since yapd started, so each is handed over once, whatever the journal can tell. */
+    const firing = new Set<number>()
+
+    /** How the threads reminders are about are called now: as the desk has them, or else as they were when he set them. */
+    const callingNow = (set: ReadonlyArray<Reminders.Reminder>) =>
+      Effect.gen(function* () {
+        const refs = set.flatMap((reminder) => Option.toArray(Reminders.ref(reminder)))
+        const desk = refs.length === 0 ? { threads: [], away: [] } : yield* threads.desk(Option.none(), refs, refs.length)
+        return (reminder: Reminders.Reminder) => Reminders.calling(reminder, desk)
+      })
+
+    /** What's said of reminders now. */
+    const reminderLines = Effect.flatMap(persona.lines, (said) => Effect.map(Clock.currentTimeMillis, (now) => Reminders.lines(said, now)))
+
+    /**
+     * Hands a reminder over to be said, once: fired under its key with
+     * `line`, unheard, then said, or for an offer, asked in its turn. Off,
+     * it's kept unheard as what came in while yapd was off, never said on
+     * its own, an offer in words, for catching up.
+     */
+    const remind = (reminder: Reminders.Reminder, line: string) =>
+      Effect.gen(function* () {
+        if (options.reminders === undefined || firing.has(reminder.id)) return
+        firing.add(reminder.id)
+        const { on, turns } = yield* options.power
+        const at = yield* Clock.currentTimeMillis
+        const about = Option.getOrUndefined(Reminders.ref(reminder))
+        const entry = {
+          at,
+          kind: "notice" as const,
+          ...(about === undefined ? {} : { machine: about.machine, thread: about.id }),
+          said: line,
+          detail: { reminder: reminder.id, ...(on ? {} : { held: "off" }) },
+        }
+        const kept = yield* options.reminders.fire(reminder, entry)
+        if (Option.isNone(kept)) {
+          // Cancelled meanwhile, it may be brought back, and handed over then.
+          firing.delete(reminder.id)
+          return yield* Effect.logInfo("Not saying a reminder, since it was said or cancelled already")
+        }
+        if (!on) return yield* Effect.logInfo(`Kept unheard, since yapd is off: ${line}`)
+        if (reminder.propose !== undefined && options.offered !== undefined) return yield* options.offered(reminder, Option.flatten(kept))
+        const key = Reminders.key(reminder.id)
+        yield* notify(about, line, { ...entry, key }, Effect.succeed(true), at, turns, key, Option.getOrUndefined(Option.flatten(kept)))
+      })
+
+    /** What's said of a reminder as it comes due, or an offer in words: a run that failed says why it stopped. */
+    const lineOf = (said: ReturnType<typeof Reminders.lines>, reminder: Reminders.Reminder, called: string, why?: string) =>
+      reminder.propose !== undefined ? said.offer(reminder, called) : why === undefined ? said.fired(reminder, called) : said.failed(reminder, called, why)
+
+    /** Hands these over to be said, each in its own words: a run that failed says why it stopped. */
+    const handing = (set: ReadonlyArray<Reminders.Reminder>, why?: string) =>
+      Effect.gen(function* () {
+        if (set.length === 0) return
+        const called = yield* callingNow(set)
+        const said = yield* reminderLines
+        for (const reminder of set) yield* remind(reminder, lineOf(said, reminder, called(reminder), why))
+      })
+
+    /**
+     * What he set on a thread for when it does as `event` says, still to
+     * come, handed over to be said, each in its own words: of a run that
+     * ended at `before`, only what he set by then, as one set since is for
+     * the thread's next.
+     */
+    const fired = (ref: Threads.Ref, event: Reminders.Event, before?: number, why?: string) =>
+      options.reminders === undefined ? Effect.void : Effect.flatMap(options.reminders.on(ref, event, before), (set) => handing(set, why))
+
+    /** How long after a run's word that its update is on its way what he set on its finishing waits to lead it, before it's said on its own. */
+    const settling = "40 seconds"
+
+    /** What he set on a thread finishing by `before`, as its run ended, said on its own once its update had time to be led by it, in case that never was. */
+    const afterwards = (ref: Threads.Ref, before: number, why?: string) =>
+      options.reminders === undefined
+        ? Effect.void
+        : Effect.asVoid(FiberSet.run(running, Effect.zipRight(Effect.sleep(settling), fired(ref, "finished", before, why)).pipe(trouble)))
+
+    /**
+     * What he set on a thread finishing by `before`, as its run failed: fired
+     * as it's handed over with what's said of the failure, `line`, as any
+     * reminder is as it's handed over, so what's said tells only of those
+     * still to come then, followed by what each asked to be reminded of, to
+     * be heard with it, and one he cancels while it waits has gone off. When
+     * it isn't said after all, as when a limit was said for another thread
+     * already or the thread started again, or is kept as yapd is off, each is
+     * said, or kept, on its own, with why it stopped, under the entry it was
+     * fired under. An offer is asked all the same, in its turn.
+     */
+    const failedToo = (ref: Threads.Ref, line: string, why: string, before: number, turns: number) =>
+      Effect.gen(function* () {
+        const reminders = options.reminders
+        if (reminders === undefined) return { spoken: line, along: undefined }
+        const set = yield* reminders.on(ref, "finished", before)
+        yield* handing(set.filter(({ propose }) => propose !== undefined), why)
+        const riding = set.filter(({ id, propose }) => propose === undefined && !firing.has(id))
+        if (riding.length === 0) return { spoken: line, along: undefined }
+        for (const { id } of riding) firing.add(id)
+        const called = yield* callingNow(riding)
+        const said = yield* reminderLines
+        const own = (reminder: Reminders.Reminder) => said.failed(reminder, called(reminder), why)
+        // Off, or turned off or on since, what it goes with is kept for catching up, and so is each, as any reminder handed over then is.
+        const power = yield* options.power
+        const off = !power.on || power.turns !== turns
+        const at = yield* Clock.currentTimeMillis
+        /** Each that was still to come, with the entry it was fired under. */
+        const kept: Array<readonly [Reminders.Reminder, Option.Option<number>]> = []
+        for (const reminder of riding) {
+          // Kept in its own words, as it's said on its own after a restart when he never heard it.
+          const entry = { at, kind: "notice" as const, machine: ref.machine, thread: ref.id, said: own(reminder), detail: { reminder: reminder.id, ...(off ? { held: "off" } : {}) } }
+          const fired = yield* reminders.fire(reminder, entry)
+          // Cancelled meanwhile, it may be brought back, and handed over then.
+          if (Option.isNone(fired)) firing.delete(reminder.id)
+          else kept.push([reminder, Option.flatten(fired)])
+        }
+        if (kept.length === 0) return { spoken: line, along: undefined }
+        const along: Along = {
+          entries: kept.flatMap(([, row]) => Option.toArray(row)),
+          apart: Effect.gen(function* () {
+            for (const [reminder, row] of kept) {
+              const at = yield* Clock.currentTimeMillis
+              const key = Reminders.key(reminder.id)
+              const entry = { at, kind: "notice" as const, machine: ref.machine, thread: ref.id, said: own(reminder), key, detail: { reminder: reminder.id } }
+              yield* notify(ref, own(reminder), entry, Effect.succeed(true), at, turns, key, Option.getOrUndefined(row))
+            }
+          }),
+        }
+        const spoken = [line, ...kept.map(([reminder]) => said.also(reminder)).filter((also) => also !== "")].join(" ")
+        return { spoken, along }
+      })
+
+    /** A thread he set reminders on went: they're dropped, and he's told so once. */
+    const dropping = (ref: Threads.Ref) =>
+      Effect.gen(function* () {
+        const reminders = options.reminders
+        if (reminders === undefined) return
+        const set = yield* reminders.on(ref)
+        const cancelled = (yield* Effect.forEach(set, ({ id }) => reminders.cancel(id))).flatMap(Option.toArray)
+        const first = cancelled[0]
+        if (first === undefined) return
+        const line = (yield* reminderLines).dropped(first.called ?? "a thread", cancelled)
+        const { turns } = yield* options.power
+        const at = yield* Clock.currentTimeMillis
+        const key = Reminders.key(first.id)
+        const entry = { at, kind: "notice" as const, machine: ref.machine, thread: ref.id, said: line, key, detail: { reminder: first.id, dropped: cancelled.map(({ id }) => id) } }
+        yield* notify(undefined, line, entry, Effect.succeed(true), at, turns, key)
+      })
 
     /**
      * Says what a thread waits on him for: once, ever, until he's heard it,
@@ -649,12 +860,13 @@ export const make = (options: {
      * Once a run is over and its hook has had time to come, says it failed,
      * or hit a limit, or, when no hook told of a turn that went well, what it
      * said, as a hook's update would be, while it's still the thread's
-     * `current` run. Nothing for a run he stopped. Should something of it
+     * `current` run. Nothing for a run he stopped. What he set on its
+     * finishing is what he set by when it `ended`. Should something of it
      * still be to keep, or it couldn't be read, the first turn of work yapd
      * started in the thread is kept looking into.
      */
-    const ran = (ref: Threads.Ref, runId: string, turns: number, at: number, current: Effect.Effect<boolean>) =>
-      looking(ref, runId, turns, at, current).pipe(
+    const ran = (ref: Threads.Ref, runId: string, turns: number, at: number, current: Effect.Effect<boolean>, ended = at) =>
+      looking(ref, runId, turns, at, current, ended).pipe(
         Effect.catchAll((error) => Effect.as(Effect.logWarning("Could not read how a run went", error), true)),
         Effect.flatMap((left) => (left ? opening(ref) : Effect.void)),
       )
@@ -666,7 +878,7 @@ export const make = (options: {
      * as the first turn of work yapd started whose hook's update was kept is,
      * failed, stopped, started again since, or that said nothing.
      */
-    const looking = (ref: Threads.Ref, runId: string, turns: number, at: number, current: Effect.Effect<boolean>) =>
+    const looking = (ref: Threads.Ref, runId: string, turns: number, at: number, current: Effect.Effect<boolean>, ended = at) =>
       Effect.gen(function* () {
         yield* Effect.sleep(failing)
         const actions = threads.actions(ref.machine)
@@ -682,7 +894,7 @@ export const make = (options: {
           const thread = yield* threads.find(ref)
           const shown = yield* listed(ref)
           if (Option.isNone(thread) || Option.isNone(shown)) return
-          yield* failed(ref, run.value, thread.value, named(shown.value), shown.value.project, turns, at)
+          yield* failed(ref, run.value, thread.value, named(shown.value), shown.value.project, turns, at, ended)
         })
         // A Stop hook of its own, said or skipped: what it said, or why it wasn't, stands. But what it told of a failure, kept quiet as he
         // muted the thread, he never hears, so the failure is said after all.
@@ -691,12 +903,19 @@ export const make = (options: {
           if (status === "failed" && options.unheard !== undefined) {
             yield* options.unheard(hooks, failure.pipe(Effect.catchAll((error) => Effect.logWarning("Could not read how a run went", error))))
           }
+          // What he set on its finishing leads its hook's update, unless that told of nothing, skipped as quick or dropped: then it's said
+          // on its own now.
+          const why = status === "failed" ? yield* Effect.map(threads.find(ref), Option.match({ onNone: () => "it ran into an error.", onSome: (thread) => stopped(run.value, thread) })) : undefined
+          yield* hooks.every(({ skipped }) => skipped !== undefined) ? fired(ref, "finished", ended, why) : afterwards(ref, ended, why)
           return yield* Effect.as(Effect.logInfo("Left to its hook"), false)
         }
         if (status === "failed") return yield* Effect.as(failure, false)
         // Left to its hook too, the first turn of work yapd started whose hook's update was kept, though its Stop came before yapd
-        // restarted, or so long ago it's forgotten.
-        if (yield* firstKept(ref, run.value)) return yield* Effect.as(Effect.logInfo("Left to its hook, whose update was kept"), false)
+        // restarted, or so long ago it's forgotten: what he set on its finishing led that update, or is said on its own once it had time to.
+        if (yield* firstKept(ref, run.value)) {
+          yield* afterwards(ref, ended)
+          return yield* Effect.as(Effect.logInfo("Left to its hook, whose update was kept"), false)
+        }
         const thread = yield* threads.find(ref)
         // Archived, he's done with it: nothing of it is said, or ever to keep.
         if (Option.exists(thread, ({ archivedAt }) => archivedAt !== null)) return false
@@ -705,11 +924,17 @@ export const make = (options: {
         // Outside his projects, it isn't named by a project at all.
         const project = shown.value.scratch ? "" : shown.value.project
         // Started again since, what it said then is no longer its latest, as a hook's update isn't once the next prompt comes, even when
-        // that was while what's read of it here was on its way.
+        // that was while what's read of it here was on its way. What he set on its finishing is said all the same, as it did finish.
         const latest = thread.value.latestRunId === null || thread.value.latestRunId === runId
-        if (!latest || !(yield* current)) return yield* Effect.as(Effect.logInfo("Not saying a turn no hook told of, since it started again"), false)
-        if (quick(run.value, at, options.shortest)) return yield* Effect.as(Effect.logInfo("Skipped quick turn, with no hook"), false)
-        if (run.value.said === "") return false
+        if (!latest || !(yield* current)) {
+          yield* fired(ref, "finished", ended)
+          return yield* Effect.as(Effect.logInfo("Not saying a turn no hook told of, since it started again"), false)
+        }
+        if (quick(run.value, at, options.shortest)) {
+          yield* fired(ref, "finished", ended)
+          return yield* Effect.as(Effect.logInfo("Skipped quick turn, with no hook"), false)
+        }
+        if (run.value.said === "") return yield* Effect.as(fired(ref, "finished", ended), false)
         yield* options.finished({
           about: ref,
           project,
@@ -722,6 +947,7 @@ export const make = (options: {
           current,
           answering: sent(run.value),
         })
+        yield* afterwards(ref, ended)
         return true
       })
 
@@ -752,14 +978,145 @@ export const make = (options: {
         )
       })
 
-    /** Says a run failed, with why, or that it hit its provider's limit, once for every thread that does until it resets. */
-    const failed = (ref: Threads.Ref, run: T3Actions.Ran, thread: T3Live.Thread, called: string, project: string, turns: number, at: number) =>
+    /** Whether a limit of this provider that a thread hit was said and still holds, which says more than how much of it is used. */
+    const limitHolds = (who: string) =>
+      Effect.gen(function* () {
+        const now = yield* Clock.currentTimeMillis
+        const said = yield* journal.since(now - longest, { kinds: ["notice"], most: 1000 })
+        return said.some(
+          (entry) =>
+            entry.key !== undefined &&
+            entry.key.startsWith(key.limited(who, "")) &&
+            Option.match(
+              Option.filter(Option.map(decodeLimit(entry.detail), ({ resets }) => Date.parse(resets)), (reset) => !Number.isNaN(reset)),
+              { onNone: () => now - entry.at < lasting, onSome: (reset) => now < reset },
+            ),
+        )
+      })
+
+    /**
+     * Says how much of a provider's window is used once it passes 95 percent,
+     * or keeps it for the digest at 80, each once a window, however often
+     * it's read, across restarts too: a window that's said, whose reset is
+     * still ahead, isn't again, even when when it resets moves a little, and
+     * however long ago it was said, as a monthly one's may be weeks. 95 is
+     * kept for the morning in quiet, said in focus as at any other time, and
+     * not while a limit a thread hit holds, which says more; said, what 80
+     * said of the same window is put by. While yapd is off, it's kept for a
+     * catch-up alone. What was kept of a window that has reset since is put
+     * by too, so a catch-up never tells of it.
+     */
+    const using = (usage: Threads.Usage) =>
+      Effect.gen(function* () {
+        const now = yield* Clock.currentTimeMillis
+        const kept = yield* journal.keyed("usage:")
+        const resetOf = (entry: Kept) => Option.getOrUndefined(Option.map(decodeLimit(entry.detail), ({ resets }) => Date.parse(resets)))
+        // What's kept of a window that has reset since tells of nothing now.
+        const over = kept.filter((entry) => {
+          const reset = resetOf(entry)
+          return entry.heardAt === undefined && reset !== undefined && !Number.isNaN(reset) && reset <= now
+        })
+        yield* journal.markHeard(
+          over.map(({ id }) => id),
+          now,
+        )
+        const said = yield* persona.lines
+        const sir = addressed(said)
+        for (const { provider: name, windows } of usage.providers) {
+          const who = provider(name)
+          for (const window of windows) {
+            const reset = window.resetsAt === undefined ? Number.NaN : Date.parse(window.resetsAt)
+            if (!Number.isNaN(reset) && reset <= now) continue
+            const level = window.usedPercent >= 95 ? 95 : window.usedPercent >= 80 ? 80 : undefined
+            if (level === undefined) continue
+            const id = window.id ?? `${window.kind}:${window.label}`
+            // All that was ever kept of this window, however long ago.
+            const earlier = yield* journal.keyed(`usage:${who}:${id}:`)
+            const same = (entry: Kept, at: number) => entry.key?.startsWith(`usage:${who}:${id}:${at}:`) === true
+            // Said for this window already, while its reset is still ahead, or for as long as the shortest lasts when nobody said when.
+            const told = (at: number) =>
+              earlier.some((entry) => {
+                if (!same(entry, at)) return false
+                const was = resetOf(entry)
+                return was === undefined || Number.isNaN(was) ? now - entry.at < lasting : now < was
+              })
+            // Nor 80 once 95 was said, as a window that rolls on can come down again.
+            if (told(level) || (level === 80 && told(95))) continue
+            if (level === 95 && (yield* limitHolds(who))) continue
+            const { whose, name: windowName } = Brain.windowed(window)
+            const resets = window.resetsAt === undefined ? undefined : Brain.clock(window.resetsAt, now)
+            const spoken = `${who}'s ${whose === "its" ? "" : `${whose.replace(/'s$/, "")} `}${windowName} limit is at ${Math.round(window.usedPercent)} percent${sir}.${
+              resets === undefined ? "" : ` It resets ${resets}.`
+            }`
+            const detail = { usage: { provider: who, window: id, level }, ...(window.resetsAt === undefined ? {} : { resets: window.resetsAt }) }
+            const hour = Number.isNaN(reset) ? new Date(now).toISOString().slice(0, 13) : new Date(reset).toISOString().slice(0, 13)
+            const entry = { at: now, kind: "notice" as const, said: spoken, key: key.used(who, id, level, hour) }
+            const quiet = Effect.map(options.holding ?? Effect.succeedNone, Option.contains<Modes.Hold>("quiet"))
+            // Kept for the digest, or for the morning in quiet: not something that needs him. While yapd is off, it's kept as what came in
+            // then is, for a catch-up alone, never brought up by the digest or the rundown once it's on. Kept already as it was taken up to be
+            // said, then cut off by a dictation and put back, it's held all the same while he's still to hear it.
+            const hold = Effect.gen(function* () {
+              const { on } = yield* options.power
+              const held = !on ? "off" : level === 80 ? "progress" : "quiet"
+              const claimed = yield* journal.claim({ ...entry, detail: { ...detail, held, priority: "done" } })
+              if (Option.isNone(claimed)) {
+                const waiting = (yield* journal.keyed(entry.key)).filter(
+                  (kept) => kept.key === entry.key && kept.heardAt === undefined && (kept.detail as { readonly held?: unknown } | undefined)?.held === undefined,
+                )
+                if (waiting.length === 0) return
+                yield* journal.hold(
+                  waiting.map(({ id }) => id),
+                  held,
+                )
+              }
+              yield* Effect.logInfo(`Kept for later: ${spoken}`)
+            })
+            if (level === 80 || (yield* quiet)) yield* hold
+            else {
+              // Only while it's still as high, in the same window, by the time it's said; and should quiet have begun while it waited, it's
+              // kept for the morning instead.
+              const high = Effect.map(threads.usage, (now) =>
+                Option.exists(now, ({ providers }) =>
+                  providers.some(
+                    (each) => provider(each.provider) === who && each.windows.some((other) => (other.id ?? `${other.kind}:${other.label}`) === id && other.usedPercent >= 95 && sameWindow(other.resetsAt, window.resetsAt)),
+                  ),
+                ),
+              )
+              const still = Effect.gen(function* () {
+                if (!(yield* high)) return false
+                if (!(yield* quiet)) return true
+                yield* hold
+                return false
+              })
+              const { turns } = yield* options.power
+              yield* notify(undefined, spoken, { ...entry, detail }, still, now, turns, entry.key)
+            }
+            // What 80 said of the same window is put by once 95 is.
+            if (level === 95) {
+              yield* journal.markHeard(
+                earlier.filter((entry) => same(entry, 80) && entry.heardAt === undefined).map(({ id }) => id),
+                now,
+              )
+            }
+          }
+        }
+      })
+
+    /**
+     * Says a run failed, with why, or that it hit its provider's limit, once
+     * for every thread that does until it resets, with what he set on its
+     * finishing by when it `ended`. With that riding on it, it waits to be
+     * said under its run's own key, never its thread's or the limit's, so
+     * nothing else, like another thread's limit, takes its place unsaid.
+     */
+    const failed = (ref: Threads.Ref, run: T3Actions.Ran, thread: T3Live.Thread, called: string, project: string, turns: number, at: number, ended: number) =>
       Effect.gen(function* () {
         const said = yield* persona.lines
         const kind = Option.match(run.failure, { onNone: () => thread.lastErrorClass, onSome: (failure) => failure.class })
         // Only while it's still the thread's latest: started again since, he's dealt with it.
         const still = Effect.map(threads.find(ref), Option.exists((thread) => thread.latestRunId === run.id))
         const base = { at, kind: "notice" as const, machine: ref.machine, thread: ref.id, project, detail: { failure: kind } }
+        const own = key.failed(ref.machine, run.id)
         if (kind === "usage_limit") {
           const resets = Option.orElse(
             Option.flatMap(run.failure, (failure) => Option.fromNullable(failure.resetAt)),
@@ -771,11 +1128,12 @@ export const make = (options: {
           // Said for another thread, it isn't again till it resets, whether or not it was known when then.
           const reset = Option.filter(Option.map(resets, Date.parse), (reset) => !Number.isNaN(reset))
           const unsaid = Effect.zipWith(still, holding(who, limit, reset), (still, held) => still && !held)
-          const entry = { ...base, said: spoken, key: limit, detail: { failure: kind, ...Option.match(resets, { onNone: () => ({}), onSome: (resets) => ({ resets }) }) } }
-          return yield* notify(ref, spoken, entry, unsaid, at, turns, limit)
+          const too = yield* failedToo(ref, spoken, stopped(run, thread), ended, turns)
+          const entry = { ...base, said: too.spoken, key: limit, detail: { failure: kind, ...Option.match(resets, { onNone: () => ({}), onSome: (resets) => ({ resets }) }) } }
+          return yield* notify(ref, too.spoken, entry, unsaid, at, turns, too.along === undefined ? limit : own, undefined, too.along)
         }
-        const spoken = lines.failed(called, reason(run.failure, thread), said)
-        yield* notify(ref, spoken, { ...base, said: spoken, key: key.failed(ref.machine, run.id) }, still, at, turns)
+        const too = yield* failedToo(ref, lines.failed(called, reason(run.failure, thread), said), stopped(run, thread), ended, turns)
+        yield* notify(ref, too.spoken, { ...base, said: too.spoken, key: own }, still, at, turns, too.along === undefined ? undefined : own, undefined, too.along)
       })
 
     /** Looks into what a change to a thread comes to, in the background, unless yapd is off. */
@@ -788,11 +1146,15 @@ export const make = (options: {
           generations.set(`${machine}:${ref.id}`, generation(ref) + 1)
           yield* options.overtaken(ref)
         }
+        // Gone, what he set on it is dropped, and he's told so once.
+        if (change._tag === "Removed") yield* FiberSet.run(running, dropping({ machine, id: change.thread.id }).pipe(trouble))
         // A new thread of work yapd started has its first turn kept looking into from the start, even one that ended while T3 Code's word
         // couldn't be heard, which then tells only that the thread is new.
         if (change._tag === "Created") yield* FiberSet.run(running, opening({ machine, id: change.thread.id }).pipe(trouble))
         const news = verdict(change)
         if (Option.isNone(news)) return
+        // Asking him something, what he set on that is said first, as he asked, an approval too, and kept unheard while yapd is off.
+        if (news.value._tag === "Asked") yield* FiberSet.run(running, fired({ machine, id: news.value.thread.id }, "asked").pipe(trouble))
         if (news.value._tag === "Settled") {
           const ref = { machine, id: news.value.thread.id }
           // Gone, or waiting on nothing now, it waits on nothing at all; otherwise it's read, in the background.
@@ -882,7 +1244,7 @@ export const make = (options: {
         yield* Effect.logInfo("Looking into the first turn of work I started, which ended while I couldn't hear it").pipe(Effect.annotateLogs({ thread: thread.value.title }))
         const since = generation(ref)
         const current = Effect.sync(() => generation(ref) === since)
-        return yield* looking(ref, latestRunId, turns, now, current).pipe(Effect.annotateLogs({ thread: thread.value.title }))
+        return yield* looking(ref, latestRunId, turns, now, current, over).pipe(Effect.annotateLogs({ thread: thread.value.title }))
       })
 
     /**
@@ -978,9 +1340,99 @@ export const make = (options: {
         return Effect.asVoid(FiberSet.run(running, recovered))
       })
 
+    /**
+     * What he set on a machine's threads for when one finishes or asks him
+     * something, which happened while yapd couldn't hear of it, as while it
+     * restarted, since T3 Code only tells what changes once it's caught up:
+     * each is said, or kept while yapd is off, by how its run ended, as it
+     * would be as it ended: one that failed says why it stopped, and one he
+     * stopped leaves what he set on its finishing for its next. A thread
+     * gone meanwhile drops what he set on it, which he's told.
+     */
+    const caught = (machine: string) =>
+      Effect.gen(function* () {
+        if (options.reminders === undefined) return
+        const set = (yield* options.reminders.pending).filter((reminder) => reminder.event !== undefined && reminder.machine === machine)
+        const refs = [...new Map(set.flatMap((reminder) => Option.toArray(Reminders.ref(reminder))).map((ref) => [ref.id, ref] as const)).values()]
+        for (const ref of refs) {
+          const thread = yield* threads.find(ref)
+          if (Option.isNone(thread) || thread.value.archivedAt !== null) {
+            yield* dropping(ref)
+            continue
+          }
+          const { latestRunId, latestRunCompletedAt, pendingRuntimeRequest } = thread.value
+          const over = Date.parse(latestRunCompletedAt ?? "")
+          const asking = Date.parse(pendingRuntimeRequest?.createdAt ?? "")
+          // Each by when it was set: only what happened after counts.
+          const on = set.filter(({ thread }) => thread === ref.id)
+          const finishing = on.filter(({ event, at }) => event === "finished" && over > at && !T3Live.busy(thread.value))
+          if (finishing.length > 0) {
+            // How its latest run ended, as the run tells, or else as the thread does when that can't be read.
+            const actions = threads.actions(machine)
+            const run =
+              Option.isNone(actions) || latestRunId === null
+                ? Option.none<T3Actions.Ran>()
+                : yield* actions.value
+                    .ran(ref.id, latestRunId)
+                    .pipe(Effect.catchAll((error) => Effect.as(Effect.logWarning("Could not read how a run went", error), Option.none<T3Actions.Ran>())))
+            const status = Option.match(run, { onNone: () => thread.value.status, onSome: ({ status }) => status })
+            if (status === "failed") yield* handing(finishing, stopped({ failure: Option.flatMap(run, ({ failure }) => failure) }, thread.value))
+            else if (status === "completed" || status === "waiting") yield* handing(finishing)
+          }
+          yield* handing(on.filter(({ event, at }) => event === "asked" && asking > at))
+        }
+      }).pipe(Effect.catchAll((error) => Effect.logWarning("Could not look at what you asked me to tell you of", error)))
+
     return {
       /** Follows what happens to the threads on every machine yapd follows, for as long as yapd runs. */
       follow: Stream.runForEach(threads.changes, ({ machine, change }) => hear(machine, change)),
+      /**
+       * Says something of yapd's own accord, kept under its entry's key so it's
+       * said once, ever, unless `still` says it no longer holds; while yapd is
+       * off, it's kept unheard for catching up. `id` is what it waits under to
+       * be said, never a thread's, so nothing else takes its place. `kept` is
+       * the entry it was kept under already, like a reminder's as it fired.
+       */
+      announce: (spoken: string, entry: Entry & { readonly key: string }, still: Effect.Effect<boolean>, at: number, id: string, kept?: number, ref?: Threads.Ref) =>
+        Effect.flatMap(options.power, ({ turns }) => notify(ref, spoken, entry, still, at, turns, id, kept)),
+      /** How much of each provider's limits is used, said or kept once a window as it passes 95 or 80 percent, as `using` has it. */
+      usage: Effect.flatMap(threads.usage, (usage) => (Option.isNone(usage) ? Effect.void : using(usage.value))).pipe(
+        Effect.catchAll((error) => Effect.logWarning("Could not look at how much of your limits is used", error)),
+      ),
+      /**
+       * Hands over what he set for a time that's come, each once, to be said,
+       * or for an offer, asked; while yapd is off, kept unheard. Its line
+       * names the time it was due, so one due while yapd was down reads right.
+       */
+      due: Effect.gen(function* () {
+        if (options.reminders === undefined) return
+        yield* handing(yield* options.reminders.due(yield* Clock.currentTimeMillis))
+      }).pipe(Effect.catchAll((error) => Effect.logWarning("Could not say what you asked me to remind you of", error))),
+      /**
+       * What was handed over to be said before yapd restarted and he never
+       * heard, in the last twelve hours, but what was kept as yapd was off:
+       * said again under the entry it was kept under, an offer asked again.
+       * Nothing while yapd is off, which keeps it for catching up.
+       */
+      retell: Effect.gen(function* () {
+        if (options.reminders === undefined) return
+        const now = yield* Clock.currentTimeMillis
+        const { on, turns } = yield* options.power
+        if (!on) return
+        for (const kept of yield* journal.since(now - pending, { kinds: ["notice"], most: 1000 })) {
+          const id = Reminders.of(kept)
+          const held = (kept.detail as { readonly held?: unknown } | undefined)?.held
+          if (id === undefined || kept.key === undefined || kept.heardAt !== undefined || held === "off") continue
+          firing.add(id)
+          const reminder = yield* options.reminders.get(id)
+          if (Option.exists(reminder, ({ propose, state }) => propose !== undefined && state === "fired") && options.offered !== undefined) {
+            yield* options.offered(Option.getOrThrow(reminder), Option.some(kept.id))
+            continue
+          }
+          const about = kept.machine === undefined || kept.thread === undefined ? undefined : { machine: kept.machine, id: kept.thread }
+          yield* notify(about, kept.said ?? "", { ...kept, key: kept.key }, Effect.succeed(true), now, turns, kept.key, kept.id)
+        }
+      }).pipe(Effect.catchAll((error) => Effect.logWarning("Could not say again what you asked me to remind you of", error))),
       /** What waits on him on every machine whose threads can be seen, each time yapd is turned on. */
       reconcile: reconciling(() => true),
       /**
@@ -991,7 +1443,10 @@ export const make = (options: {
        * turns of work yapd started there that ended while it couldn't hear them.
        */
       reconcileOn: (machine: string) =>
-        Effect.zipRight(threads.warm(machine), Effect.zipRight(Effect.zipRight(options.returned(machine), opened(machine)), reconciling((on) => on === machine))),
+        Effect.zipRight(
+          threads.warm(machine),
+          Effect.zipRight(Effect.zipRight(Effect.zipRight(options.returned(machine), opened(machine)), caught(machine)), reconciling((on) => on === machine)),
+        ),
     }
   })
 

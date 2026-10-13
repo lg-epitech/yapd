@@ -22,6 +22,7 @@ import { Agent, key, type Payload } from "./Payload.ts"
 import { Persona } from "./Persona.ts"
 import * as Project from "./Project.ts"
 import * as Recent from "./Recent.ts"
+import type * as Reminders from "./Reminders.ts"
 import { RelayError, Relays, type Thread } from "./Relay.ts"
 import type { Handle } from "./Server.ts"
 import * as T3Code from "./T3Code.ts"
@@ -179,6 +180,21 @@ export const make = (
     readonly command?: (heard: string, asks: boolean) => Option.Option<Effect.Effect<string>>
     /** Turns yapd off as the menu does, which "Mute." said on its own over anything it says does too. Without it, that's a stop, as it always was. */
     readonly off?: Effect.Effect<void>
+    /**
+     * What he asked to be told once a thread finishes, as a turn of it is
+     * about to be said: its update is led by them, as one, and said whatever
+     * he muted or holds, an answer to what he asked. Offers are asked apart.
+     * Only those set by `before`, as the turn came: one set since is for the
+     * thread's next. Each says how the turn `ended`, read only when there's
+     * one.
+     */
+    readonly finishing?: (about: Threads.Ref, before: number, ended: Effect.Effect<Reminders.Ending>) => Effect.Effect<ReadonlyArray<Reminders.Leading>>
+    /**
+     * How the turn a Stop hook told of ended, as its thread's run has it, for
+     * what he set on its finishing to say: never finished when that can't be
+     * read, as on a machine whose T3 Code yapd can't see.
+     */
+    readonly ending?: (about: Threads.Ref, stop: Notices.Stop) => Effect.Effect<Reminders.Ending>
   } = {},
 ) => Effect.gen(function* () {
   const lifetime = yield* Effect.scope
@@ -302,6 +318,10 @@ export const make = (
   const audible = new WeakSet<Conversation.Update>()
   /** Updates that are the first turn of work yapd started, which answer what he asked, and which quiet alone holds, for the morning's rundown. */
   const openings = new WeakSet<Conversation.Update>()
+  /** The entries of what he asked to be told as a thread finished, which an update is led by, heard with it. */
+  const leading = new WeakMap<Conversation.Update, ReadonlyArray<number>>()
+  /** What led each update, said on its own should the update be done with before he hears it, as when new work drops it: once. */
+  const alone = new WeakMap<Conversation.Update, Effect.Effect<void>>()
   /** Stops whose update was kept quiet, since he muted its thread, so he never heard what they told of. */
   const hushed = new WeakSet<Notices.Stop>()
   /** The Stop each hook's update is of. */
@@ -812,6 +832,22 @@ export const make = (
       return Effect.asVoid(Effect.forkIn(owing.failure, lifetime))
     })
 
+  /**
+   * What he asked to hear of a thread's finishing, fired to lead an update he
+   * never heard after all, said on its own, each under the entry it was
+   * fired under: apart from what dropped the update, so nothing waits on it.
+   */
+  const apart = (led: Effect.Effect<void> | undefined) =>
+    led === undefined ? Effect.void : Effect.asVoid(Effect.forkIn(Effect.zipRight(Effect.logInfo("Saying on its own what he asked to hear of its finishing, as its update won't be"), led), lifetime))
+
+  /** An update done with before he heard it: what led it is said on its own, once. */
+  const parted = (update: Conversation.Update) =>
+    Effect.suspend(() => {
+      const led = alone.get(update)
+      alone.delete(update)
+      return apart(led)
+    })
+
   /** A failure left to these Stops: said at once if what they told of was kept quiet already, or else once it is, if it ever is. */
   const unheardFailure = (stops: ReadonlyArray<Notices.Stop>, failure: Effect.Effect<void>) =>
     Effect.suspend(() => {
@@ -1060,6 +1096,8 @@ export const make = (
   const prepare = (finished: Finished) => {
     const { session, turn, thread, arrivedAt, generation, hook, needsYou, turns } = finished
     if (hook !== undefined) summing.set(session, hook)
+    /** What he asked to hear of its finishing, once fired to lead it, until it's queued or kept: said on its own should it be neither. */
+    let unsaid: Effect.Effect<void> | undefined
     return Effect.gen(function* () {
       // What was said or held of the same work lately, by its session or its thread, read here rather than once its thread is found,
       // which can take seconds: so "another review round" is told from news. Meanwhile, whether it's in T3 Code's scratch folder,
@@ -1090,11 +1128,23 @@ export const make = (
       // whether that was told by id, which it can't be with no thread found in time.
       const { answers, told } = Option.isSome(tied) ? yield* asked(tied.value, finished) : { answers: Option.none<"start" | "sent">(), told: false }
       const opening = Option.contains(answers, "start")
+      // What he asked to hear once it finishes leads it, as one: then it's what he asked for, however slight, and never kept quiet or held.
+      // Saying how its turn ended: a turn T3 Code said finished did; a hook's goes by its run, and is never said to have finished when
+      // that can't be read. One he stopped leaves it for the thread's next.
+      const ended = (about: Threads.Ref): Effect.Effect<Reminders.Ending> =>
+        finished.fallback !== undefined
+          ? Effect.succeed({ _tag: "Finished" })
+          : finished.stop !== undefined && options.ending !== undefined
+            ? options.ending(about, finished.stop)
+            : Effect.succeed({ _tag: "Unknown" })
+      const reminders = Option.isSome(tied) && options.finishing !== undefined ? yield* options.finishing(tied.value, arrivedAt, ended(tied.value)) : []
+      const reminded = reminders.length > 0
       // Whatever needs him is said in full, question and all, and so is everything once he asked to hear everything, when nothing is held
       // as progress. Otherwise only the headline is said, and the rest is kept for when he asks for more.
       const full = needsYou || summary.priority === "needs-you" || (yield* options.detail ?? Effect.succeed<Modes.Detail>("brief")) === "full"
       // Whoever sent it knows it needs the user, whatever the summary makes of it, and the first turn of work yapd started is never slight.
-      const priority = needsYou ? "needs-you" : (full && summary.priority === "progress") || (opening && summary.priority === "trivial") ? "done" : summary.priority
+      const priority =
+        needsYou ? "needs-you" : (full && summary.priority === "progress") || ((opening || reminded) && summary.priority === "trivial") ? "done" : summary.priority
       const more = full ? "" : (summary.more ?? "").trim()
       // What answers what yapd sent its thread for him, as a message by the shortcut or the work it started, is his own ask too, and so is
       // what answers what he said back through its hook before yapd restarted, when its prompt came before then.
@@ -1104,7 +1154,7 @@ export const make = (
         (priority !== "needs-you" && finished.unprompted === true && (yield* repliedBefore(session, arrivedAt)))
       // What needs him is said whatever he muted, and so is what answers what he asked of the thread himself. A turn that couldn't be
       // summed up may be either, as far as yapd can tell, so it's said.
-      const mutable = priority !== "needs-you" && !answering && summarized
+      const mutable = priority !== "needs-you" && !answering && summarized && !reminded
       const spoken = introduce(project, full ? [summary.spoken, summary.more ?? ""].map((part) => part.trim()).filter((part) => part !== "").join(" ") : summary.spoken)
       // All it would tell, its rest too, as what was kept of its turn is weighed against it word for word.
       const all = Missed.whole(spoken, more)
@@ -1169,22 +1219,41 @@ export const make = (
       const muted = mutable ? yield* muting(keys) : Option.none<Mutes.Mute>()
       if (Option.isSome(muted)) return yield* hush(finished, entry, detail, keys, { _tag: "Muted", mute: muted.value })
       // Off, or turned off since it came, it's kept unheard, what needs him and the answer to what he asked too, for him to catch up on:
-      // nothing that came in around turning off is said late.
-      if (yield* offSince(turns)) return yield* hush(finished, entry, detail, keys, { _tag: "Held", why: "off" })
+      // nothing that came in around turning off is said late. What he asked to hear of its finishing is kept so too.
+      if (yield* offSince(turns)) {
+        yield* Effect.forEach(reminders, ({ fire }) => fire(true), { discard: true })
+        return yield* hush(finished, entry, detail, keys, { _tag: "Held", why: "off" })
+      }
       // Muted first, then kept as yapd is off, then held by the mode, then held as progress: kept the same way, by the same rule, and never rendered.
-      const held: Option.Option<Held> = yield* heldFor(priority, full, mutable, opening)
+      const held: Option.Option<Held> = reminded ? Option.none() : yield* heldFor(priority, full, mutable, opening)
       if (Option.isSome(held)) return yield* hush(finished, entry, detail, keys, { _tag: "Held", why: held.value })
 
+      // Each fired as it's about to be said, once: one said on its own meanwhile is left out. Fired, each is said on its own should this
+      // never be queued, as when its hook came or its thread started again meanwhile, or it can't be rendered.
+      const led = yield* Effect.uninterruptible(
+        Effect.tap(
+          Effect.map(
+            Effect.forEach(reminders, ({ line, fire, apart: own }) => Effect.map(fire(false), Option.map((row) => ({ line, row, own: own(row) })))),
+            (fired) => fired.flatMap(Option.toArray),
+          ),
+          (led) =>
+            Effect.sync(() => {
+              if (led.length > 0) unsaid = Effect.forEach(led, ({ own }) => own, { discard: true })
+            }),
+        ),
+      )
+      const remindRows = led.flatMap(({ row }) => Option.toArray(row))
+      const said = led.length === 0 ? spoken : [...led.map(({ line }) => line), spoken].join(" ")
       const audio = join(dir, `${crypto.randomUUID()}${extension}`)
       // Rendering takes about as long as the speaker takes to get ready.
       yield* soon
-      yield* voice.render(spoken, audio).pipe(Effect.onError(() => removeFile(audio)))
+      yield* voice.render(said, audio).pipe(Effect.onError(() => removeFile(audio)))
       const update: Conversation.Update = {
         session,
         project,
         turn,
         needsYou: priority === "needs-you",
-        spoken,
+        spoken: said,
         ...(more === "" ? {} : { more }),
         audio,
         thread,
@@ -1195,7 +1264,8 @@ export const make = (
       if (finished.hooked) hooked.add(update)
       if (finished.stop !== undefined) stopOf.set(update, finished.stop)
       if (!mutable) audible.add(update)
-      if (opening) openings.add(update)
+      if (opening && !reminded) openings.add(update)
+      if (remindRows.length > 0) leading.set(update, remindRows)
       // Said once ever: one already kept under its key was said, or held, before.
       const { fallback } = finished
       // Given way since to a Stop of its own, or its thread started again or went, it isn't said.
@@ -1225,21 +1295,36 @@ export const make = (
         yield* removeFile(audio)
         return yield* hush(finished, entry, detail, keys, { _tag: "Muted", mute: late.value }, claimed === undefined ? undefined : Option.flatten(claimed))
       }
-      // Turned off meanwhile, it's held for when he catches up, whatever mode began too, which would otherwise have the digest say it.
+      // Turned off meanwhile, it's held for when he catches up, whatever mode began too, which would otherwise have the digest say it, and
+      // what he asked to hear of its finishing with it.
       const off = { _tag: "Held", why: "off" } as const
       if (yield* offSince(turns)) {
         yield* removeFile(audio)
+        yield* journal.hold(remindRows, "off")
+        unsaid = undefined
         return yield* hush(finished, entry, detail, keys, off, claimed === undefined ? undefined : Option.flatten(claimed))
       }
-      const lateHeld: Option.Option<Held> = yield* heldFor(priority, full, mutable, opening)
+      const lateHeld: Option.Option<Held> = reminded ? Option.none() : yield* heldFor(priority, full, mutable, opening)
       if (Option.isSome(lateHeld)) {
         yield* removeFile(audio)
         return yield* hush(finished, entry, detail, keys, { _tag: "Held", why: lateHeld.value }, claimed === undefined ? undefined : Option.flatten(claimed))
       }
       if (fallback !== undefined) standing.set(update, fallback)
-      if (!(yield* enqueue({ session, priority, arrivedAt, update, ...(hook === undefined ? {} : { hook }) }, turns))) {
+      if (unsaid !== undefined) alone.set(update, unsaid)
+      // Queued, what led it is said on its own only once it's done with unheard, which is noted in the same breath.
+      const queued = yield* enqueue({ session, priority, arrivedAt, update, ...(hook === undefined ? {} : { hook }) }, turns).pipe(
+        Effect.tap((queued) =>
+          Effect.sync(() => {
+            if (queued) unsaid = undefined
+          }),
+        ),
+        Effect.uninterruptible,
+      )
+      if (!queued) {
         // Turned off just now, it's kept unheard all the same.
         yield* removeFile(audio)
+        yield* journal.hold(remindRows, "off")
+        unsaid = undefined
         return yield* hush(finished, entry, detail, keys, off, claimed === undefined ? undefined : Option.flatten(claimed))
       }
       const row = claimed === undefined ? yield* journal.write(entry) : Option.flatten(claimed)
@@ -1251,6 +1336,14 @@ export const make = (
       Effect.ensuring(
         Effect.sync(() => {
           if (hook !== undefined && summing.get(session) === hook) summing.delete(session)
+        }),
+      ),
+      // Never queued nor kept, however it ended, even stopped from outside, what was fired to lead it is said on its own.
+      Effect.ensuring(
+        Effect.suspend(() => {
+          const led = unsaid
+          unsaid = undefined
+          return apart(led)
         }),
       ),
       // Stopped from outside, like when newer work of the same session comes in, which skips what's caught below.
@@ -1281,6 +1374,8 @@ export const make = (
         TRef.modify(inbox, (current) => [current.get(session), Inbox.remove(current, session)] as const),
       )
       if (dropped !== undefined) yield* removeFile(Inbox.audio(dropped))
+      // What led it, he never heard, so it's said on its own.
+      if (dropped !== undefined && "update" in dropped) yield* parted(dropped.update)
       // Its hook, if one waits, won't be getting a reply.
       yield* waiting.drop(session)
     })
@@ -1981,7 +2076,8 @@ export const make = (
         if (dropped.replay !== undefined) yield* replayed(dropped.replay)
       }
       const row = rows.get(update)
-      if (row !== undefined) yield* journal.markHeard([row], yield* Clock.currentTimeMillis)
+      alone.delete(update)
+      yield* journal.markHeard([...(row === undefined ? [] : [row]), ...(leading.get(update) ?? [])], yield* Clock.currentTimeMillis)
       // Said in its hook's place, it's the turn's, so a Stop of its own coming later isn't said either.
       const fallback = standing.get(update)
       if (fallback !== undefined) fallback.heard = true
@@ -2052,6 +2148,7 @@ export const make = (
     if (fallback !== undefined && !(yield* begin(fallback))) {
       yield* removeFile(Inbox.audio(ready))
       yield* STM.commit(TRef.set(floor.reading, false))
+      if ("update" in ready) yield* parted(ready.update)
       return yield* Effect.logInfo("Not saying a turn no hook told of, since its hook came or its thread started again")
     }
     saying = ready
@@ -2077,10 +2174,13 @@ export const make = (
       Effect.suspend(() => {
         if (through) return Effect.void
         through = true
+        alone.delete(update)
         const row = rows.get(update)
-        if (row === undefined) return Effect.void
+        // What he asked to hear of its finishing, which led it, is heard with it.
+        const led = leading.get(update) ?? []
+        if (row === undefined) return led.length === 0 ? Effect.void : Effect.flatMap(Clock.currentTimeMillis, (at) => journal.markHeard(led, at))
         return Effect.flatMap(Clock.currentTimeMillis, (at) =>
-          Effect.zipRight(journal.markHeard([row], at), journal.outdated(row, update.session, update.about ?? update.owner, at)),
+          Effect.zipRight(journal.markHeard([row, ...led], at), journal.outdated(row, update.session, update.about ?? update.owner, at)),
         )
       }).pipe(Effect.uninterruptible)
     const reading =
@@ -2129,10 +2229,14 @@ export const make = (
         Effect.suspend(() => {
           if (!cut || through || !("update" in ready) || ready.replay !== undefined) return Effect.void
           const row = rows.get(ready.update)
+          // What led it is kept unheard with it.
+          alone.delete(ready.update)
           // Never heard to the end now, so a failure left to its Stop is handed on, to be kept unheard apart.
-          return Effect.zipRight(row === undefined ? Effect.void : journal.hold([row], "off"), quieten(stopOf.get(ready.update)))
+          return Effect.zipRight(journal.hold([...(row === undefined ? [] : [row]), ...(leading.get(ready.update) ?? [])], "off"), quieten(stopOf.get(ready.update)))
         }),
       ),
+      // Done with before he heard it, not put back nor cut off by turning yapd off, what led it is said on its own.
+      Effect.ensuring(Effect.suspend(() => (kept || cut || through || !("update" in ready) ? Effect.void : parted(ready.update)))),
       // Not put back, it's done with, said or not.
       Effect.ensuring(
         Effect.suspend(() =>
@@ -2214,6 +2318,9 @@ export const make = (
         }
         const row = rows.get(entry.update)
         if (row !== undefined) kept.push(row)
+        // What led it is kept unheard with it.
+        kept.push(...(leading.get(entry.update) ?? []))
+        alone.delete(entry.update)
         // Never said now, so a failure left to its Stop is handed on, to be kept unheard apart.
         yield* quieten(stopOf.get(entry.update))
       }

@@ -98,12 +98,30 @@ export const lasting = (said: string) => {
 }
 
 /**
+ * When a time the model gave is: as his clock reads it, written with no
+ * offset, like "2026-10-12T15:00", which stays right across a change of the
+ * clocks, or as given with one, like a time yapd worked out itself. NaN for
+ * anything else, and for a day or an hour that isn't on the calendar, like
+ * October 32 or 25:00, never the one it would roll over to. 24:00 is the
+ * midnight that ends its day, as ISO 8601 and ECMAScript have it.
+ */
+export const instant = (when: string) => {
+  const written = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(\.\d+)?)?(Z|[+-]\d{2}:?\d{2})?$/.exec(when.trim())
+  if (written === null) return Date.parse(when)
+  const [year, month, day, hour, minute, second] = written.slice(1, 7).map((part) => Number(part ?? 0))
+  const days = new Date(Date.UTC(year!, month!, 0)).getUTCDate()
+  const midnight = hour === 24 && minute === 0 && second === 0 && written[7] === undefined
+  if (month! < 1 || month! > 12 || day! < 1 || day! > days || (hour! > 23 && !midnight) || minute! > 59 || second! > 59) return Number.NaN
+  return written[8] === undefined ? new Date(year!, month! - 1, day!, hour!, minute!, second!).getTime() : Date.parse(when.trim())
+}
+
+/**
  * When a mute the model worked out ends: the time it gives, or, as it may
  * give how long instead, like "for an hour", that long from `now`. None for
  * a time that's gone or anything else, which mutes it until he unmutes it.
  */
 export const ending = (when: string, now: number) => {
-  const at = Date.parse(when)
+  const at = instant(when)
   if (!Number.isNaN(at)) return at > now ? at : undefined
   const minutes = lasting(gist(when).replace(/^for /, ""))
   return minutes === undefined ? undefined : now + minutes * 60_000
