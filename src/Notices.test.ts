@@ -1668,6 +1668,29 @@ describe("Notices of reminders", () => {
     expect(result.told).toEqual([expect.stringMatching(/^Migrate Tezos Integration hit Claude's limit, sir; it resets at \d.*\. You asked me to remind you then: call Bob\.$/)])
     expect(result.heard).toEqual([true])
   })
+
+  test("what he set on a thread finishing that ended while yapd couldn't hear it goes by how its run ended: a failure says why, and one he stopped keeps it for its next", async () => {
+    const over = new Date(now - 30_000).toISOString()
+    const tezos = thread("tezos", "Migrate Tezos Integration", { status: "interrupted", latestRunId: "run-1", latestRunCompletedAt: over })
+    const std = thread("std", "Fix the std build", { status: "failed", latestRunId: "run-2", latestRunCompletedAt: over, lastErrorClass: "provider_error" })
+    const bounded = {
+      tezos: { runs: [{ id: "run-1", status: "interrupted", ordinal: 1, startedAt: minutes(5) }] },
+      std: { runs: [{ id: "run-2", status: "failed", ordinal: 1, startedAt: minutes(5) }], turnItems: [failure("run-2", "provider_error", "API Error: 500 Internal server error")] },
+    }
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* notices({ view: [tezos, std], bounded, reminding: true })
+        yield* made.reminders!.add(tezosDone("call Bob"))
+        yield* made.reminders!.add({ ...tezosDone(), thread: "std", called: "the std fix" })
+        // yapd restarts, or T3 Code comes back, once both are over.
+        yield* made.reconcileOn("Rosie")
+        yield* made.flush
+        return { told: made.told, pending: (yield* made.reminders!.pending).map(({ thread }) => thread) }
+      }),
+    )
+    expect(result.told).toEqual(["Fix the std build stopped, sir, before finishing: the model provider had an error."])
+    expect(result.pending).toEqual(["tezos"])
+  })
 })
 
 describe("Notices of usage", () => {

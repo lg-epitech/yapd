@@ -1303,8 +1303,10 @@ export const make = (options: {
      * What he set on a machine's threads for when one finishes or asks him
      * something, which happened while yapd couldn't hear of it, as while it
      * restarted, since T3 Code only tells what changes once it's caught up:
-     * each is said, or kept while yapd is off. A thread gone meanwhile drops
-     * what he set on it, which he's told.
+     * each is said, or kept while yapd is off, by how its run ended, as it
+     * would be as it ended: one that failed says why it stopped, and one he
+     * stopped leaves what he set on its finishing for its next. A thread
+     * gone meanwhile drops what he set on it, which he's told.
      */
     const caught = (machine: string) =>
       Effect.gen(function* () {
@@ -1317,11 +1319,25 @@ export const make = (options: {
             yield* dropping(ref)
             continue
           }
-          const over = Date.parse(thread.value.latestRunCompletedAt ?? "")
-          const asking = Date.parse(thread.value.pendingRuntimeRequest?.createdAt ?? "")
+          const { latestRunId, latestRunCompletedAt, pendingRuntimeRequest } = thread.value
+          const over = Date.parse(latestRunCompletedAt ?? "")
+          const asking = Date.parse(pendingRuntimeRequest?.createdAt ?? "")
           // Each by when it was set: only what happened after counts.
           const on = set.filter(({ thread }) => thread === ref.id)
-          yield* handing(on.filter(({ event, at }) => event === "finished" && over > at && !T3Live.busy(thread.value)))
+          const finishing = on.filter(({ event, at }) => event === "finished" && over > at && !T3Live.busy(thread.value))
+          if (finishing.length > 0) {
+            // How its latest run ended, as the run tells, or else as the thread does when that can't be read.
+            const actions = threads.actions(machine)
+            const run =
+              Option.isNone(actions) || latestRunId === null
+                ? Option.none<T3Actions.Ran>()
+                : yield* actions.value
+                    .ran(ref.id, latestRunId)
+                    .pipe(Effect.catchAll((error) => Effect.as(Effect.logWarning("Could not read how a run went", error), Option.none<T3Actions.Ran>())))
+            const status = Option.match(run, { onNone: () => thread.value.status, onSome: ({ status }) => status })
+            if (status === "failed") yield* handing(finishing, stopped({ failure: Option.flatMap(run, ({ failure }) => failure) }, thread.value))
+            else if (status === "completed" || status === "waiting") yield* handing(finishing)
+          }
           yield* handing(on.filter(({ event, at }) => event === "asked" && asking > at))
         }
       }).pipe(Effect.catchAll((error) => Effect.logWarning("Could not look at what you asked me to tell you of", error)))
