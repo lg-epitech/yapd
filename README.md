@@ -122,9 +122,9 @@ yapd also says when a provider's limit passes 95 percent of a window, once a win
 
 Ask yapd to keep something in mind, like "remember that rig's T3 Code runs the nightly", and it says "Noted, sir." It goes by it from then on as what's so, never as something to do: "what do you know about rig?" answers from it, and new work you start leans on it only where it needs to. It keeps your words as you said them, so one it can't find word for word in what it heard isn't kept, and it tells you. "Forget that one about rig" gives "Forgotten, sir: rig's T3 Code runs the nightly.", and "scratch that" right after keeping or forgetting one takes it back. A bare "forget it" still only stops yapd talking.
 
-A routine is steps sent to a thread whenever you say its name. "When I say review it, have Sol review it until it's clean" gives "Noted, sir. Review it: have Sol review it until it's clean.", so you hear exactly what's kept, and saying it again with other steps changes it and reads the new ones back. Then "review it" sends those steps, word for word, to the thread you're on, or to one you name, as any message you send goes: the same steps to the same thread within ten minutes ask you first. A name yapd already answers to, like "scratch that" or "yes", can't be one. You can also write routines in your [rules](#your-rules), and one there wins over one you said.
+A routine is steps sent to a thread whenever you say its name. "When I say review it, have Sol review it until it's clean" gives "Noted, sir. Review it: have Sol review it until it's clean.", so you hear exactly what's kept, and saying it again with other steps changes it and reads the new ones back. Then "review it", said with the shortcut, sends those steps, word for word, to the thread you're on, or to one you name, as any message you send goes: the same steps to the same thread within ten minutes ask you first. Said with more that changes what it asks, like "review it for typos", it's your own words that go, never the steps. A name yapd already answers to, like "scratch that" or "yes", can't be one. You can also write routines in your [rules](#your-rules), and one there wins over one you said.
 
-yapd keeps forty at most, about four thousand characters in all, since everything you ask reads them; past that it asks you to forget something first, rather than leave any out. Nothing faint, said over yapd's own voice or that looks like a secret is kept, and it tells you why. Said over an update, these get you asked to use the shortcut. They're kept through restarts, and work while yapd is off.
+yapd keeps forty at most, about four thousand characters in all, since everything you ask reads them; past that it asks you to forget something first, rather than leave any out. Nothing faint, said over yapd's own voice or that looks like a secret is kept, and it tells you why. Said over an update, keeping or forgetting something, or a routine's name, gets you asked to use the shortcut, never sent to its agent, unless it's a plain yes like "ship it" to what the agent just asked. They're kept through restarts, and work while yapd is off.
 
 ## Dictating
 
@@ -176,7 +176,7 @@ When I say "the rig" I mean rig.
 - ship it: Merge the PR once checks pass, then update the dev worktree and reinstall yapd.
 ```
 
-Routines go under a `## Routines` heading, one a line, as `- name: steps`, up to the next heading. Saying "ship it" then sends those steps, as you wrote them, to the thread you're on. Unlike the rest, they're read from the whole file, and can't be forgotten by voice.
+Routines go under a `## Routines` heading, one a line, as `- name: steps`, up to the next heading. Saying "ship it" with the shortcut then sends those steps, as you wrote them, to the thread you're on. Unlike the rest, they're read from the whole file, and can't be forgotten by voice.
 
 `YAPD_PREFERENCES` in your settings points to a file somewhere else. Keep it short, since every prompt waits on it being read: past 6,000 characters, the rest is left out.
 
