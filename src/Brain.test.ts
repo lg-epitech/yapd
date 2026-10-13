@@ -2163,7 +2163,7 @@ describe("memories", () => {
     expect(check("Tell the std one a1.", { act: "reply", target: handleOf(std), text: "A1." })).toEqual({ _tag: "Say", spoken: lines.cantTell })
   })
 
-  test("several unarchived at once are what yapd just archived taken back only when they're all of that step and the model's sure, and otherwise he's told how", () => {
+  test("several unarchived at once are what yapd just archived taken back only when they're all of that step and the model's sure, told to say scratch that only when that's all it would bring back", () => {
     /** Three threads archived, the newest two in the step yapd just did, the oldest the day before. */
     const thread = (n: number) => ({ machine: "Rosie", id: `f00dcafe-0000-4000-8000-00000000000${n}` })
     const step = { utterance: "u0", step: 0 }
@@ -2190,15 +2190,31 @@ describe("memories", () => {
       Brain.check(Brain.decision({ act: "tidy", how: "unarchive", target, sure }), situation("Unarchive them.", shown), lines)
     const undone = unarchive("a2, a1")
     expect(undone._tag === "Do" ? undone.plan.decision : undone).toMatchObject({ act: "undo", how: "tidy", target: "", sure: "high" })
-    const told = { _tag: "Say" as const, spoken: "I can only unarchive one thread at a time. Say bring them back to undo the archive, sir." }
-    // One more than the step, the same one twice, or the model unsure, it's never taken back.
-    expect(unarchive("a1, a2, a3")).toEqual(told)
-    expect(unarchive("a1, a01")).toEqual(told)
+    // The model unsure he means all of it, he's told to say "scratch that", which takes back that step and nothing else.
+    const told = { _tag: "Say" as const, spoken: "I can only unarchive one thread at a time. Say scratch that to undo the archive, sir." }
     expect(unarchive("a1, a2", "medium")).toEqual(told)
-    // With nothing just archived to take back, it's one at a time.
+    expect(unarchive("a1, a2", "low")).toEqual(told)
+    // One more than the step, or the same one twice, is never taken back, nor is he told to take it back, which would bring back one he
+    // didn't name, or leave one he did: it's one at a time.
     const one = { _tag: "Say" as const, spoken: "I can only do that to one thread at a time, sir." }
+    expect(unarchive("a1, a2, a3")).toEqual(one)
+    expect(unarchive("a1, a01")).toEqual(one)
+    // With nothing just archived to take back, it's one at a time.
     expect(unarchive("a1, a2", "high", { archived })).toEqual(one)
     expect(unarchive("a1, a2", "high", { archived, acted: Option.some({ ...acted, kind: "message" }) })).toEqual(one)
+    // Muted since, "scratch that" would take back the mute, so he's never told to say it.
+    const muted = Option.some({ how: "mute" as const, at: now - 10_000, added: [{ key: `t3:Rosie:${tezos.id}`, at: now - 10_000 }], removed: [] })
+    expect(unarchive("a1, a2", "medium", { archived, acted: Option.some(acted), muteChange: muted })).toEqual(one)
+    // The Tezos fees and importer archived together, then the Mina fees alone just now: unarchiving the first two, which taking back
+    // the newest archive would leave archived while it brought back the Mina fees, is one at a time.
+    const later = { utterance: "u1", step: 0 }
+    const since: ReadonlyArray<Brain.Archived> = [
+      { ref: thread(3), called: "the Mina fees", at: now - 10_000, step: later },
+      { ref: thread(1), called: "the Tezos fees", at: now - 60_000, step },
+      { ref: thread(2), called: "the Tezos importer", at: now - 60_000, step },
+    ]
+    const archivedLater = Option.some({ ...acted, ...later, commandId: "yapd:u1:0:1", thread: thread(3).id, body: { _tag: "Archive" as const, called: "the Mina fees" }, at: now - 10_000 })
+    for (const sure of ["high", "medium"] as const) expect(unarchive("a2, a3", sure, { archived: since, acted: archivedLater })).toEqual(one)
   })
 
   test("a new title is his as he said it, symbols and all, whatever quotes he put around it, so the model's \"C parser\" for his \"C++ parser\" is read back to him before it's renamed", () => {

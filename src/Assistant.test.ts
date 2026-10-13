@@ -13638,9 +13638,9 @@ describe("Assistant tidying", () => {
     expect(await undoing("reminder", (situation) => handle(situation, docs), "high")).toEqual({ said: "There's nothing to take back, sir.", pending: 0, sent: archived })
   })
 
-  test("unarchiving at once all of the threads yapd just archived together takes that back, their reminders with them, and only when the model's sure", async () => {
-    /** The Tezos importer and fees, each with a reminder on it, archived together, then both unarchived by their handles in ARCHIVED, the model `sure` of it. */
-    const unarchiving = (sure: Brain.Sure) =>
+  test("unarchiving at once all of the threads yapd just archived together takes that back, their reminders with them, only when the model's sure, and scratch that, as he's told otherwise, does", async () => {
+    /** The Tezos importer and fees, each with a reminder on it, archived together, then both unarchived by their handles in ARCHIVED, the model `sure` of it, and what he says `then`. */
+    const unarchiving = (sure: Brain.Sure, then?: string) =>
       run(
         Effect.gen(function* () {
           const made = yield* assistant(
@@ -13663,12 +13663,15 @@ describe("Assistant tidying", () => {
           // T3 Code archived them, which the shell then shows them as.
           for (const one of [importer, fees]) yield* made.becomes({ ...one, archivedAt: "2026-10-01T02:18:01.000Z" })
           yield* made.dictate("Unarchive them.")
+          if (then !== undefined) yield* made.dictate(then)
           return { said: made.spoken().at(-1), pending: (yield* made.reminders!.pending).length, sent: tidied(made.dispatched).map(({ type }) => type) }
         }),
       )
     const archived = ["thread.archive", "thread.archive"]
-    expect(await unarchiving("high")).toEqual({ said: "Unarchived both, sir. Their two reminders are back.", pending: 2, sent: [...archived, "thread.unarchive", "thread.unarchive"] })
-    expect(await unarchiving("medium")).toEqual({ said: "I can only unarchive one thread at a time. Say bring them back to undo the archive, sir.", pending: 0, sent: archived })
+    const undone = { said: "Unarchived both, sir. Their two reminders are back.", pending: 2, sent: [...archived, "thread.unarchive", "thread.unarchive"] }
+    expect(await unarchiving("high")).toEqual(undone)
+    expect(await unarchiving("medium")).toEqual({ said: "I can only unarchive one thread at a time. Say scratch that to undo the archive, sir.", pending: 0, sent: archived })
+    expect(await unarchiving("medium", "Scratch that.")).toEqual(undone)
   })
 
   test("taking back the reminder of a thread he names by its handle in ARCHIVED, with none the archive dropped to bring back, takes back nothing, never another thread's", async () => {

@@ -3150,8 +3150,8 @@ const tidyLines = (lines: Pick<Lines, "address">) => {
   const sir = addressed(lines)
   return {
     one: `I can only do that to one thread at a time${sir}.`,
-    /** Several to unarchive, while what yapd just did is archiving some of them, which taking that back brings back. */
-    back: `I can only unarchive one thread at a time. Say bring them back to undo the archive${sir}.`,
+    /** Several to unarchive that are all yapd just archived together, with the model unsure he means it, which "scratch that" brings back. */
+    back: `I can only unarchive one thread at a time. Say scratch that to undo the archive${sir}.`,
     many: (n: number) => `That's ${count(n)} threads${sir}. I only tidy ${count(tidiedAtMost)} at a time by voice.`,
     when: `I couldn't tell when you meant${sir}.`,
     past: `That time's already gone${sir}.`,
@@ -3295,14 +3295,16 @@ const tidying = (
   if (murmured(choice, utterance)) return { _tag: "Do", plan: { decision: { ...choice, act: "resume" }, target: Option.none() } }
   if (!tidyings.has(choice.how)) return { _tag: "Say", spoken: lines.cantTell }
   const handles = tidyHandles(choice.target)
-  // Several unarchived at once that are all yapd just archived in one step are that taken back, reminders and all, as for "bring them
-  // back", only when the model's sure, and none left out nor any more; any other several, he's told how to take an archive back.
+  // Several unarchived at once that are all yapd just archived in one step are that taken back, reminders and all, as for "scratch
+  // that", only when the model's sure, and none left out nor any more. Only unsure of it, he's told to say "scratch that", while that's
+  // what it takes back; any other several are one at a time, since taking an archive back would bring back threads he didn't name.
   if (handles.length > 1 && choice.how === "unarchive") {
     const step = archiveStep(situation)
-    if (choice.sure === "high" && step.length > 0 && sameThreads(handles.map((handle) => archivedBy(handle, situation)), step)) {
+    const all = step.length > 0 && sameThreads(handles.map((handle) => archivedBy(handle, situation)), step)
+    if (all && choice.sure === "high") {
       return { _tag: "Do", plan: { decision: { ...choice, act: "undo", how: "tidy", target: "", text: "", when: "", others: "" }, target: Option.none() } }
     }
-    return { _tag: "Say", spoken: step.length > 0 ? said.back : said.one }
+    return { _tag: "Say", spoken: all && newest(situation) === "acted" ? said.back : said.one }
   }
   if (handles.length > 1 && !listable.has(choice.how)) return { _tag: "Say", spoken: said.one }
   if (handles.length > tidiedAtMost) return { _tag: "Say", spoken: said.many(handles.length) }
