@@ -11503,6 +11503,42 @@ describe("Assistant reminders", () => {
     expect(result.said).toMatch(/^Cancelled your reminder .*, sir: call the bank\.$/)
     expect(result.pending).toBe(0)
   })
+
+  test("cancelling one of two reminders that say the same, when the model isn't sure which, asks which, naming each, and cancels the one he picks", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(
+          (situation) => {
+            const { heard } = situation.utterance
+            if (heard === "Remind me at five to call the bank.") return Brain.decision({ act: "remind", how: "at", when: local(soon), text: "call the bank" })
+            if (heard === "Remind me at six to call the bank.") return Brain.decision({ act: "remind", how: "at", when: local(later), text: "call the bank" })
+            // Both say the same: the newest is its best guess, the other nearly as good.
+            if (heard === "Cancel the bank reminder.") return Brain.decision({ act: "forget", target: "r1", sure: "low", others: "r2" })
+            return undefined
+          },
+          undefined,
+          { reminders: true },
+        )
+        yield* made.dictate("Remind me at five to call the bank.")
+        yield* made.dictate("Remind me at six to call the bank.")
+        yield* made.dictate("Cancel the bank reminder.")
+        const asked = { said: made.spoken().at(-1), pending: (yield* made.reminders!.pending).length }
+        // One set meanwhile, as from the menu, comes first in REMINDERS now.
+        yield* made.reminders!.add({ at: now, heard: "Remind me tomorrow to water the plants.", text: "water the plants", due: later + 24 * 60 * 60_000 })
+        yield* made.answer("The second one.")
+        return { asked, said: made.spoken().at(-1), left: (yield* made.reminders!.pending).map(({ text, due }) => [text, due]) }
+      }),
+    )
+    // Nothing is cancelled on a guess.
+    expect(result.asked.said).toBe(`Which reminder, sir: call the bank at ${Brain.time(later)} or call the bank at ${Brain.time(soon)}?`)
+    expect(result.asked.pending).toBe(2)
+    // The second named, the one at five, however the list moved since.
+    expect(result.said).toBe(`Cancelled your reminder at ${Brain.time(soon)}, sir: call the bank.`)
+    expect(result.left).toEqual([
+      ["water the plants", later + 24 * 60 * 60_000],
+      ["call the bank", later],
+    ])
+  })
 })
 
 describe("Assistant offers giving way", () => {

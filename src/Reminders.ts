@@ -309,6 +309,16 @@ export const lines = (said: Pick<Lines, "address">, now: number) => {
       } It's gone from T3 Code.`,
     /** The question an offer is asked with once it's due: what a yes sends, and to which thread. */
     asking: (reminder: Reminder, called: string) => ({ doing: message(reminder.propose ?? "", called), question: `Shall I ${message(reminder.propose ?? "", called)}${sir}?` }),
+    /**
+     * One named among those he's asked to choose between: what it's to say,
+     * then when, like "call the bank at 3:00 PM", or the thread it waits on;
+     * "the one" when it's to say nothing more; an offer by its thread.
+     */
+    chosen: (reminder: Reminder, called: string): string => {
+      if (reminder.propose !== undefined) return `your offer to ${called} ${reminder.event === undefined ? ahead(reminder.due ?? now, now) : `for when it ${doing(reminder.event)}`}`
+      const when = reminder.event === undefined ? ahead(reminder.due ?? now, now) : `when ${called} ${doing(reminder.event)}`
+      return words(reminder.text) === "" ? `the one ${reminder.event === undefined ? when : `for ${when}`}` : `${words(reminder.text)} ${when}`
+    },
     /** What's said once he cancels it, or takes back cancelling it, naming it. */
     cancelled: (reminder: Reminder, called: string, kept = false): string => {
       const done = kept ? "Kept" : "Cancelled"

@@ -10,7 +10,7 @@ import { Model } from "./Model.ts"
 import * as Mutes from "./Mutes.ts"
 import { addressed, type Lines, unaddressed } from "./Persona.ts"
 import * as Questions from "./Questions.ts"
-import type * as Reminders from "./Reminders.ts"
+import * as Reminders from "./Reminders.ts"
 import { agreed, enough, gist, hallucinated, type Line, morePlease, noted } from "./Responder.ts"
 import * as T3Actions from "./T3Actions.ts"
 import * as Threads from "./Threads.ts"
@@ -1671,6 +1671,13 @@ const glimpsed = (situation: Situation, lines: Lines): Decision | undefined => {
             others: "",
             pending: "answers",
           })
+    // Which of his reminders he meant, by position, kept by id, as they're listed now: only while every one of them still is.
+    if (question.kind === "which" && question.reminders !== undefined) {
+      const listed = question.reminders.flatMap((id) => Option.toArray(Option.fromNullable(remindedAs(id, situation))))
+      const ordinal = ordinals.find(([pattern]) => pattern.test(said))
+      const handle = ordinal === undefined || listed.length !== question.reminders.length ? undefined : listed[ordinal[1](listed.length)]
+      return handle === undefined ? undefined : decision({ ...question.decision, target: handle, sure: "high", spoken: "", others: "", pending: "answers" })
+    }
     if (question.kind === "which" && candidates.length === question.candidates.length) {
       const ordinal = ordinals.find(([pattern]) => pattern.test(said))
       if (ordinal !== undefined) return pick(candidates[ordinal[1](candidates.length)])
@@ -1737,6 +1744,46 @@ export const remindedBy = (handle: string, situation: Pick<Situation, "reminders
   const found = /^r(\d+)$/.exec(handle.trim())
   const index = found === null ? -1 : Number(found[1]) - 1
   return Option.fromNullable(index >= 0 && index < remindersShown ? situation.reminders?.[index] : undefined)
+}
+
+/** The handle in REMINDERS of the reminder kept under `id`, while it's still to come and shown there. */
+const remindedAs = (id: number, situation: Pick<Situation, "reminders">) => {
+  const index = situation.reminders?.findIndex((reminder) => reminder.id === id) ?? -1
+  return index >= 0 && index < remindersShown ? remindedHandle(index) : undefined
+}
+
+/** The reminder handles named in a decision's "others". */
+const remindedHandles = (text: string) => text.split(/[\s,]+/).filter((handle) => /^r\d+$/.test(handle))
+
+/**
+ * Which of a few of his reminders he meant, naming each by what it's to say
+ * and when, as he's asked between threads: never in the same words as a
+ * question asked in the last ten minutes. They're kept by id, so his answer
+ * goes to the one he picked. Nothing to choose between, it couldn't be told.
+ */
+const whichReminder = (among: ReadonlyArray<Reminders.Reminder>, choice: Decision, situation: Situation, lines: Lines): Checked => {
+  const said = Reminders.lines(lines, situation.now)
+  const shown = among.slice(0, 3)
+  const about = either(shown.map((reminder) => said.chosen(reminder, Reminders.calling(reminder, situation.desk))))
+  const asked =
+    shown.length < 2 ? undefined : [`Which reminder${addressed(lines)}: ${about}?`, `Which one${addressed(lines)}: ${about}?`].find((wording) => !repeated(wording, situation.asked, lines))
+  if (asked === undefined) return { _tag: "Say", spoken: lines.cantTell }
+  return {
+    _tag: "Ask",
+    open: {
+      kind: "which",
+      utterance: situation.utterance.id,
+      heard: situation.utterance.heard,
+      ...overheard(situation.utterance),
+      decision: choice,
+      candidates: [],
+      reminders: shown.map(({ id }) => id),
+      asked,
+      about,
+      material: Option.none(),
+      resend: Option.none(),
+    },
+  }
 }
 
 /** How far off a reminder can be set. */
@@ -1913,10 +1960,21 @@ export const check = (choice: Decision, situation: Situation, lines: Lines): Che
       const listed = Option.getOrUndefined(checked.plan.target)
       return listed !== undefined && (listed.state === "question" || listed.state === "approval") ? { _tag: "Say", spoken: said.asking(listed.called) } : checked
     }
-    case "forget":
+    case "forget": {
       if (murmured(choice, situation.utterance)) return doing({ decision: { ...choice, act: "resume" }, target: Option.none() })
-      // Only one of REMINDERS, by its handle there.
-      return Option.isSome(remindedBy(choice.target, situation)) ? doing({ decision: choice, target: Option.none() }) : { _tag: "Say", spoken: lines.cantTell }
+      // Only one of REMINDERS, by its handle there, and only the one he plainly meant: otherwise he's asked which, naming each, as for a
+      // thread, like between two that say the same.
+      const meant = remindedBy(choice.target, situation)
+      if (Option.isNone(meant)) return { _tag: "Say", spoken: lines.cantTell }
+      if (choice.sure === "high") return doing({ decision: choice, target: Option.none() })
+      const among = [meant.value, ...remindedHandles(choice.others).flatMap((handle) => Option.toArray(remindedBy(handle, situation)))]
+      return whichReminder(
+        among.filter((reminder, index) => among.findIndex(({ id }) => id === reminder.id) === index),
+        choice,
+        situation,
+        lines,
+      )
+    }
     case "show":
       switch (choice.how) {
         case "thread":
@@ -2084,7 +2142,7 @@ const contract = `Reply with only a JSON object with the keys "act", "target", "
 - "mode": he wants you to change how and when you talk. "how" is "focus" to say only what needs him for a while, "quiet" for the night, like "goodnight", "I'm off to bed" or "turn yourself off", which also says only what needs him, "normal" when he's back, like "I'm back" or "you can talk normally again", which gives him the catch-up, "brief" to say only headlines again, like "talk shorter", or "full" to say every update in full, like "give me everything" or "stop giving me the short version". "when" is when focus or quiet ends, if he says, worked out from NOW as his clock reads it, "YYYY-MM-DDTHH:mm", like three o'clock today for "till three". It's about you, never a message for a thread, and never "mute", which is one thread. "stop", "quiet" or "be quiet" on their own only mean stop talking: "dismiss".
 - "remind": he wants to be told something later. At a time: "how" is "at", and "when" the time worked out from NOW, as his clock reads it, "YYYY-MM-DDTHH:mm" with no offset, like "2026-10-12T15:00" for three this afternoon. Or once a thread finishes its turn, "how" "finished", or asks him something, "how" "asked", with "target" that thread. "text" is what to tell him then, in a few words, like "call the bank", or "" when it's only that the thread finished or asks. "rest" keeps its meaning: what he wants done now, in the same breath, like "and tell the Mina one to rebase". Not "send" with "after", which tells the thread itself once it's done; something he wants offered to a thread then is "offer". You don't watch pull requests: told to say when one's checks pass or it's merged, "answer" that you don't.
 - "offer": he wants you to offer, at a time or when a thread finishes or asks him something, to send a thread a message. "how" and "when" as for "remind"; "target" is the thread told, and the one watched; "text" is the message as "send" writes it. yapd asks him then, and only his yes sends it. One that watches one thread and tells another, you can't: "answer" so.
-- "forget": he wants one of REMINDERS cancelled. "target" is its handle there, like r2. "Forget it" or "never mind" on its own is "dismiss".
+- "forget": he wants one of REMINDERS cancelled. "target" is its handle there, like r2. "sure" is "high" when his words point at one of them; when another fits nearly as well, like two that say the same, it's lower, with the rest in "others", and yapd asks him which. "Forget it" or "never mind" on its own is "dismiss".
 - These you can't do yet, but name them when they're what he wants, with "target" and "text" filled in, and yapd tells him: "remember" something; "tidy" a thread away, like archiving or renaming it.`
 
 const hearing = `What he says comes through speech recognition, and names get mangled. A word that doesn't fit the sentence, or sounds like nothing he'd say, is most likely a name misheard: a thread's subject, a project, a machine or a model in THREADS or OTHER THREADS that sounds like it, like a coin, a client or a tool he works on coming out as an everyday word or a made-up one. Weigh such a word above the ordinary ones around it, like "migration" or "status", which fit many threads. His own words get mangled the same way: "appd" and "YAPT" are yapd, "Wig" is rig, "Saul" is Sol, "masterwork tree" is master worktree, "poll request" is pull request. Match threads by how they sound and by what the work is about, never by spelling. Short words like "no", "now", "on" and "not" are the least reliable of all.`
@@ -2611,9 +2669,12 @@ export const prompt = (situation: Situation, style: Option.Option<string>) => {
       onNone: () => [],
       onSome: (open) => [
         `OPEN, your question: ${fenced(open.asked)}${open.heard.trim() === "" ? "" : `\nAbout what he asked: ${fenced(open.heard, 400)}${ownVoice(open)}`}${
-          open.candidates.length === 0
+          open.candidates.length === 0 && (open.reminders ?? []).length === 0
             ? ""
-            : `\nIts choices, in the order you said them: ${open.candidates.map((ref) => handleOf(desk, ref.machine, ref.id) ?? "a thread that's gone").join(", ")}`
+            : `\nIts choices, in the order you said them: ${[
+                ...open.candidates.map((ref) => handleOf(desk, ref.machine, ref.id) ?? "a thread that's gone"),
+                ...(open.reminders ?? []).map((id) => remindedAs(id, situation) ?? "a reminder that's gone"),
+              ].join(", ")}`
         }${
           open.asks !== undefined
             ? waitingOn(open, situation.utterance)
