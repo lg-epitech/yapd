@@ -2071,9 +2071,9 @@ const aroundFact = {
  * A fact as he said it, which the model's `fact` says the same as: all he
  * said after a "remember that" and an everyday way of asking before it, like
  * "hey Jarvis, can you", but for words to yapd a pause sets off from it,
- * marks and symbols kept. So what's kept is
- * all he asked to be, never less of it, like his "we never use C++" without
- * its "never", or "the magic word is please" without its "please", nor more.
+ * marks and symbols kept. So what's kept is all he asked to be, never less
+ * of it, like his "we never use C++" without its "never", or "the magic word
+ * is please" without its "please", nor more.
  */
 const spokenFact = (said: string, fact: string) => inHisWords(said, fact, aroundFact.ahead, aroundFact.behind)
 
@@ -2164,12 +2164,13 @@ const apart = {
  * Whether a routine is all he asked for, word for word: as words compare,
  * what he said is "when", "whenever" or "if I say" and its name as the model
  * gave it, then its steps, or its steps, then that, with nothing else but
- * words to yapd around it, like "remember that", "hey Jarvis, can you" before
- * it or "thanks" after it, or between its name and its steps, like "then". So a "don't" or
- * an "if the checks are green" that the steps leave out, or another request
- * in the same breath, keeps nothing, never the part of it that's the steps;
- * nor does a "so" or a "then" he trailed off on. A check that turns down,
- * never one that keeps anything.
+ * words to yapd around it, like "hey Jarvis, can you remember that" before it
+ * or "thanks" after it, or between its name and its steps, like "then". So a
+ * "don't" or an "if the checks are green" that the steps leave out, or
+ * another request in the same breath, keeps nothing, never the part of it
+ * that's the steps; nor does a "so" or a "then" he trailed off on. A check
+ * that turns down, never one that keeps anything; where the steps start and
+ * end is `spokenSteps`'s to say.
  */
 export const wholeRoutine = (routine: { readonly name: string; readonly steps: string }, said: string) => {
   const name = Ledger.digest(routine.name)
@@ -2466,10 +2467,10 @@ export const check = (given: Decision, situation: Situation, lines: Lines): Chec
         if (answersTo(routine.name)) return { _tag: "Say", spoken: said.answered }
       }
       // About him, never a thread. What's kept is his words, never the model's: a routine's steps as he said them after its name's pause,
-      // or before "when I say", and a fact as all he said but for a "remember that" and words to yapd around it, every mark and symbol
-      // kept. The model's words only have to say the same, symbols and all, so its "C" for his "C++" keeps nothing, as does a fact said
-      // with more than it, like a "never" it leaves out, or another request in the same breath, unless that's all the rest the model
-      // gave, his words after an "and" or a comma, and the fact all he said before it.
+      // or before "when I say", and a fact as all he said after a "remember that" and an everyday way of asking before it, but for words
+      // to yapd a pause sets off, every mark and symbol kept. The model's words only have to say the same, symbols and all, so its "C" for
+      // his "C++" keeps nothing, as does a fact said with more than it, like a "never" it leaves out, or another request in the same
+      // breath, unless that's all the rest the model gave, his words after an "and" or a comma, and the fact all he said before it.
       if (utterance.echo !== undefined || heard === "") return doing({ decision: { ...choice, target: "" }, target: Option.none() })
       const his = routine === undefined ? (spokenFact(heard, text) ?? spokenFactThen(heard, text, choice.rest)) : spokenSteps(heard, text)
       if (his === undefined) {
