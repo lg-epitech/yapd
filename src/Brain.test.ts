@@ -1993,6 +1993,18 @@ describe("memories", () => {
     expect(forget("high")).toMatchObject({ _tag: "Do" })
   })
 
+  test("he's never told he didn't say a word he did for its quotes or backticks, though only his words as written are kept", () => {
+    const remember = (heard: string, text: string) => Brain.check(Brain.decision({ act: "remember", how: "fact", text }), situation(heard), lines)
+    const unsaved = { _tag: "Say", spoken: "I couldn't keep that in your own words, sir, so I didn't save it." } as const
+    expect(remember('Remember that rig uses "C++" for the parser.', "rig uses C++ for the parser")).toEqual(unsaved)
+    expect(remember("Remember that rig uses C++ for the parser.", "rig uses `C++` for the parser")).toEqual(unsaved)
+    // A word that isn't his still is, in quotes or not.
+    expect(remember('Remember that rig uses "C++" for the parser.', 'rig uses "C" for the parser')).toEqual({
+      _tag: "Say",
+      spoken: "I couldn't keep that in your own words, sir: I didn't hear 'C' from you, so I didn't save it.",
+    })
+  })
+
   const routines = { kept: [], written: [{ name: "ship", steps: "merge the PR" }] }
   const handleOf = (listed: T3Live.Thread) => desk().threads.find(({ thread }) => thread.id === listed.id)?.handle ?? ""
 

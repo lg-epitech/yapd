@@ -2072,18 +2072,22 @@ export const wholeRoutine = (routine: { readonly name: string; readonly steps: s
  * its order, so he's told which weren't his, like a name it put right that
  * speech recognition got wrong: none when there are more than a few, as for
  * words of its own throughout, or when every one is his, only not in his
- * order. Only to tell him, never to keep anything.
+ * order. Only to tell him, never to keep anything, so a word in quotes or
+ * backticks on either side is his all the same, never one he didn't say.
  */
 export const unheard = (words: string, said: string) => {
   // Symbols and all, so his "C++" never stands for the model's "C".
-  const his = new Set(worded(said).split(" "))
+  const his = new Set(worded(said).split(" ").map(outOfQuotes))
   const theirs = words
     .split(/\s+/u)
-    .map((word) => word.replace(/[,;:!?.\u2026]+$/u, ""))
-    .filter((word) => word !== "" && !his.has(worded(word)))
+    .map((word) => word.replace(/^["'`\u2018\u201c]+|["'`\u2019\u201d,;:!?.\u2026]+$/gu, ""))
+    .filter((word) => outOfQuotes(word) !== "" && !his.has(outOfQuotes(word)))
   const missing = theirs.filter((word, index) => theirs.findIndex((other) => other.toLowerCase() === word.toLowerCase()) === index)
   return missing.length === 0 || missing.length > 3 ? undefined : missing.join(" ")
 }
+
+/** A word as words compare, without the quotes or backticks around it, as only for telling him which weren't his. */
+const outOfQuotes = (word: string) => worded(worded(word).replace(/^["'`]+|["'`]+$/gu, ""))
 
 /**
  * Whether yapd answers to a phrase said on its own without the model, like
