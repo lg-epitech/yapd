@@ -11403,6 +11403,46 @@ describe("Assistant reminders", () => {
     expect(result.undone.sent).toEqual(["message.dispatch"])
     expect(result.named).toEqual({ said: "Migrate Tezos Integration has already read it, sir. Shall I tell it to ignore that?", pending: 1 })
   })
+
+  test("a message he names is taken back though a reminder on the same thread was set since, and a reminder he names is, though a message went since", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(
+          (situation) => {
+            const { heard } = situation.utterance
+            if (heard.startsWith("Tell the Tezos one")) return Brain.decision({ act: "send", target: handle(situation, tezos), text: "Use the fee table.", how: "now", rest: "let me know when it finishes" })
+            if (heard === "let me know when it finishes") return Brain.decision({ act: "remind", how: "finished", target: handle(situation, tezos) })
+            if (heard === "Take back the message to the Tezos one.") return Brain.decision({ act: "undo", target: handle(situation, tezos) })
+            if (heard === "Tell the Mina one to rebase.") return Brain.decision({ act: "send", target: handle(situation, mina), text: "Rebase.", how: "now" })
+            if (heard === "Cancel that reminder.") return Brain.decision({ act: "undo", how: "reminder" })
+            return undefined
+          },
+          undefined,
+          { reminders: true },
+        )
+        const types = () => made.dispatched.map(({ type }) => type)
+        yield* made.dictate("Tell the Tezos one to use the fee table, and let me know when it finishes.")
+        const set = (yield* made.reminders!.pending).length
+        yield* made.dictate("Take back the message to the Tezos one.")
+        const named = { said: made.spoken().at(-1), pending: (yield* made.reminders!.pending).length }
+        // Asked again, it's still the message, never the reminder.
+        yield* made.dictate("Take back the message to the Tezos one.")
+        const again = { said: made.spoken().at(-1), pending: (yield* made.reminders!.pending).length }
+        yield* made.dictate("Tell the Mina one to rebase.")
+        yield* made.dictate("Cancel that reminder.")
+        return { set, named, again, reminder: { said: made.spoken().at(-1), pending: (yield* made.reminders!.pending).length, sent: types() } }
+      }),
+    )
+    expect(result.set).toBe(1)
+    // The message is what's taken back, and the reminder stays.
+    expect(result.named.said).toMatch(/already read it, sir\. Shall I tell it to ignore that\?$/)
+    expect(result.named.pending).toBe(1)
+    expect(result.again.pending).toBe(1)
+    expect(result.reminder.said).toBe("Cancelled your reminder for when Migrate Tezos Integration finishes, sir.")
+    expect(result.reminder.pending).toBe(0)
+    // Nothing went to take back the message to Mina.
+    expect(result.reminder.sent).toEqual(["message.dispatch", "message.dispatch"])
+  })
 })
 
 describe("Assistant offers giving way", () => {

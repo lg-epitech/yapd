@@ -338,7 +338,7 @@ export const agrees = (open: Pick<Assistant.Open, "decision" | "candidates">, de
     case "send":
       return (decided.text.trim() === "" || words(decided.text) === words(asked.text)) && (decided.how.trim() === "" || when(decided.how) === when(asked.how))
     case "undo":
-      return decided.how.trim() === "" || (decided.how === "carry") === (asked.how === "carry")
+      return decided.how.trim() === "" || decided.how === asked.how
     default:
       return true
   }
@@ -1610,7 +1610,7 @@ const glimpsed = (situation: Situation, lines: Lines): Decision | undefined => {
   // cancelled, or whatever else yapd last did.
   const latest = newest(situation)
   if (scratching.has(said) && Option.isNone(open) && latest === "mute") return decision({ act: "mute", how: "undo" })
-  if (scratching.has(said) && Option.isNone(open) && latest === "noted") return decision({ act: "undo" })
+  if (scratching.has(said) && Option.isNone(open) && latest === "noted") return decision({ act: "undo", how: "reminder" })
   if (scratching.has(said) && Option.isNone(open) && latest === "acted" && Option.isSome(situation.acted)) {
     const acted = situation.acted.value
     const listed = desk.threads.find(({ ref }) => ref.machine === acted.machine && ref.id === acted.thread)
@@ -2062,7 +2062,7 @@ const contract = `Reply with only a JSON object with the keys "act", "target", "
 - "start": new work: a change, a fix, an investigation, a review, a question that needs the web, the code or time. "text" is the request in his words. yapd works out where it goes and starts it.
 - "send": a message for a thread, like an instruction, a correction or an answer to what it asked. "target" is the thread, "text" the message as he'd type it. "how" is "now"; "after" when he says after, once it's done or when it finishes; "restart" when he says to drop what it's doing and do this instead. A message he wants sent at a later time, like "at five" or "in an hour", is "offer" at that time, never "send": yapd only asks him then.
 - "stop": stop a thread's run, when he says to stop the thread, the run or the work. "target" is the thread.
-- "undo": take back what you just did for him, as LATELY shows it: the message you just sent, or the reminder or offer you just set or cancelled. "how" is "carry" when he wants a thread you stopped to carry on, "" otherwise, like "scratch that". "target" is the thread, when he names one.
+- "undo": take back what you just did for him, as LATELY shows it: the message you just sent, or the reminder or offer you just set or cancelled. "how" is "reminder" when it's the reminder or offer he wants taken back, "carry" when he wants a thread you stopped to carry on, "" otherwise: what you did to a thread, or, when he says no more than "scratch that", whatever you did last. "target" is the thread, when he names one.
 - "decide": he allows, or turns down, what a thread waits for him to allow, in WAITING ON YOU or OPEN. "target" is the thread; "how" is "accept", "session" only when he says for the session or from now on, or "decline".
 - "reply": he answers a thread's question, in WAITING ON YOU or OPEN. "target" is the thread; "text" is his answer: the option he picked, as it's written, or his own words. A question in several parts is answered a part at a time: "text" answers only the part he's at, and yapd asks him the rest. "text" empty when he wants to hear a thread's question before answering: yapd reads it to him.
 - "dismiss": he wants you to stop talking, or it needs nothing: thanks, okay, an acknowledgement, or no to OPEN, unless OPEN asks a thread's question, which a no answers.

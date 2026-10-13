@@ -2977,19 +2977,27 @@ export const make = (options: {
       })
 
     /**
-     * Takes back the newest change he made, as "scratch that" or "undo that"
-     * means it: the reminder he just set or cancelled, or a mute, made since
-     * what yapd last did to a thread, or else that, so a message sent a
-     * minute before a reminder is never withdrawn in its place. Of the thread
-     * the model took him to name, only what was changed of it, so a message
-     * he names is never left for a reminder or a mute made since. Carrying on
-     * after a stop is always the thread's.
+     * Takes back what he just did, as the model took him to mean it: the
+     * reminder or offer he just set or cancelled, when it says that's what
+     * he means, and nothing else then; otherwise what yapd last did to a
+     * thread, or a mute. Of the thread the model took him to name, only what
+     * was changed of it, and never a reminder, so a message he names is never
+     * left for a reminder or a mute made since. With no thread named, as
+     * "scratch that", the newest change he made, so a message sent a minute
+     * before a reminder is never withdrawn in its place. Carrying on after a
+     * stop is always the thread's.
      */
     const undoing = (plan: Brain.Plan, thought: Thought, said: Lines, at: Stepping): Effect.Effect<Outcome> =>
       Effect.gen(function* () {
         const { situation } = thought
-        const latest = Brain.newest(situation, Option.getOrUndefined(plan.target)?.ref)
+        const on = Option.getOrUndefined(plan.target)?.ref
         const last = Option.getOrUndefined(situation.noted ?? Option.none())
+        if (plan.decision.how === "reminder") {
+          const noted = Brain.newest({ noted: situation.noted ?? Option.none(), acted: Option.none(), muteChange: Option.none() }, on) === "noted"
+          const outcome = noted && last !== undefined ? yield* retracting(last, thought, said) : reply(`There's nothing to take back${addressed(said)}.`, thought.subject)
+          return yield* onward(thought, outcome, Brain.about(outcome.subject), at.step + 1, said)
+        }
+        const latest = Brain.newest(on === undefined ? situation : { ...situation, noted: Option.none() }, on)
         if (plan.decision.how !== "carry" && latest === "noted" && last !== undefined) {
           return yield* Effect.flatMap(retracting(last, thought, said), (outcome) => onward(thought, outcome, Brain.about(outcome.subject), at.step + 1, said))
         }
@@ -3168,10 +3176,10 @@ export const make = (options: {
         if (opened === undefined) return yield* follow(Brain.check(decision, decided.situation, said), decided, said)
         // Taking back what he just did, of the question's thread or none named, a message he dictated, taken as the answer to a part of the
         // question, is taken back out of it. That was all he took back, since it never went: he's told so, and the question's asked again
-        // after, from the part it answered. Let go with "scratch that", it's let go without it.
+        // after, from the part it answered. Let go with "scratch that", it's let go without it. Never when the model took him to mean a reminder.
         const undone = decided.situation.desk.threads.find(({ handle }) => handle === decision.target)
         const ours = undone === undefined || opened.open.candidates.some((ref) => Threads.same(ref, undone.ref))
-        const takenBack = ours && (decision.act === "undo" || (decision.act === "dismiss" && Brain.takesBack(utterance.heard)))
+        const takenBack = ours && ((decision.act === "undo" && decision.how !== "reminder") || (decision.act === "dismiss" && Brain.takesBack(utterance.heard)))
         const open = takenBack ? withdrawing(opened.open) : opened.open
         if (open !== opened.open && decision.act === "undo") {
           yield* close(open, "replaced", utterance.id)
