@@ -13528,6 +13528,40 @@ describe("Assistant tidying", () => {
     expect(result.sent).toEqual([{ type: "thread.unarchive", commandId: "0:1", threadId: fees.id }])
   })
 
+  test("taking back a pin of a thread pinned before, or a settle of one settled before, leaves it so, sending nothing to it, and says so", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(
+          (situation) => {
+            const { heard } = situation.utterance
+            const of = heard.includes("importer") ? importer : heard.includes("fees") ? fees : wallets
+            if (heard.startsWith("Pin")) return Brain.decision({ act: "tidy", how: "pin", target: handle(situation, of), sure: "high" })
+            if (heard.startsWith("Settle")) return Brain.decision({ act: "tidy", how: "settle", target: handle(situation, of), sure: "high" })
+            if (heard.startsWith("Take back")) return Brain.decision({ act: "undo", how: "tidy" })
+            return undefined
+          },
+          undefined,
+          // He'd pinned the Tezos fees and settled the Tezos wallets himself.
+          { others: [importer, { ...fees, pinnedAt: "2026-09-30T12:00:00.000Z" }, { ...wallets, settledOverride: "settled" }, docs] },
+        )
+        /** Tidied as he says, then taken back: what's said, and what went to T3 Code for both. */
+        const takenBack = (tidying: string) =>
+          Effect.gen(function* () {
+            const before = tidied(made.dispatched).length
+            yield* made.dictate(tidying)
+            yield* made.dictate("Take back what you just did.")
+            return { said: made.spoken().at(-1), sent: tidied(made.dispatched).slice(before).map(({ type }) => type) }
+          })
+        return { fees: yield* takenBack("Pin the Tezos fees."), wallets: yield* takenBack("Settle the Tezos wallets."), importer: yield* takenBack("Pin the Tezos importer.") }
+      }),
+    )
+    // Left as he had it, with nothing sent to take it back.
+    expect(result.fees).toEqual({ said: "Tezos fees was pinned before I pinned it, sir, so I've left it pinned.", sent: ["thread.pin"] })
+    expect(result.wallets).toEqual({ said: "Tezos wallets was settled before I settled it, sir, so I've left it settled.", sent: ["thread.settle"] })
+    // One that wasn't is unpinned.
+    expect(result.importer).toEqual({ said: "Unpinned, sir: Tezos importer.", sent: ["thread.pin", "thread.unpin"] })
+  })
+
   test("a busy thread isn't archived without his yes, nor one that got busy before it", async () => {
     const result = await run(
       Effect.gen(function* () {

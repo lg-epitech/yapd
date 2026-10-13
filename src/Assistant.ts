@@ -2141,7 +2141,13 @@ export const make = (options: {
             const line = Hands.tidied(outcome, said, now)
             const went = outcome.each.some(({ outcome }) => outcome._tag === "Done")
             yield* noting(line, {
-              tidied: outcome.each.map(({ to, command, outcome }) => ({ ...to, command: command._tag, outcome: outcome._tag, ...("reason" in outcome ? { reason: outcome.reason } : {}) })),
+              tidied: outcome.each.map(({ to, command, outcome, already }) => ({
+                ...to,
+                command: command._tag,
+                outcome: outcome._tag,
+                ...("reason" in outcome ? { reason: outcome.reason } : {}),
+                ...(already === true ? { already } : {}),
+              })),
               ...(outcome.undone ? { undone: true } : {}),
             })
             const first: Outcome = { say: line, subject: { ...subject, said: line }, kind: "done" }

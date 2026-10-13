@@ -92,6 +92,8 @@ export interface Tidy {
   readonly stopped?: boolean
   /** Taken back, what T3 Code had cleared that was put back as it was: a snooze until then, a settle or a pin. */
   readonly restored?: ReadonlyArray<{ readonly _tag: "Snooze"; readonly until: string } | { readonly _tag: "Settle" } | { readonly _tag: "Pin" }>
+  /** Taken back, it was pinned, or settled, before it was, as `command` says: nothing went to it, and it's left so, as it was. */
+  readonly already?: boolean
 }
 
 /** What tidies a thread, as T3 Code takes it: the one way, and for a rename or a snooze, the title or until when. */
@@ -656,6 +658,9 @@ const takenBack = "Taken back."
 
 /** Why a tidy isn't taken back when it's one that's a way back itself, or kept nothing of how the thread was. */
 const oneWay = "I can only take back archiving, renaming, snoozing, settling or pinning a thread."
+
+/** The way back from a tidy that left the thread as it was, as pinning one pinned before: none, so it's left so. */
+const asItWas = "as it was"
 
 /**
  * What its turn under way is waiting on, if it is: a turn finishing off takes
@@ -1574,8 +1579,13 @@ export const make = (options: {
       onSome: (reminders) => Effect.map(Effect.forEach(ids, reminders.restore), (restored) => restored.filter(Option.isSome).length),
     })
 
-  /** The way back from a tidy, as it went: none for one that's a way back itself, or a rename that kept nothing of the title before. */
-  const opposite = (was: TidyBody, now: number): TidyCommand | undefined => {
+  /**
+   * The way back from a tidy, as it went: none for one that's a way back
+   * itself, or a rename that kept nothing of the title before; and `asItWas`
+   * for a pin of one pinned before, or a settle of one settled before, which
+   * left it as it was, so it's left so.
+   */
+  const opposite = (was: TidyBody, now: number): TidyCommand | typeof asItWas | undefined => {
     switch (was._tag) {
       case "Archive":
         return { _tag: "Unarchive" }
@@ -1587,9 +1597,9 @@ export const make = (options: {
         return earlier !== null && Date.parse(earlier) > now ? { _tag: "Snooze", until: earlier } : { _tag: "Unsnooze" }
       }
       case "Settle":
-        return { _tag: "Unsettle" }
+        return was.before?.settledOverride === "settled" ? asItWas : { _tag: "Unsettle" }
       case "Pin":
-        return { _tag: "Unpin" }
+        return was.before !== undefined && was.before.pinnedAt !== null ? asItWas : { _tag: "Unpin" }
       default:
         return undefined
     }
@@ -1603,7 +1613,8 @@ export const make = (options: {
    * one. Each taken back is noted so, and never taken back twice.
    * Unarchived, what archiving it dropped comes back; what it stopped never
    * starts again, which is never claimed, nor is unsettling it ever taken
-   * for leaving it as T3 Code would have it on its own.
+   * for leaving it as T3 Code would have it on its own. One pinned, or
+   * settled, before it was is never unpinned, or unsettled: it's left so.
    */
   const untidy = (step: Step, last: Ledger.Row, to: Option.Option<Threads.Ref>, wanted: Effect.Effect<boolean>) =>
     Effect.gen(function* () {
@@ -1632,6 +1643,15 @@ export const make = (options: {
         if (back === undefined) continue
         const to = refOf(row)
         const called = was.called ?? "that thread"
+        // Pinned, or settled, before it was, it's left so, with nothing sent to it: only what T3 Code cleared as it went is put back.
+        if (back === asItWas) {
+          yield* ledger.settle(row.commandId, "abandoned", { reason: takenBack, from: [row.state] })
+          const reached = yield* reach(to)
+          const restored = Either.isLeft(reached) ? [] : yield* putBack(was, to, called, reached.right, wanted, next, now)
+          const outcome: Went = { _tag: "Done", how: "now", to }
+          each.push({ to, called, command: sentOf(was), outcome, already: true, ...(restored.length === 0 ? {} : { restored }) })
+          continue
+        }
         const reached = back._tag === "Unarchive" ? archivedOn(to) : yield* reach(to)
         if (Either.isLeft(reached)) {
           each.push({ to, called, command: back, outcome: yield* failing({ _tag: "Refused", reason: reached.left } satisfies Outcome, doing.undo) })
@@ -2058,15 +2078,35 @@ const were = (names: ReadonlyArray<string>) => (names.length === 1 ? "was" : "we
  * is said only when it can be read aloud. An archive says what of his it
  * dropped, and unarchiving it, by his word or as he took it back, what came
  * back and that what it stopped stays stopped; taking a tidy back, what else
- * it put back. One left as it got busy is said to have been, never as
- * something that went wrong.
+ * it put back, and, after the rest, each pinned or settled before it was,
+ * left so. One left as it got busy is said to have been, never as something
+ * that went wrong.
  */
 export const tidied = (outcome: Extract<Outcome, { readonly _tag: "Tidied" }>, lines: Lines, now: number) => {
   const sir = addressed(lines)
-  const { each, undone } = outcome
+  const { undone } = outcome
+  // Taken back, those pinned or settled before they were are left so, and said apart.
+  const left = outcome.each.filter(({ already }) => already === true)
+  const each = outcome.each.filter(({ already }) => already !== true)
+  /** Those left so, each way, him addressed first when nothing else is said before. */
+  const asBefore = (address: string) =>
+    [...new Set(left.map(({ command }) => command._tag))].map((tag, index) => {
+      const names = left.filter(({ command }) => command._tag === tag).map(({ called }) => called)
+      const { past } = tidyWords[tag]
+      const them = names.length === 1 ? "it" : "them"
+      return `${capital(Brain.both(names))} ${were(names)} ${past} before I ${past} ${them}${index === 0 ? address : ""}, so I've left ${them} ${past}.`
+    })
+  /** What else of each was put back as it was taken back, each named when there were several. */
+  const restoring = (some: ReadonlyArray<Tidy>) =>
+    some.flatMap(({ restored, called }) =>
+      (restored ?? []).map((back) => {
+        const it = outcome.each.length === 1 ? "It's" : `${capital(called)} is`
+        return back._tag === "Snooze" ? `${it} snoozed until ${waking(back.until, now)} again.` : `${it} ${back._tag === "Pin" ? "pinned" : "settled"} again.`
+      }),
+    )
   const went = each.filter(({ outcome }) => outcome._tag === "Done")
   const first = each[0]
-  if (first === undefined) return `There was nothing to tidy${sir}.`
+  if (first === undefined) return left.length === 0 ? `There was nothing to tidy${sir}.` : [...asBefore(sir), ...restoring(left)].join(" ")
   const { past } = tidyWords[first.command._tag]
   /** One thread's, done. */
   const one = ({ command, called }: Tidy) => {
@@ -2129,13 +2169,7 @@ export const tidied = (outcome: Extract<Outcome, { readonly _tag: "Tidied" }>, l
           ]
   const stopped = went.filter(({ stopped }) => stopped === true).map(({ called }) => called)
   const still = stopped.length === 0 ? [] : [`What ${each.length === 1 ? "it" : Brain.both(stopped)} ${were(stopped)} doing stays stopped.`]
-  const restored = went.flatMap(({ restored, called }) =>
-    (restored ?? []).map((back) => {
-      const it = each.length === 1 ? "It's" : `${capital(called)} is`
-      return back._tag === "Snooze" ? `${it} snoozed until ${waking(back.until, now)} again.` : `${it} ${back._tag === "Pin" ? "pinned" : "settled"} again.`
-    }),
-  )
-  return [...done, ...whys, ...kept, ...still, ...restored].join(" ")
+  return [...done, ...whys, ...kept, ...still, ...restoring(went), ...asBefore(""), ...restoring(left)].join(" ")
 }
 
 /** That the same words went to the same thread lately: "I sent that a minute ago, sir." */
