@@ -179,6 +179,8 @@ export const make = (
      * that `asks` him something, only what can't be his answer to it.
      */
     readonly command?: (heard: string, asks: boolean) => Option.Option<Effect.Effect<string>>
+    /** Turns yapd off as the menu does, which "Mute." said on its own over anything it says does too. Without it, that's a stop, as it always was. */
+    readonly off?: Effect.Effect<void>
     /**
      * What he asked to be told once a thread finishes, as a turn of it is
      * about to be said: its update is led by them, as one, and said whatever
@@ -639,6 +641,16 @@ export const make = (
     }
   })
 
+  /** What's to be said next, if anything is: only answers while one is on its way, and while yapd is off only what he asked. */
+  const following = STM.gen(function* () {
+    const { on } = yield* TRef.get(power)
+    return Inbox.next(yield* TRef.get(inbox), !on || (yield* TRef.get(awaited)).length > 0)
+  })
+
+  /** Whether what's being said took the pause between lines already, as the moment after it ended once something waited to be said next. */
+  let paused = false
+
+  const turnOff = options.off
   const conversation = yield* Conversation.make({
     dir,
     moved: (update) => Effect.sync(() => moved(update)),
@@ -750,6 +762,27 @@ export const make = (
       )
     },
     ...(options.routines === undefined ? {} : { routines: options.routines }),
+    // "Mute." said on its own over anything yapd says, or right after, is his emergency off. It's turned off from outside what's being
+    // said, as the menu turns it off, which cuts that off as it does anything being said, keeping it unheard: so this waits to be cut
+    // off, and comes back only should yapd stay on.
+    ...(turnOff === undefined
+      ? {}
+      : {
+          off: Effect.gen(function* () {
+            yield* Effect.logInfo("Turned off: he said mute")
+            yield* Fiber.join(yield* Effect.forkIn(turnOff, lifetime))
+            if (!(yield* switched).on) yield* Effect.never
+          }),
+        }),
+    // Once something waits to be said next, the moment after a line played through for "Mute." alone, like a notice, is over after the
+    // pause between lines, so what's next starts then, with no pause of its own.
+    queued: STM.commit(STM.flatMap(following, (ready) => (ready === undefined ? STM.retry : STM.void))).pipe(
+      Effect.zipRight(
+        Effect.sync(() => {
+          paused = true
+        }),
+      ),
+    ),
   })
 
   const unsummarized = (project: string): Summary => ({
@@ -1764,10 +1797,9 @@ export const make = (
   const takeNext = STM.gen(function* () {
     const { on, turns } = yield* TRef.get(power)
     if (yield* Floor.dictating(floor)) return yield* STM.retry
-    const current = yield* TRef.get(inbox)
-    const ready = Inbox.next(current, !on || (yield* TRef.get(awaited)).length > 0)
+    const ready = yield* following
     if (ready === undefined) return yield* STM.retry
-    yield* TRef.set(inbox, Inbox.remove(current, ready.session))
+    yield* TRef.set(inbox, Inbox.remove(yield* TRef.get(inbox), ready.session))
     yield* TRef.set(floor.reading, true)
     yield* TRef.set(coming, false)
     return { ready, turns, on }
@@ -1847,11 +1879,11 @@ export const make = (
 
   /**
    * Says a notice. Only a question, or an answer that can be followed up, is
-   * listened to: whatever else they'd say to it has nowhere to go. What can't
-   * be played was never said, so it isn't what the user heard last; and a
-   * question that can't be asked in full, even one that breaks off midway,
-   * counts as never said and goes unanswered, to be asked again later or let
-   * go, rather than left open.
+   * listened to: whatever else they'd say to it has nowhere to go, so over
+   * anything else only "Mute." is heard. What can't be played was never
+   * said, so it isn't what the user heard last; and a question that can't be
+   * asked in full, even one that breaks off midway, counts as never said and
+   * goes unanswered, to be asked again later or let go, rather than left open.
    */
   const say = (said: Inbox.Said, dealtWith: Effect.Effect<void>, listening = true) =>
     Effect.gen(function* () {
@@ -1897,14 +1929,11 @@ export const make = (
         return
       }
       if (question === undefined) {
-        const playback = yield* audio.play(played)
-        yield* saying
-        if (playback.confirmed) yield* confirmed
-        yield* playback.finished
-        // afplay can't say it's playing, so that's known only now.
-        if (!playback.confirmed) yield* confirmed
-        yield* said.notice.heard ?? Effect.void
-        return yield* dealtWith
+        // Nothing else he'd say over it has anywhere to go, so it plays through all he says, never turned down, but "Mute.", which it
+        // listens for a moment after it too, only as long as the pause between lines once something waits to be said next, which hears
+        // it itself: heard as soon as it's said to the end, so a dictation then neither puts it back nor finds it missed.
+        const heard = Effect.zipRight(said.notice.heard ?? Effect.void, dealtWith).pipe(Effect.uninterruptible)
+        return yield* conversation.tell({ audio: played, spoken, saying, confirmed, through: heard })
       }
       const answer = (heard: string, voiced: number, echo?: string, afterPause?: string, unsaid?: string) =>
         question.answer(heard, voiced, echo, afterPause, unsaid).pipe(Effect.map(Option.map((proceed) => Effect.zipRight(dealtWith, proceed))))
@@ -2139,6 +2168,7 @@ export const make = (
       return yield* Effect.logInfo("Not saying a turn no hook told of, since its hook came or its thread started again")
     }
     saying = ready
+    paused = false
     if ("update" in ready) {
       readSince.set(ready.update, turns)
       yield* hear(ready.update)
@@ -2248,7 +2278,8 @@ export const make = (
         }),
       ),
     )
-    yield* Effect.sleep("400 millis")
+    // The pause between lines, unless the moment after this one was it already.
+    if (!paused) yield* Effect.sleep("400 millis")
   })
 
   /**

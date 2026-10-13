@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { Context, Deferred, Effect, Layer, Option, PubSub, type Scope, STM, Stream, TestClock, TestContext, TRef } from "effect"
 import { basename } from "node:path"
 import { Audio, AudioError } from "./Audio.ts"
-import { Dictation, Turns, WhisperDictation, windows } from "./Dictation.ts"
+import { Ahead, Dictation, Turns, WhisperDictation, windows } from "./Dictation.ts"
 import * as Floor from "./Floor.ts"
 import * as Shortcut from "./Shortcut.ts"
 import { DictationTranscriber } from "./Transcriber.ts"
@@ -15,7 +15,8 @@ const frames = (picture: string) => [...picture].map((frame) => frame === "x")
 /**
  * Runs a dictation against a shortcut and microphone the test drives, and a transcriber that hears `transcribed` in
  * turn. Audio plays as the helper does: one thing at a time, each taking `seconds`, and one cut off by the next never
- * finishing, only timing out. Playing opens the microphone and resting closes it. yapd was turned on once before.
+ * finishing, only timing out. Playing opens the microphone and resting closes it. yapd was turned on once before, and is on,
+ * so "Mute." goes ahead.
  */
 const dictation = (
   transcribed: ReadonlyArray<string>,
@@ -110,6 +111,7 @@ const dictation = (
           }),
           Layer.succeed(Voice, { render: (text) => Effect.sync(() => void said.push(text)) }),
           Layer.succeed(Turns, Effect.sync(() => turns)),
+          Layer.succeed(Ahead, (heard) => Effect.succeed(heard === "Mute.")),
           Floor.layer,
         ),
       ),
@@ -372,6 +374,30 @@ describe("Dictation", () => {
     expect(result.transcripts).toEqual(["Fix the loader in yapd.", "Then do the same in std."])
     expect(result.presses).toEqual([1, 2])
     expect(result.ended).toEqual([1, 2])
+  })
+
+  test("hands on 'Mute.' at once, never waiting for one before it still being transcribed, and what follows it after that one", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { press, talk, wait, transcripts, ended } = yield* dictation([], {
+          // The first is long, so it's still being transcribed when "Mute." and the one after it are done.
+          transcribe: (call) =>
+            Effect.succeed(["Fix the loader in yapd.", "Mute.", "Then do the same in std."][call] ?? "").pipe(
+              Effect.delay(call === 0 ? "10 seconds" : "0 seconds"),
+            ),
+        })
+        const dictate = Effect.zipRight(press("Started"), talk("x".repeat(20))).pipe(Effect.zipRight(press("Sent")))
+        yield* dictate
+        yield* dictate
+        yield* dictate
+        const during = [...transcripts]
+        yield* wait(10)
+        return { during, transcripts, ended }
+      }),
+    )
+    expect(result.during).toEqual(["Mute."])
+    expect(result.transcripts).toEqual(["Mute.", "Fix the loader in yapd.", "Then do the same in std."])
+    expect(result.ended).toEqual([2, 1, 3])
   })
 
   test("hands on each dictation as said when they stopped talking, however long the one before it took to hear", async () => {

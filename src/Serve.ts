@@ -9,7 +9,7 @@ import * as Codex from "./Codex.ts"
 import { ProviderCondenser } from "./Condenser.ts"
 import * as Config from "./Config.ts"
 import * as Daemon from "./Daemon.ts"
-import { Dictation, Turns, WhisperDictation } from "./Dictation.ts"
+import { Ahead, Dictation, Turns, WhisperDictation } from "./Dictation.ts"
 import * as Drafts from "./Drafts.ts"
 import * as Floor from "./Floor.ts"
 import * as Hands from "./Hands.ts"
@@ -150,6 +150,14 @@ export const serve = Effect.gen(function* () {
   const persona = yield* Persona.Persona
   /** What tells him what was held once he says he's back over an update, which the assistant does, once it's made. */
   const welcome = yield* Deferred.make<Effect.Effect<void>>()
+  /**
+   * Turning yapd on or off as the menu does, once that's made, for "Mute."
+   * said to it, and "unmute" by the shortcut while it's off, by the dictation
+   * the shortcut's press `press` began: back once it's on or off, never
+   * waiting on what's said on coming back.
+   */
+  const toggling = yield* Deferred.make<(on: boolean, press?: number) => Effect.Effect<void>>()
+  const power = (on: boolean, press?: number) => Effect.flatMap(Deferred.await(toggling), (turn) => turn(on, press))
   /** What says notices, once it's made, which says a reminder on its own when the update it led is never said. */
   const noticing = yield* Deferred.make<Effect.Effect.Success<ReturnType<typeof Notices.make>>>()
   // Hooks on this machine are tied to the thread they came from, so what's said of each is kept with it, and what he says over it goes to it.
@@ -216,6 +224,7 @@ export const serve = Effect.gen(function* () {
           }
         }),
       ),
+    off: power(false),
     // What he asked to hear once a thread finishes leads its update, named as the desk names it, and is said on its own should that never be.
     finishing: Reminders.finishing({
       reminders,
@@ -288,6 +297,7 @@ export const serve = Effect.gen(function* () {
     controls,
     naming,
     modes,
+    turn: power,
     reminders,
     memories,
     routines,
@@ -347,9 +357,13 @@ export const serve = Effect.gen(function* () {
   // holds up none of the rest, and what waits on him there is said once it's back.
   yield* Effect.forEach(followed, ({ machine: name, live }) => Effect.forkScoped(Notices.lookBack(notices, live.view, name)), { discard: true })
   const shortcut = yield* Shortcut
-  // Built once the daemon is, so each press keeps how many times yapd had been turned on or off by then, however late what was said is handed on.
+  // Built once the daemon is, so each press keeps how many times yapd had been turned on or off by then, however late what was said is handed
+  // on, and "Mute." while it's on is handed on at once, never waiting for what he dictated before it to be heard.
   const dictation = Context.get(
-    yield* Layer.build(WhisperDictation).pipe(Effect.provideService(Turns, Effect.map(daemon.power, ({ turns }) => turns))),
+    yield* Layer.build(WhisperDictation).pipe(
+      Effect.provideService(Turns, Effect.map(daemon.power, ({ turns }) => turns)),
+      Effect.provideService(Ahead, (heard) => Switching.urgent(heard, daemon.power)),
+    ),
     Dictation,
   )
 
@@ -363,19 +377,41 @@ export const serve = Effect.gen(function* () {
    * assistant drops before the daemon turns, so what it was doing for the
    * turns before is stopped like the rest. Only when it really switches:
    * started on, or asked for on while it is, nothing he's asking is dropped.
+   * Turned on by voice, what he's dictating is kept, as he may have pressed
+   * again right after, and the presses after that one count as made once
+   * it's on.
    */
-  const turn = Switching.switcher({
+  const switcher = Switching.switcher({
     power: daemon.power,
-    drop: Effect.all([dictation.drop, assistant.drop], { discard: true }),
+    dictations: dictation.drop,
+    drop: assistant.drop,
     turn: daemon.turn,
     shortcut: shortcut.toggle(true),
     back: Effect.all([assistant.back, notices.reconcile], { discard: true }),
   })
   const switching = yield* Effect.makeSemaphore(1)
+  /**
+   * Turns yapd on or off as the menu does, one at a time, so what's
+   * remembered is what's in effect, running `switched` once it is. Noted as
+   * of when it was asked, so it comes before what turning off keeps.
+   */
+  const toggle = (on: boolean, press?: number, switched?: Effect.Effect<void>) =>
+    Effect.flatMap(Clock.currentTimeMillis, (at) =>
+      Effect.zipRight(settings.remember(on), switcher.turn(on, press, switched)).pipe(Effect.zipRight(journal.write({ at, kind: "action", detail: { on } }))),
+    ).pipe(switching.withPermits(1))
+  // By voice, it's back once yapd is on or off, so what he dictated after is handed on once it is, however long what's said on coming
+  // back takes; and nothing waits on it to say what went wrong, so that's logged.
+  const scope = yield* Effect.scope
+  yield* Deferred.succeed(toggling, (on, press) =>
+    Switching.promptly(
+      (switched) => toggle(on, press, switched).pipe(Effect.catchAllCause((cause) => Effect.logWarning(`Could not turn ${on ? "on" : "off"}`, cause))),
+      scope,
+    ),
+  )
   // The shortcut waits for this, so nothing is dictated before yapd knows it's on.
-  if (yield* settings.on) yield* turn(true)
+  if (yield* settings.on) yield* switcher.turn(true)
   else {
-    yield* turn(false)
+    yield* switcher.turn(false)
     yield* Effect.logInfo("yapd is off, until it's turned on from the menu bar or the API")
   }
 
@@ -418,11 +454,7 @@ export const serve = Effect.gen(function* () {
   yield* Server.serve(yield* Config.port, {
     handle: daemon.handle,
     state: Show.stated(state, show),
-    // One at a time, so what's remembered is what's in effect. Noted as of when it was asked, so it comes before what turning off keeps.
-    turn: (on) =>
-      Effect.flatMap(Clock.currentTimeMillis, (at) =>
-        Effect.zipRight(settings.remember(on), turn(on)).pipe(Effect.zipRight(journal.write({ at, kind: "action", detail: { on } }))),
-      ).pipe(switching.withPermits(1)),
+    turn: toggle,
     // Ended from the menu, focus or quiet offers the rundown, as when its time runs out.
     mode: (mode, until) =>
       Effect.gen(function* () {
@@ -442,11 +474,12 @@ export const serve = Effect.gen(function* () {
     icon: icons.image,
   })
   // Asked as the user starts talking, so it's there by the time they've finished.
-  yield* Effect.forkScoped(Stream.runForEach(dictation.presses, ({ press, turns, began }) => assistant.prepare(press, turns, began)))
-  // Each with the press it began with, which keeps what "it" meant then, however long the dictation took.
+  yield* Effect.forkScoped(Stream.runForEach(dictation.presses, ({ press, turns, began }) => assistant.prepare(press, switcher.turns(press, turns), began)))
+  // Each with the press it began with, which keeps what "it" meant then, however long the dictation took. "Mute." is heard at once, ahead
+  // of what's still being heard or worked out; "unmute" in its turn, so what he says after it is handed on once yapd is on.
   yield* Effect.forkScoped(
-    Stream.runForEach(dictation.transcripts, ({ press, turns, heard: text, voiced, at }) =>
-      text === "" ? assistant.nothing(press) : heard(text, "shortcut", voiced, turns, press, at),
+    Switching.dictations(dictation.transcripts, daemon.power, ({ press, turns, heard: text, voiced, at }) =>
+      text === "" ? assistant.nothing(press) : heard(text, "shortcut", voiced, switcher.turns(press, turns), press, at),
     ),
   )
   // Whatever he says over an update takes the place of a question yapd asked before.

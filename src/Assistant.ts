@@ -15,7 +15,7 @@ import { addressed, type Lines, Persona, unaddressed } from "./Persona.ts"
 import type * as Preferences from "./Preferences.ts"
 import * as Questions from "./Questions.ts"
 import * as Reminders from "./Reminders.ts"
-import { enough, gist, type Line } from "./Responder.ts"
+import { enough, type Line, once, switches } from "./Responder.ts"
 import * as Show from "./Show.ts"
 import * as T3Actions from "./T3Actions.ts"
 import * as Threads from "./Threads.ts"
@@ -641,7 +641,7 @@ const along = (thought: Pick<Thought, "utterance" | "subject">, subject: Subject
     : subject
 
 /** Whether he only told yapd to stop what it's saying, like "skip" or "stop, stop", rather than taking it in, like "thanks". */
-const hushed = (heard: string) => enough.has([...new Set(gist(heard).split(" "))].join(" "))
+const hushed = (heard: string) => enough.has(once(heard))
 
 /** Whether what was heard was taken for noise rather than anything he said to yapd. */
 const noise = (kept: Kept) =>
@@ -702,6 +702,14 @@ export const make = (options: {
   readonly naming?: (host: string) => string
   /** How yapd talks, which he changes by voice. Without it, that's something yapd can't do yet. */
   readonly modes?: Modes.Modes
+  /**
+   * Turns yapd on or off as the menu does: "Mute." said by the shortcut turns
+   * it off, and "unmute" or "turn on" said by it while it's off, on, with
+   * nothing worked out of either, by what the shortcut's press `press` began,
+   * when it was. It's back once yapd is on or off, never waiting on what's
+   * said on coming back. Without it, they're worked out as anything else is.
+   */
+  readonly turn?: (on: boolean, press?: number) => Effect.Effect<void>
   /** What he asked to be told later, which he sets and cancels by voice. Without them, that's something yapd can't do yet. */
   readonly reminders?: Reminders.Reminders
   /** What he asked yapd to keep in mind, which he has kept and forgets by voice. Without them, that's something yapd can't do yet. */
@@ -4249,6 +4257,16 @@ export const make = (options: {
           const kept = yield* ended(press)
           // Said before yapd was turned off, it isn't even worked out, however late it's handed on.
           if (yield* outdated(utterance.turns)) return yield* Effect.as(kept?.arrived ?? Effect.void, Option.none<string>())
+          // "Mute." is his emergency off, and "unmute" or "turn on" while yapd is off turns it back on: either is done as the menu does
+          // it, at once, with nothing worked out or said for it, and carried through however this ends. Off, before what the press held
+          // is let go of, so what it held, like a thread's question, is dropped as turning off drops it. On, before what he dictated
+          // after is handed on, so it's taken for said once yapd is on, never waiting for what turning on says.
+          const switching = switches(utterance.heard, (yield* options.power).on)
+          if (options.turn !== undefined && switching !== undefined) {
+            yield* Effect.logInfo(switching ? `Turned on: he said ${once(utterance.heard)}` : "Turned off: he said mute")
+            yield* Fiber.join(yield* Effect.forkIn(options.turn(switching, press), scope))
+            return yield* Effect.as(kept?.arrived ?? Effect.void, Option.some(utterance.id))
+          }
           const arrived = kept?.arrived ?? (yield* options.awaiting)
           // Only a question asked by the time it was said is held by it, however late it's handed on.
           return yield* Effect.zipRight(hold(holding, utterance.at), stoppable(respond(utterance, kept?.subject), utterance)).pipe(Effect.ensuring(arrived))

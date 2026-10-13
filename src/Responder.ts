@@ -156,6 +156,27 @@ export const enough: ReadonlySet<string> = new Set([
 /** Calling it off, said on its own to an update: hearing enough of it, never something for yapd to forget, which is asked with the shortcut. */
 const callingOff: ReadonlySet<string> = new Set(["forget it", "forget about it"])
 
+/** What's said, as it's compared, each word once, so what Whisper heard again and again, like "Stop, stop.", is as if said once. */
+export const once = (heard: string) => [...new Set(gist(heard).split(" "))].join(" ")
+
+/**
+ * "Mute." on its own, however many times Whisper heard it: his emergency off,
+ * which turns yapd off at once wherever he says it, as the menu does, with
+ * nothing worked out of it. Never "mute it" or "mute the Tezos one", which
+ * mute a thread, nor "Mute?", which asks something: that's the model's to
+ * make sense of.
+ */
+export const halts = (heard: string) => !question.test(heard) && once(heard) === "mute"
+
+/** Turning yapd back on, in so many words, which only said by the shortcut while it's off turns it on: on, "unmute" is about a thread. */
+const turningOn: ReadonlySet<string> = new Set(["unmute", "un mute", "turn on", "turn it on", "turn yourself on", "turn back on"])
+
+/** Whether what he said is only to turn yapd back on: never asked, like "Unmute?", which is the model's to make sense of. */
+export const wakes = (heard: string) => !question.test(heard) && turningOn.has(once(heard))
+
+/** What what he said turns yapd to, as it is now: off for "Mute." while it's on, on for "unmute" while it's off, and nothing otherwise. */
+export const switches = (heard: string, on: boolean) => (on ? (halts(heard) ? false : undefined) : wakes(heard) ? true : undefined)
+
 /** What Whisper writes for near-silence, which nobody said. */
 export const hallucinated: ReadonlySet<string> = new Set(["you", "thank you", "bye", "see you again", "kid", "thanks for watching"])
 

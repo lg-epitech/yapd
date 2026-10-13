@@ -66,13 +66,14 @@ The app only uses yapd's [API](docs/api.md), so you can make your own, on Linux 
 
 Say anything while yapd is talking and it stops. The model that writes the summaries then works out what you meant:
 
+- "Mute." on its own turns yapd off at once, as Turn Off in the menu does, with no model and not a word back, over anything it says or just after, its first seconds and a notice too, and by the [shortcut](#dictating). What was waiting stays unheard for your catch-up, and nothing reaches an agent: one whose question it was reading still waits on you in T3 Code. Turn it back on from the menu, or press the shortcut and say "unmute" or "turn on". "Mute it" still mutes the thread.
 - "Got it", "sounds good" or "quiet" and it stays quiet. Agreeing only goes to the agent when it asked you something, and "leave it as it is" never does.
 - "Mute it" keeps that thread's progress and finished work to yourself, for good or "for an hour", while anything that needs you still comes through, and asking what it said catches you up on it. "Unmute it", "what's muted?" and "unmute everything" work too, by the shortcut as well, and "scratch that" takes a mute back. Nothing about it reaches the agent.
 - "More" over a headline, or just after it, says the rest at once.
 - "Focus", "goodnight", "I'm back", "talk shorter" and "give me everything" change how yapd talks, as in [Focus and quiet](#focus-and-quiet). Nothing about them reaches the agent.
 - Ask something the update answers, like "which PR was that?", and it answers.
 - Tell the agent something, like "merge it" or "look again", and it goes to the session as your message. You hear the reply like any other update, even a quick one, unless the agent only says it understood.
-- If you were talking to someone else, it picks up where it left off. If that keeps happening, say with a TV on, it reads the rest without stopping.
+- If you were talking to someone else, it picks up where it left off. If that keeps happening, say with a TV on, it reads the rest without stopping for anything but "Mute.".
 
 You can also reply just after it finishes, so "yes, merge it" works when an update ends on a question. The replies people give most are taken at once: a plain "yes" or "go ahead" to an update that asked something goes straight to the agent, and "thanks", "got it", "skip it" or "quiet" just end the update. Anything more, yapd takes about as long to work out as it does to write a summary, around two seconds with Codex.
 

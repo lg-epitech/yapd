@@ -103,6 +103,8 @@ curl -X PUT -H 'Content-Type: application/json' -d '{"mode": "focus"}' http://12
 
 Turning it off stops whatever yapd is saying at once, and drops what you asked that hasn't started yet: a dictation being recorded or transcribed, and new work still being written up or waiting on an answer. A session already being started still starts, but nothing is said about it. What was waiting to be said, being summed up or cut off is kept unheard, not dropped, and agents' hooks are let go at once, so none waits on yapd while it's off. The [card](#cards) yapd is showing comes down too, so `showing` is `null`. While it's off, its mode stays as it was, and a mode that ends meanwhile ends without a word. Turning it on again stops whatever it was saying in answer to you while it was off.
 
+Saying "Mute." on its own, over anything yapd says or by the shortcut, turns it off the same way, and while it's off, "unmute" or "turn on" by the shortcut turns it on the same way, so the state and its stream say so. So does sending either to [`/utterances`](#asking-yapd-something), which answers `202` once it's under way.
+
 ## Modes
 
 yapd starts each update with its headline, about fifteen words, and keeps the rest for when you say "more". What it says only to tell you how something's going, like another review round, it holds for a digest, a short catch-up said once things have been quiet for a minute, at most every twenty minutes, when three such updates are waiting or one has waited twenty minutes. "Give me everything" has yapd say every update in full and hold none of them, until "talk shorter".
