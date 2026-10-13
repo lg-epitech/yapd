@@ -11856,4 +11856,35 @@ describe("Assistant memories", () => {
     expect(result.journal).not.toContain("4f9a8b7c6d5e")
     expect(result.journal).not.toContain("4 8 2 7")
   })
+
+  test("a secret to remember in the rest of a request isn't kept in the journal, even worked out after the step before is said", async () => {
+    const rest = "remember that the staging key is sk-live-4f9a8b7c6d5e"
+    let slow = false
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(
+          (situation) => {
+            const { heard } = situation.utterance
+            slow = heard === rest
+            return slow
+              ? Brain.decision({ act: "remember", how: "fact", text: "the staging key is sk-live-4f9a8b7c6d5e" })
+              : Brain.decision({ act: "send", target: handle(situation, mina), text: "Use your fee table.", how: "now", rest })
+          },
+          undefined,
+          { memories: true, deciding: Effect.suspend(() => (slow ? Effect.sleep("3 seconds") : Effect.void)) },
+        )
+        const dictated = yield* Effect.fork(made.heard({ heard: `Tell the Mina one to use its fee table, and ${rest}.`, via: "shortcut", at: now, voiced: 3, turns: 1 }))
+        yield* made.flush
+        // Not worked out within a second, the step before is said on its own, and the rest is turned down once it is.
+        yield* made.wait(1)
+        yield* Fiber.join(dictated)
+        yield* made.wait(3)
+        return { spoken: made.spoken(), kept: (yield* made.memories!.list).length, journal: yield* made.journal.since(0) }
+      }),
+    )
+    expect(result.spoken.at(-1)).toBe("I won't keep that, sir. It looks like a secret.")
+    expect(result.kept).toBe(0)
+    expect(result.journal.find(({ kind }) => kind === "dictation")).toMatchObject({ detail: { withheld: true } })
+    expect(JSON.stringify(result.journal)).not.toContain("4f9a8b7c6d5e")
+  })
 })

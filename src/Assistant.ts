@@ -3781,12 +3781,18 @@ export const make = (options: {
         )
       })
 
-    /** Notes what he said and what was made of it, at once and on a second look: not his words, when they looked like a secret. */
+    /**
+     * Notes what he said and what was made of it, at once and on a second
+     * look: not his words, when they or the rest of his request look like a
+     * secret, since a step after this one, like keeping it in mind, may only
+     * turn it down once this is written, worked out while this is said.
+     */
     const note = (thought: Thought, outcome: Outcome, began: number) =>
       Effect.gen(function* () {
         const { utterance } = thought
-        const { second, withheld = false } = outcome
+        const withheld = outcome.withheld === true || T3Actions.revealing(utterance.heard) || T3Actions.revealing(thought.decision.rest)
         const decision = withheld ? { ...thought.decision, text: "", rest: "" } : thought.decision
+        const second = withheld && outcome.second !== undefined ? { ...outcome.second, text: "", rest: "" } : outcome.second
         const ms = (yield* Clock.currentTimeMillis) - began
         // Said back to what he missed, cutting it off or after it, it's part of catching up, so it never hides what he didn't hear
         // of that from the next "what did I miss?": heard to the end, it's heard, and never told again anyway.
