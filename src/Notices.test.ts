@@ -88,6 +88,8 @@ const notices = (
     readonly power?: { on: boolean; turns: number }
     /** What's queued is dropped unsaid as yapd is turned off, rather than said. */
     readonly dropping?: boolean
+    /** What's queued waits under its id, as the inbox keeps it, a newer one taking the place of one waiting under the same, till `speak`. */
+    readonly queueing?: boolean
     /** The work yapd started, as the ledger has it. */
     readonly started?: ReadonlyArray<{ readonly at: number; readonly thread: string; readonly messageId: string | null }>
     /** Whether he can be reminded of things, kept in the same database, offers asked as they come due kept in `offers`. */
@@ -169,6 +171,8 @@ const notices = (
     const reminders = given.reminding === true ? Reminders.make(store, kept) : undefined
     /** The offers handed over to be asked, by what they'd send. */
     const offers: Array<string> = []
+    /** What waits to be said, by its id. */
+    const waiting = new Map<string, Notice>()
     const tell = (notice: Notice) =>
       Effect.gen(function* () {
         if (given.dropping === true) {
@@ -176,6 +180,11 @@ const notices = (
           power.turns++
           return yield* notice.gone ?? Effect.void
         }
+        if (given.queueing === true) return void waiting.set(notice.id, notice)
+        yield* say(notice)
+      })
+    const say = (notice: Notice) =>
+      Effect.gen(function* () {
         if (yield* notice.stale) return
         yield* notice.saying ?? Effect.void
         told.push(notice.spoken)
@@ -248,6 +257,15 @@ const notices = (
         }),
       wait: (seconds: number) => TestClock.adjust(`${seconds} seconds`).pipe(Effect.zipRight(flush)),
       flush,
+      /** What waits is said in turn, and what comes of it, till nothing does. */
+      speak: Effect.gen(function* () {
+        while (waiting.size > 0) {
+          const next = [...waiting.values()]
+          waiting.clear()
+          for (const notice of next) yield* say(notice)
+          yield* flush
+        }
+      }),
     }
   })
 
@@ -1389,6 +1407,32 @@ describe("Notices of reminders", () => {
       expect.stringMatching(/^Fix the std build hit Claude's limit, sir; it resets at \d/),
       "Migrate Tezos Integration stopped, sir, before finishing: it hit Claude's limit. You asked me to remind you then: call Bob.",
     ])
+    expect(result.heard).toEqual([true])
+  })
+
+  test("what he set on a thread that hit a limit is told, though another thread's limit comes in while that waits to be said", async () => {
+    const limited = (id: string, title: string, runId: string) =>
+      thread(id, title, { status: "failed", latestRunId: runId, lastErrorClass: "usage_limit", usageLimitResetAt: "2026-10-08T23:00:00.000Z" })
+    const tezos = limited("tezos", "Migrate Tezos Integration", "run-1")
+    const std = limited("std", "Fix the std build", "run-2")
+    const limit = (runId: string) => ({
+      runs: [{ id: runId, status: "failed", ordinal: 1, startedAt: minutes(3) }],
+      turnItems: [failure(runId, "usage_limit", "Claude usage limit reached.", "2026-10-08T23:00:00.000Z")],
+    })
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* notices({ view: [tezos, std], bounded: { tezos: limit("run-1"), std: limit("run-2") }, reminding: true, queueing: true })
+        yield* made.reminders!.add(tezosDone("call Bob"))
+        // Both hit the limit seconds apart, while something else is being said.
+        yield* made.hear(ended(tezos, "run-1"))
+        yield* made.wait(10)
+        yield* made.hear(ended(std, "run-2"))
+        yield* made.wait(10)
+        yield* made.speak
+        return { told: made.told, heard: yield* remindersHeard(made.journal) }
+      }),
+    )
+    expect(result.told).toEqual([expect.stringMatching(/^Migrate Tezos Integration hit Claude's limit, sir; it resets at \d.*\. You asked me to remind you then: call Bob\.$/)])
     expect(result.heard).toEqual([true])
   })
 })

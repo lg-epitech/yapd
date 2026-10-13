@@ -998,7 +998,9 @@ export const make = (options: {
     /**
      * Says a run failed, with why, or that it hit its provider's limit, once
      * for every thread that does until it resets, with what he set on its
-     * finishing by when it `ended`.
+     * finishing by when it `ended`. With that riding on it, it waits to be
+     * said under its run's own key, never its thread's or the limit's, so
+     * nothing else, like another thread's limit, takes its place unsaid.
      */
     const failed = (ref: Threads.Ref, run: T3Actions.Ran, thread: T3Live.Thread, called: string, project: string, turns: number, at: number, ended: number) =>
       Effect.gen(function* () {
@@ -1007,6 +1009,7 @@ export const make = (options: {
         // Only while it's still the thread's latest: started again since, he's dealt with it.
         const still = Effect.map(threads.find(ref), Option.exists((thread) => thread.latestRunId === run.id))
         const base = { at, kind: "notice" as const, machine: ref.machine, thread: ref.id, project, detail: { failure: kind } }
+        const own = key.failed(ref.machine, run.id)
         if (kind === "usage_limit") {
           const resets = Option.orElse(
             Option.flatMap(run.failure, (failure) => Option.fromNullable(failure.resetAt)),
@@ -1020,10 +1023,10 @@ export const make = (options: {
           const unsaid = Effect.zipWith(still, holding(who, limit, reset), (still, held) => still && !held)
           const too = yield* failedToo(ref, spoken, stopped(run, thread), ended, turns)
           const entry = { ...base, said: too.spoken, key: limit, detail: { failure: kind, ...Option.match(resets, { onNone: () => ({}), onSome: (resets) => ({ resets }) }) } }
-          return yield* notify(ref, too.spoken, entry, unsaid, at, turns, limit, undefined, too.along)
+          return yield* notify(ref, too.spoken, entry, unsaid, at, turns, too.along === undefined ? limit : own, undefined, too.along)
         }
         const too = yield* failedToo(ref, lines.failed(called, reason(run.failure, thread), said), stopped(run, thread), ended, turns)
-        yield* notify(ref, too.spoken, { ...base, said: too.spoken, key: key.failed(ref.machine, run.id) }, still, at, turns, undefined, undefined, too.along)
+        yield* notify(ref, too.spoken, { ...base, said: too.spoken, key: own }, still, at, turns, too.along === undefined ? undefined : own, undefined, too.along)
       })
 
     /** Looks into what a change to a thread comes to, in the background, unless yapd is off. */
