@@ -105,7 +105,7 @@ export const serve = Effect.gen(function* () {
   const preferences = yield* Preferences.path
   // His routines in the file, read each time, from the whole of it, so one he adds is there for the next thing he says: never one called
   // as yapd answers to already, which would never be heard as the routine.
-  const routines = Preferences.written(preferences, answersTo)
+  const routines = yield* Preferences.written(preferences, answersTo)
   const tunnels = yield* Tunnels
   const everywhere = yield* machines(Tunnel.masters(tunnels))
   const journal = yield* Journal.Journal
