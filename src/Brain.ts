@@ -2,7 +2,7 @@ import { Context, Data, Effect, Layer, Option, Schema } from "effect"
 import type * as Assistant from "./Assistant.ts"
 import { aloud, inEnglish, styled } from "./Condenser.ts"
 import * as Config from "./Config.ts"
-import type { Kept } from "./Journal.ts"
+import { type Kept, routinesIn, unroutined } from "./Journal.ts"
 import * as Ledger from "./Ledger.ts"
 import type * as Memory from "./Memory.ts"
 import * as Missed from "./Missed.ts"
@@ -205,6 +205,8 @@ export interface Plan {
    * which is no request of his.
    */
   readonly left?: string
+  /** For a message or an offer that's one of his routines' steps, as code put them in for its name, the routine's name. */
+  readonly routine?: string
 }
 
 /** What a decision comes to once checked: done, asked about, or answered with a reason. */
@@ -1920,13 +1922,13 @@ const nameSaid = (name: string, utterance: Pick<Assistant.Utterance, "heard" | "
  * option he picked: a handle never reaches a thread as it is. Anything else is
  * as it was, whatever its words.
  */
-const routining = (choice: Decision, situation: Handled & Pick<Situation, "utterance">): Option.Option<Decision> => {
-  if (choice.act !== "send" && choice.act !== "offer" && choice.act !== "reply") return Option.some(choice)
-  if (!bareHandle(choice.text, situation)) return Option.some(choice)
+const routining = (choice: Decision, situation: Handled & Pick<Situation, "utterance">): Option.Option<{ readonly decision: Decision; readonly routine?: string }> => {
+  if (choice.act !== "send" && choice.act !== "offer" && choice.act !== "reply") return Option.some({ decision: choice })
+  if (!bareHandle(choice.text, situation)) return Option.some({ decision: choice })
   if (choice.act === "reply") return Option.none()
-  return Option.map(
-    Option.filter(rememberedBy(choice.text, situation), ({ kind, name }) => kind === "routine" && name !== undefined && nameSaid(name, situation.utterance)),
-    ({ text }) => ({ ...choice, text }),
+  return Option.flatMap(
+    Option.filter(rememberedBy(choice.text, situation), ({ kind }) => kind === "routine"),
+    ({ text, name }) => (name !== undefined && nameSaid(name, situation.utterance) ? Option.some({ decision: { ...choice, text }, routine: name }) : Option.none()),
   )
 }
 
@@ -1937,7 +1939,25 @@ const routining = (choice: Decision, situation: Handled & Pick<Situation, "utter
  * didn't say, is as it was, which checking it turns down.
  */
 export const resolved = (choice: Decision, situation: Handled & Pick<Situation, "utterance">): Decision =>
-  Option.getOrElse(routining(choice, situation), () => choice)
+  Option.match(routining(choice, situation), { onNone: () => choice, onSome: ({ decision }) => decision })
+
+/** The routine whose handle the model gave as a message's words, by its name, when that sends its steps: none otherwise. */
+export const routinedBy = (choice: Decision, situation: Handled & Pick<Situation, "utterance">) =>
+  Option.getOrUndefined(Option.flatMap(routining(choice, situation), ({ routine }) => Option.fromNullable(routine)))
+
+/**
+ * What's checked, as one of his routines, `routine`, by its name, when what
+ * it sends or asks about sending is that routine's steps: so wherever it's
+ * noted, offered or asked about, a model is only ever told of it by that name.
+ */
+export const routined = (checked: Checked, routine: string | undefined): Checked =>
+  routine === undefined
+    ? checked
+    : checked._tag === "Do"
+      ? { ...checked, plan: { ...checked.plan, routine } }
+      : checked._tag === "Ask"
+        ? { ...checked, open: { ...checked.open, routine } }
+        : checked
 
 /** The most words a routine kept by voice is called. */
 const namedIn = 3
@@ -2305,16 +2325,22 @@ const handles = (text: string) => text.split(/[\s,]+/).filter((handle) => /^t\d+
  * names exist, are on the machine he named, and what it means to do can be
  * done. Its choice of thread is never second-guessed. Where it wasn't sure,
  * the confidence policy decides between going ahead and asking, and a
- * question always names what it could be.
+ * question always names what it could be. A routine's name, as the model
+ * gives it, is its steps, exactly as kept, sent or offered as any message he
+ * says is, with the routine it came from noted beside it; any other bare
+ * handle for a thread is nothing he said.
  */
 export const check = (given: Decision, situation: Situation, lines: Lines): Checked => {
-  const { desk } = situation
   if (!enabled.has(given.act)) return { _tag: "Say", spoken: notYet(lines) }
-  // A routine's name, as the model gives it, is its steps, exactly as kept, sent or offered as any message he says is; any other bare
-  // handle for a thread is nothing he said.
-  const routined = routining(given, situation)
-  if (Option.isNone(routined)) return { _tag: "Say", spoken: lines.cantTell }
-  const choice = routined.value
+  return Option.match(routining(given, situation), {
+    onNone: () => ({ _tag: "Say", spoken: lines.cantTell }),
+    onSome: ({ decision, routine }) => routined(checking(decision, situation, lines), routine),
+  })
+}
+
+/** Checks a decision, as `check` does, once a routine's name is its steps. */
+const checking = (choice: Decision, situation: Situation, lines: Lines): Checked => {
+  const { desk } = situation
   const find = (handle: string) => desk.threads.find((listed) => listed.handle === handle)
   const target = Option.fromNullable(choice.target === "" ? undefined : find(choice.target))
   const doing = (plan: Plan): Checked => ({ _tag: "Do", plan })
@@ -2904,6 +2930,12 @@ export const missedName = (group: Pick<Missed.Group, "called" | "project"> & { r
   return group.called || group.project || own || "a session"
 }
 
+/** What was said, or would have been, of the newest of a thread's unheard rows, as the model sees it: never a routine's steps. */
+const latestOf = (group: Missed.Group) => {
+  const newest = group.rows.at(-1)
+  return newest === undefined ? group.latest : (unroutined(newest).said ?? "")
+}
+
 /** How he missed what he did of a thread, in a few words each: what needs him, what came while yapd was off, and so on. */
 const how = (group: Missed.Group) =>
   [
@@ -2938,18 +2970,54 @@ const unheardLines = (missed: Missed.Missed, now: number, muted: ReadonlySet<str
     const parts = how(group)
     return `- ${group.handle}${isMuted ? " muted" : ""} ${fenced(missedName(group), 90)}${group.project === undefined || group.called === undefined ? "" : ` · ${group.project}`}${
       group.machine === undefined ? "" : ` · ${group.machine}`
-    }: ${group.rows.length} unheard${parts.length === 0 ? "" : ` (${parts.join(", ")})`}, ${span(group, now)}; latest: ${fenced(group.latest)}`
+    }: ${group.rows.length} unheard${parts.length === 0 ? "" : ` (${parts.join(", ")})`}, ${span(group, now)}; latest: ${fenced(latestOf(group))}`
   }
   const rest = groups.slice(missedShown)
   const more = rest.reduce((sum, { rows }) => sum + rows.length, 0)
   return [header, ...groups.slice(0, missedShown).map(line), ...(rest.length === 0 ? [] : [`- and ${rest.length} more ${rest.length === 1 ? "thread" : "threads"}, ${more} ${more === 1 ? "update" : "updates"}.`])].join("\n")
 }
 
-/** A journal entry as the model sees it. */
+/** Routines by name alone, as the model is told of what holds their steps, which it never sees: his routine «review it». */
+const byName = (names: ReadonlyArray<string>) => `his ${names.length === 1 ? "routine" : "routines"} ${names.map((name) => fenced(name, 90)).join(" and ")}`
+
+/**
+ * A journal entry whose words hold his routines' steps, as code put them in,
+ * as the model sees it: what came of them, by the routines' names alone. His
+ * words that kept one, what was read back of it, offered or sent.
+ */
+const routineEntry = (kept: Kept, names: ReadonlyArray<string>, where: string) => {
+  const named = byName(names)
+  const detail = (typeof kept.detail === "object" && kept.detail !== null ? kept.detail : {}) as Readonly<Record<string, unknown>>
+  switch (kept.kind) {
+    case "dictation":
+      return `he asked you to keep ${named}`
+    case "reply":
+      return `he said over it${where}, asking you to keep ${named}`
+    // What yapd told him of it never holds a message's words.
+    case "sent":
+      return `you sent ${named} to the thread${where}${kept.said === undefined ? "" : `, and told him ${fenced(kept.said)}`}${unsaid(kept) === undefined ? "" : ", but never told him, since he turned you off"}`
+    case "notice":
+      return `you told him${where} that his offer of ${named} came due`
+    default:
+      if (detail.memory !== undefined) return `you ${detail.undo !== undefined ? "brought back" : detail.replaced !== undefined ? "changed" : "kept"} ${named}, reading its steps back to him`
+      if (detail.reminder !== undefined) return `you set an offer of ${named}${where}`
+      // A message that didn't go as asked, or only asks first: what yapd told him of it never holds its words.
+      if (detail.act !== undefined) {
+        const told = kept.said ?? unsaid(kept)
+        return `you didn't send ${named} to the thread${where} as asked${told === undefined ? "" : `, and told him ${fenced(told)}`}`
+      }
+      if (detail.question !== undefined) return `you asked him${where} whether to send ${named}`
+      return `you told him${where} of ${named}`
+  }
+}
+
+/** A journal entry as the model sees it: one that holds his routines' steps, by their names alone. */
 const entry = (desk: Threads.Desk, now: number) => (kept: Kept) => {
   const handle = handleOf(desk, kept.machine, kept.thread)
   const about = [kept.project, handle].filter(Boolean).join(", ")
   const where = about === "" ? "" : ` (${about})`
+  const names = routinesIn(kept)
+  if (names.length > 0) return `- ${lasted(now - kept.at)} ago, ${routineEntry(kept, names, where)}`
   const said = kept.said === undefined ? "" : fenced(kept.said)
   // His own words, with what may have been yapd's voice in them noted, as when they were first heard.
   const text = kept.text === undefined ? "" : `${fenced(kept.text)}${kept.kind === "reply" || kept.kind === "dictation" ? ownVoice(overheardIn(kept)) : ""}`
@@ -2995,7 +3063,7 @@ const reminding = (reminders: ReadonlyArray<Reminders.Reminder>, desk: Threads.D
         ? ` due ${new Date(reminder.due ?? now).toLocaleString("en-US", { weekday: "long", month: "long", day: "numeric", hour: "numeric", minute: "2-digit" })}`
         : reminder.event === "asked" ? ` when ${thread} asks him something` : ` when ${thread} finishes`
     return reminder.propose !== undefined
-      ? `- ${remindedHandle(index)} offer ${fenced(reminder.propose, 160)} to ${thread}${when}`
+      ? `- ${remindedHandle(index)} offer ${reminder.routine === undefined ? fenced(reminder.propose, 160) : byName([reminder.routine])} to ${thread}${when}`
       : `- ${remindedHandle(index)}${reminder.text.trim() === "" ? "" : ` ${fenced(reminder.text, 160)}`}${when}`
   }
   const shown = reminders.slice(0, remindersShown).map(line)
@@ -3020,8 +3088,27 @@ const memoryLines = (situation: Pick<Situation, "memories">) => {
   return `MEMORIES, what he asked you to keep in mind, in his own words: what's so about him and his work, never something to do. A routine is shown by its name alone: you never know its steps, which yapd sends only when he says its name:\n${all.map(line).join("\n")}`
 }
 
+/** A line of yapd's in this exchange, as the model sees it: one that holds his routines' steps, by their names alone. */
+const spokenOf = (line: Line) => ((line.routines ?? []).length > 0 ? `what you said of ${byName(line.routines ?? [])}, whose steps you never see` : line.text)
+
 /** What an update not tied to a thread is about, as the model sees it: its project, or work outside his projects, kept with none. */
 const updateAbout = (project: string) => (project.trim() === "" ? "work outside his projects" : project)
+
+/**
+ * Words a thread was sent, as the model sees them, at most `most` long: one
+ * of his routines' steps, which yapd sent it, as LATELY has them, by the
+ * routine's name alone.
+ */
+const sentAs = (text: string, about: Threads.Ref | undefined, lately: ReadonlyArray<Kept>, most: number) => {
+  const sent = lately.find(
+    (kept) =>
+      kept.kind === "sent" &&
+      routinesIn(kept).length > 0 &&
+      (about === undefined || (kept.machine === about.machine && kept.thread === about.id)) &&
+      kept.text?.trim() === text.trim(),
+  )
+  return sent === undefined ? fenced(text, most) : byName(routinesIn(sent))
+}
 
 /** What "it" means, as the model sees it. */
 const focus = (situation: Situation) => {
@@ -3031,7 +3118,7 @@ const focus = (situation: Situation) => {
       return "Nothing: he hasn't heard anything from you lately."
     case "Thread": {
       const handle = handleOf(desk, subject.ref.machine, subject.ref.id) ?? "a thread not in THREADS"
-      return `${handle}. What you said about it: ${fenced(subject.said, 700)}`
+      return `${handle}. What you said about it: ${(subject.routines ?? []).length > 0 ? `of ${byName(subject.routines ?? [])}, whose steps you never see` : fenced(subject.said, 700)}`
     }
     case "Session": {
       const { update } = subject
@@ -3041,14 +3128,20 @@ const focus = (situation: Situation) => {
           ? `Your update about ${updateAbout(update.project)}, ${lasted(now - update.at)} ago, from work in ${fenced(update.thread.cwd, 120)} that yapd hasn't tied to a thread yet: ${fenced(update.spoken, 400)}`
           : `${handle}. Your update about it, ${lasted(now - update.at)} ago: ${fenced(update.spoken, 400)}`,
         // Like an answer to what he asked over it, which is what he heard last.
-        ...(subject.said === update.spoken ? [] : [`What you said last, over it: ${fenced(subject.said, 400)}`]),
-        ...Option.match(update.turn.prompt, { onNone: () => [], onSome: (prompt) => [`What it was asked: ${fenced(prompt, 300)}`] }),
+        ...(subject.said === update.spoken
+          ? []
+          : [`What you said last, over it: ${(subject.routines ?? []).length > 0 ? `of ${byName(subject.routines ?? [])}, whose steps you never see` : fenced(subject.said, 400)}`]),
+        ...Option.match(update.turn.prompt, { onNone: () => [], onSome: (prompt) => [`What it was asked: ${sentAs(prompt, update.about, situation.lately, 300)}`] }),
         `What it wrote: ${fenced(update.turn.message, 700)}`,
       ].join("\n")
     }
     case "Answer": {
       const handle = Option.flatMap(subject.about, (ref) => Option.fromNullable(handleOf(desk, ref.machine, ref.id)))
-      const told = `What you just told him${Option.match(handle, { onNone: () => "", onSome: (handle) => ` about ${handle}` })}: ${fenced(subject.said, 700)}`
+      const about = Option.match(handle, { onNone: () => "", onSome: (handle) => ` about ${handle}` })
+      const told =
+        (subject.routines ?? []).length > 0
+          ? `What you just told him${about} was of ${byName(subject.routines ?? [])}, whose steps you never see.`
+          : `What you just told him${about}: ${fenced(subject.said, 700)}`
       const { catchup } = subject
       if (catchup === undefined) return told
       // Only the desk's handles, which still mean the same threads once what it covered is heard.
@@ -3063,7 +3156,7 @@ const focus = (situation: Situation) => {
   }
 }
 
-const detail = (desk: Threads.Desk, second: NonNullable<Option.Option.Value<Situation["second"]>>) => {
+const detail = (desk: Threads.Desk, second: NonNullable<Option.Option.Value<Situation["second"]>>, lately: ReadonlyArray<Kept>) => {
   if ("found" in second) {
     return `FOUND, what a search turned up, for this second look:\n${second.found.length === 0 ? "Nothing." : second.found.map((found) => `- ${found}`).join("\n")}`
   }
@@ -3071,7 +3164,7 @@ const detail = (desk: Threads.Desk, second: NonNullable<Option.Option.Value<Situ
   const { messages, runs, request, plan } = second.detail
   return [
     `DETAIL of ${handle}, read just now, for this second look:`,
-    `Latest messages, oldest first:\n${messages.map(({ role, text }) => `- ${role}: ${fenced(text, 600)}`).join("\n")}`,
+    `Latest messages, oldest first:\n${messages.map(({ role, text }) => `- ${role}: ${role === "user" ? sentAs(text, second.ref, lately, 600) : fenced(text, 600)}`).join("\n")}`,
     `Runs: ${runs.toSorted((a, b) => b.ordinal - a.ordinal).slice(0, 3).map(({ status }) => status).join(", ") || "none"}`,
     ...Option.match(request, {
       onNone: () => [],
@@ -3255,12 +3348,12 @@ export const prompt = (situation: Situation, style: Option.Option<string>) => {
     unheardLines(situation.missed, now, muted),
     reminding(situation.reminders ?? [], desk, now),
     `FOCUS, what "it" means:\n${focus(situation)}${
-      lines.length === 0 ? "" : `\nThis exchange so far:\n${lines.map((line) => (line.speaker === "yapd" ? `You: ${line.text}` : `He: ${line.text}${ownVoice(line)}`)).join("\n")}`
+      lines.length === 0 ? "" : `\nThis exchange so far:\n${lines.map((line) => (line.speaker === "yapd" ? `You: ${spokenOf(line)}` : `He: ${line.text}${ownVoice(line)}`)).join("\n")}`
     }`,
     ...Option.match(open, {
       onNone: () => [],
       onSome: (open) => [
-        `OPEN, your question: ${fenced(open.asked)}${open.heard.trim() === "" ? "" : `\nAbout what he asked: ${fenced(open.heard, 400)}${ownVoice(open)}`}${
+        `OPEN, your question: ${fenced(open.shown ?? open.asked)}${open.heard.trim() === "" ? "" : `\nAbout what he asked: ${fenced(open.heard, 400)}${ownVoice(open)}`}${
           open.candidates.length === 0 && (open.reminders ?? []).length === 0
             ? ""
             : `\nIts choices, in the order you said them: ${[
@@ -3271,7 +3364,7 @@ export const prompt = (situation: Situation, style: Option.Option<string>) => {
           open.asks !== undefined
             ? waitingOn(open, situation.utterance)
             : yesNo(open.kind)
-              ? `\nWhat a yes does: "${open.decision.act}"${open.decision.act === "send" ? ` with the message ${fenced(open.decision.text, 400)}` : ""}${
+              ? `\nWhat a yes does: "${open.decision.act}"${open.decision.act !== "send" ? "" : open.routine === undefined ? ` with the message ${fenced(open.decision.text, 400)}` : ` with ${byName([open.routine])}`}${
                   open.decision.act === "mode" ? ` with "how" "${open.decision.how}", which gives him the catch-up` : open.decision.act === "catchup" ? ", which catches him up on what he hasn't heard" : ""
                 }`
               : ""
@@ -3280,7 +3373,7 @@ export const prompt = (situation: Situation, style: Option.Option<string>) => {
     }),
     ...Option.match(second, {
       onNone: () => [],
-      onSome: (second) => [`${detail(desk, second)}\nThis is your second look: answer now, with "answer". Don't look or find again.`],
+      onSome: (second) => [`${detail(desk, second, situation.lately)}\nThis is your second look: answer now, with "answer". Don't look or find again.`],
     }),
     ...(situation.utterance.echo === undefined
       ? []
@@ -3331,7 +3424,8 @@ export const briefPrompt = (brief: Brief, desk: Threads.Desk, now: number, style
   const waiting = desk.threads.filter(({ state }) => state === "approval" || state === "question")
   const name = (group: Missed.Group) => fenced(missedName(group), 90)
   // What needs him leads, whatever thread it's of.
-  const needing = brief.groups.flatMap((group) => group.rows.filter(Missed.needs).map((kept) => `- ${name(group)}, ${lasted(now - kept.at)} ago: ${fenced(kept.said ?? "", 300)}`))
+  // Never a routine's steps, which its name stands for.
+  const needing = brief.groups.flatMap((group) => group.rows.filter(Missed.needs).map((kept) => `- ${name(group)}, ${lasted(now - kept.at)} ago: ${fenced(unroutined(kept).said ?? "", 300)}`))
   const threads = brief.groups.toSorted((one, other) => one.oldest - other.oldest)
   const most = brief.kind === "detail" ? 6 : 3
   return [
@@ -3349,7 +3443,7 @@ export const briefPrompt = (brief: Brief, desk: Threads.Desk, now: number, style
           .slice(-most)
           .map((kept) => {
             const more = brief.kind === "detail" ? (kept.detail as { readonly more?: unknown } | undefined)?.more : undefined
-            return `  - ${fenced(kept.said ?? "", 300)}${typeof more === "string" && more.trim() !== "" ? ` More: ${fenced(more, 400)}` : ""}`
+            return `  - ${fenced(unroutined(kept).said ?? "", 300)}${typeof more === "string" && more.trim() !== "" ? ` More: ${fenced(more, 400)}` : ""}`
           })
           .join("\n")}`
       })

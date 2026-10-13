@@ -2,7 +2,7 @@ import type { Database } from "bun:sqlite"
 import { Clock, Context, Data, type Duration, Effect, Either, Fiber, Option, Stream } from "effect"
 import { realpath } from "node:fs/promises"
 import { english, speakable } from "./Condenser.ts"
-import type { Journal, Kept } from "./Journal.ts"
+import { type Journal, type Kept, unroutined } from "./Journal.ts"
 import type * as Store from "./Store.ts"
 import * as T3Actions from "./T3Actions.ts"
 import * as T3Live from "./T3Live.ts"
@@ -505,7 +505,8 @@ const latest = (entries: ReadonlyArray<Kept>, machine: string) => {
   const said = new Map<string, { readonly at: number; readonly said: string }>()
   for (const entry of entries) {
     if (entry.thread === undefined || entry.machine !== machine || entry.said === undefined || entry.said.trim() === "") continue
-    said.set(entry.thread, { at: entry.at, said: entry.said })
+    // As a model is shown it: never one of his routines' steps, which it's only told of by the routine's name.
+    said.set(entry.thread, { at: entry.at, said: unroutined(entry).said ?? entry.said })
   }
   return said
 }

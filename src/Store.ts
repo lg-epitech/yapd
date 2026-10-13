@@ -143,7 +143,9 @@ export const migrations: ReadonlyArray<string> = [
   // to be brought back. A routine's name is told by how it's `called`, as
   // names compare, in any case, spacing or quotes but symbols and all, so
   // there's only ever one of each kept, and "C" is never "C++"; never reused,
-  // an id forgotten and brought back is always the same memory.
+  // an id forgotten and brought back is always the same memory. An offer of
+  // one of his routines keeps its name beside its steps, which a model is
+  // only ever told of by that name.
   `create table memories (
     id integer primary key autoincrement,
     at integer not null,
@@ -157,7 +159,8 @@ export const migrations: ReadonlyArray<string> = [
     check ((kind = 'routine') = (name is not null)),
     check ((name is null) = (called is null))
   ) strict;
-  create unique index memories_routine on memories (called) where kind = 'routine' and forgotten_at is null;`,
+  create unique index memories_routine on memories (called) where kind = 'routine' and forgotten_at is null;
+  alter table reminders add column routine text;`,
 ]
 
 export class Store extends Context.Tag("yapd/Store")<

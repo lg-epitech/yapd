@@ -74,6 +74,32 @@ export interface Kept extends Omit<Entry, "host"> {
   readonly id: number
 }
 
+/**
+ * The routines whose steps code put into an entry's words, by name, as its
+ * `detail` notes where they came from: his words that kept one, what yapd
+ * read back of one, offered or sent. None for most.
+ */
+export const routinesIn = (kept: Pick<Entry, "detail">): ReadonlyArray<string> => {
+  const detail = kept.detail as { readonly routines?: unknown } | null | undefined
+  const names = typeof detail === "object" && detail !== null && Array.isArray(detail.routines) ? (detail.routines as ReadonlyArray<unknown>) : []
+  return names.filter((name): name is string => typeof name === "string")
+}
+
+/** Routines as a model is told of them in place of their steps: by name alone, like his routine "review it". */
+export const routinesNamed = (names: ReadonlyArray<string>) => `his ${names.length === 1 ? "routine" : "routines"} ${names.map((name) => `"${name}"`).join(" and ")}`
+
+/**
+ * An entry as a model may be shown it: words that hold a routine's steps,
+ * which code put in, are what they're of, the routine by name alone, never
+ * its steps, which only yapd sends, for its name said.
+ */
+export const unroutined = <K extends Pick<Entry, "said" | "text" | "detail">>(kept: K): K => {
+  const names = routinesIn(kept)
+  if (names.length === 0) return kept
+  const named = routinesNamed(names)
+  return { ...kept, ...(kept.said === undefined ? {} : { said: `what was said of ${named}` }), ...(kept.text === undefined ? {} : { text: named }) }
+}
+
 export class Journal extends Context.Tag("yapd/Journal")<
   Journal,
   {

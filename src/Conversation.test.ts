@@ -55,7 +55,7 @@ const update: Conversation.Update = {
  * what's said back plays like afplay, which can't say it's playing, and either plays to the end or can't play at all.
  * With `model`, replies are worked out by the provider's responder with that model instead, and the persona's
  * lines are `lines`, or the plain ones. With `persona`, it's that one that picks and is told the lines. With `routines`,
- * those are the names of his routines.
+ * those are the names of his routines. With `over`, it's that update that's read, with what the journal `kept` before it.
  */
 const conversation = (
   said: ReadonlyArray<string>,
@@ -70,6 +70,8 @@ const conversation = (
     readonly model?: Layer.Layer<Model>
     readonly persona?: Context.Tag.Service<Persona.Persona>
     readonly routines?: ReadonlyArray<string>
+    readonly over?: Conversation.Update
+    readonly kept?: ReadonlyArray<Journal.Entry>
   } = {},
 ) =>
   Effect.gen(function* () {
@@ -155,7 +157,8 @@ const conversation = (
       withholds: () => Effect.succeed(false),
       ...(given.routines === undefined ? {} : { routines: Effect.succeed(given.routines) }),
     }).pipe(Effect.provide(context))
-    const fiber = yield* Effect.fork(made.converse(update))
+    for (const entry of given.kept ?? []) yield* Context.get(context, Journal.Journal).write(entry)
+    const fiber = yield* Effect.fork(made.converse(given.over ?? update))
     // Lets the fibers catch up on what the test did, since the clock only moves when told to.
     const flush = Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 20)))
     // As long as the microphone's, so what's heard lasts as long as it would.
@@ -2840,6 +2843,27 @@ describe("more, and how yapd talks, over an update", () => {
     )
     expect(result.sent).toEqual([])
     expect(Responder.prompt(over("Land it."), Option.none())).not.toContain("Their routines")
+  })
+
+  test("what the thread was asked, when it's one of his routines' steps yapd sent it, the model is told of by the routine's name alone", async () => {
+    // Words of his own, never an example the model is shown.
+    const steps = "have Codex audit the fee code twice"
+    const result = await scoped(
+      Effect.gen(function* () {
+        const { asked, layer } = scripted([{ intent: "dismiss", spoken: "", message: "" }])
+        const { fiber, speak, wait } = yield* conversation(["Do that again, and merge it."], 0, [], "sent", {
+          model: layer,
+          over: { ...update, turn: { prompt: Option.some(steps), message: "Both audits came back clean." }, about: { machine: "Rosie", id: "t-mina" } },
+          kept: [{ at: 0, kind: "sent", machine: "Rosie", thread: "t-mina", text: steps, said: "On it, sir.", detail: { routines: ["review it"] } }],
+        })
+        yield* speak
+        yield* wait(20)
+        yield* Fiber.join(fiber)
+        return asked
+      }),
+    )
+    expect(result[0]).not.toContain(steps)
+    expect(result[0]).toContain(`User's prompt to the agent:\nhis routine "review it"`)
   })
 })
 

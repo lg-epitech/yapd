@@ -5,7 +5,7 @@ import type * as Conversation from "./Conversation.ts"
 import type * as Drafts from "./Drafts.ts"
 import * as Hands from "./Hands.ts"
 import type { Notice } from "./Inbox.ts"
-import type { Entry, Journal, Kept } from "./Journal.ts"
+import { type Entry, type Journal, type Kept, routinesNamed, unroutined } from "./Journal.ts"
 import * as Ledger from "./Ledger.ts"
 import * as Memory from "./Memory.ts"
 import * as Missed from "./Missed.ts"
@@ -155,9 +155,11 @@ export type Subject =
       readonly more: string
       readonly asks: Option.Option<Asks>
       readonly row: number
+      /** The routines whose steps what was said of it holds, as code put them in: a model is only ever told of that by their names. */
+      readonly routines?: ReadonlyArray<string>
     }
   /** An update from a session T3 Code doesn't run, and what of it was said last, like an answer over it. */
-  | { readonly _tag: "Session"; readonly update: Conversation.Update; readonly said: string }
+  | { readonly _tag: "Session"; readonly update: Conversation.Update; readonly said: string; readonly routines?: ReadonlyArray<string> }
   | {
       readonly _tag: "Answer"
       readonly said: string
@@ -172,6 +174,12 @@ export type Subject =
       readonly question?: Open
       /** The question it was, in the words it was asked in, once it's closed: shown as it was, but told rather than asked again (I4). */
       readonly asked?: string
+      /**
+       * The routines whose steps what it said holds, as code put them in, like
+       * a routine read back as it's kept: a model is only ever told of what
+       * it said by their names.
+       */
+      readonly routines?: ReadonlyArray<string>
     }
 
 /**
@@ -241,6 +249,10 @@ export interface Open {
   readonly question?: string
   /** For an offer he set to be made later, the reminder it is: a yes sends it as any message he sends goes, checked for one sent just before. */
   readonly reminder?: number
+  /** For a message that's one of his routines' steps, the routine's name, which is all a model is ever told of what a yes sends. */
+  readonly routine?: string
+  /** With `routine`, the question as a model is shown it, when its words hold the steps: the routine by its name in their place. */
+  readonly shown?: string
   /**
    * For which of his reminders he meant, its choices, by the ids they're
    * kept under, in the order they were named: his answer goes to the one he
@@ -642,6 +654,30 @@ const along = (thought: Pick<Thought, "utterance" | "subject">, subject: Subject
   thought.utterance.via === "reply" && caughtUp(thought.subject) && subject._tag === "Answer" && subject.question === undefined && !caughtUp(subject)
     ? { ...subject, catchingUp: true }
     : subject
+
+/**
+ * The routine what's done for an answer to the question open sends, by its
+ * name, when it's that routine's steps: the one the model `gave` by its
+ * handle, or the one asked about, its words left out, as `taken` has them.
+ */
+const sends = (open: Pick<Open, "routine" | "decision">, gave: Brain.Decision, taken: Brain.Decision, situation: Brain.Situation) =>
+  Brain.routinedBy(gave, situation) ?? (open.routine !== undefined && taken.text === open.decision.text ? open.routine : undefined)
+
+/** The routines whose steps what's said of something holds, as its provenance is noted with it: none for most. */
+const routinesOf = (subject: Subject): { readonly routines?: ReadonlyArray<string> } =>
+  subject._tag !== "Nothing" && subject.routines !== undefined && subject.routines.length > 0 ? { routines: subject.routines } : {}
+
+/**
+ * Where what's said of a question came from, when its words hold one of his
+ * routines' steps, like an offer of one asked as it comes due: the routine,
+ * by its name, which is all a model is told of it.
+ */
+const askedRoutines = (open: Pick<Open, "routine" | "shown">): { readonly routines?: ReadonlyArray<string> } =>
+  open.shown !== undefined && open.routine !== undefined ? { routines: [open.routine] } : {}
+
+/** What came of something, with what's said of it noted as holding these routines' steps, if any. */
+const ofRoutines = (outcome: Outcome, routines: { readonly routines?: ReadonlyArray<string> }): Outcome =>
+  routines.routines === undefined || outcome.subject._tag === "Nothing" ? outcome : { ...outcome, subject: { ...outcome.subject, routines: routines.routines } }
 
 /** Whether he only told yapd to stop what it's saying, like "skip" or "stop, stop", rather than taking it in, like "thanks". */
 const hushed = (heard: string) => enough.has(once(heard))
@@ -1204,7 +1240,7 @@ export const make = (options: {
                 : Brain.yesNo(open.kind)
                   ? `I didn't ask whether to ${open.about}, ${waiting}${addressed(said)}.`
                   : unasked(open.about, said)
-          return unfinished(reply(left, { _tag: "Nothing" }), open.decision.rest, said)
+          return unfinished(ofRoutines(reply(left, { _tag: "Nothing" }), askedRoutines(open)), open.decision.rest, said)
         }
         if (asking !== undefined) yield* close(asking.open, "replaced")
         const at = yield* Clock.currentTimeMillis
@@ -1213,7 +1249,8 @@ export const make = (options: {
         const opened = { ...open, id: mint(at, "o"), version, at }
         asking = { open: opened, asks: 1, repeat: undefined, due: undefined, held: new Set(), said: undefined, whole: undefined, skipped: false }
         yield* Effect.logInfo(`Asked: ${open.asked}`)
-        return { say: open.asked, subject: { _tag: "Answer", said: open.asked, about: askedAbout(open), question: opened }, kind: "question" } satisfies Outcome
+        // Its words holding one of his routines' steps, a model is only told of it by the routine's name.
+        return { say: open.asked, subject: { _tag: "Answer", said: open.asked, about: askedAbout(open), question: opened, ...askedRoutines(open) }, kind: "question" } satisfies Outcome
       })
 
     /** Something being said may answer the open question, so it isn't said meanwhile, nor asked again until that's known. */
@@ -1242,7 +1279,7 @@ export const make = (options: {
           return yield* offering
         }
         yield* letBe(from)
-        const left = regarding(Brain.dropped(open, said), open.kind === "question" ? askedAbout(open) : Option.none())
+        const left = ofRoutines(regarding(Brain.dropped(open, said), open.kind === "question" ? askedAbout(open) : Option.none()), askedRoutines(open))
         yield* deliver(unfinished(left, open.decision.rest, said), { id: open.utterance, turns })
         yield* offering
       })
@@ -1299,7 +1336,7 @@ export const make = (options: {
         const reworded = { ...open, asked, question: asked }
         asking = { ...asking, open: reworded, asks: asking.asks + (counted ? 1 : 0), repeat: undefined, due: undefined, held: new Set(), whole: undefined }
         yield* Effect.logInfo(`Asked again: ${asked}`)
-        return { say: asked, subject: { _tag: "Answer", said: asked, about: askedAbout(open), question: reworded }, kind: "question" } satisfies Outcome
+        return { say: asked, subject: { _tag: "Answer", said: asked, about: askedAbout(open), question: reworded, ...askedRoutines(open) }, kind: "question" } satisfies Outcome
       })
 
     /**
@@ -1496,7 +1533,7 @@ export const make = (options: {
             .slice(0, 8)
             // His own words, where they're what's shown, with what of them may have been yapd's own voice.
             .map(({ entry }) =>
-              `${ago(entry.at, now)}, ${entry.kind}${entry.project === undefined || entry.project.trim() === "" ? "" : ` in ${entry.project}`}: ${Brain.fenced(entry.said ?? entry.text ?? "")}${
+              `${ago(entry.at, now)}, ${entry.kind}${entry.project === undefined || entry.project.trim() === "" ? "" : ` in ${entry.project}`}: ${Brain.fenced(unroutined(entry).said ?? unroutined(entry).text ?? "")}${
                 entry.said === undefined && (entry.kind === "dictation" || entry.kind === "reply") ? Brain.ownVoice(Brain.overheardIn(entry)) : ""
               }`,
             )
@@ -1836,7 +1873,7 @@ export const make = (options: {
       outcome: Hands.Outcome,
       thought: Thought,
       said: Lines,
-      at: { readonly step: number; readonly commandId: string; readonly quietly?: boolean; readonly besides?: string; readonly putBy?: boolean },
+      at: { readonly step: number; readonly commandId: string; readonly quietly?: boolean; readonly besides?: string; readonly putBy?: boolean; readonly routine?: string },
       free: <A>(effect: Effect.Effect<A>) => Effect.Effect<A> = (effect) => effect,
     ): Effect.Effect<Outcome> =>
       Effect.gen(function* () {
@@ -1869,6 +1906,9 @@ export const make = (options: {
         const now = yield* Clock.currentTimeMillis
         // Held back since it could give a secret away, his words aren't kept, here or with what he said.
         const withheld = Hands.guarded(outcome)
+        // One of his routines' steps, as code put them in for its name, is noted as that routine, and asked about as it, so a model is only
+        // ever told of it by its name.
+        const routine = act._tag === "Message" && at.routine !== undefined ? { routine: at.routine } : {}
         /**
          * The entry it's noted in: what went, or didn't and why, and what's
          * said of it. Only a message that went is noted as sent; what didn't
@@ -1886,7 +1926,14 @@ export const make = (options: {
               ...(act._tag === "Message" && !withheld ? { text: act.text } : {}),
               ...(line === undefined || unsaid ? {} : { said: line }),
               utterance: utterance.id,
-              detail: { commandId: at.commandId, act: act._tag, outcome: outcome._tag, ...(unsaid ? { unsaid: line } : {}), ...detail },
+              detail: {
+                commandId: at.commandId,
+                act: act._tag,
+                outcome: outcome._tag,
+                ...(unsaid ? { unsaid: line } : {}),
+                ...(routine.routine === undefined ? {} : { routines: [routine.routine] }),
+                ...detail,
+              },
             })
           })
         const asking = (open: Omit<Open, "id" | "version" | "at">) => free(opening(open, utterance))
@@ -1932,10 +1979,11 @@ export const make = (options: {
               const asked = `${news} ${question}`
               // Sent again under its own ids, it goes at the time it first went, whatever time these words say, like at once for one told to a turn once it was stopped.
               const again = Option.match(Hands.went(outcome.row), { onNone: () => twin, onSome: ({ how }) => ({ ...twin, how }) })
-              return yield* asking({ ...base, kind: "resend", decision: again, asked, about: doing, resend: Option.some(outcome.row.commandId), news, question })
+              return yield* asking({ ...base, ...routine, kind: "resend", decision: again, asked, about: doing, resend: Option.some(outcome.row.commandId), news, question })
             }
             return yield* asking({
               ...base,
+              ...routine,
               kind: "confirm",
               decision: twin,
               asked: Hands.twice(outcome.row.at, now, said, called),
@@ -1973,7 +2021,7 @@ export const make = (options: {
             const news = Hands.failed(act, "again" in outcome ? { ...outcome, again: Option.none<string>() } : outcome, said, called)
             const question = unaddressed(said.again, said)
             if (Option.isSome(onceMore) && act._tag === "Message") {
-              return yield* asking({ ...base, kind: "resend", decision, asked: line, about: `send that to ${name} again`, resend: onceMore, news, question })
+              return yield* asking({ ...base, ...routine, kind: "resend", decision, asked: line, about: `send that to ${name} again`, resend: onceMore, news, question })
             }
             // The word to carry on, after letting go of the queue, is offered again the same way.
             if (Option.isSome(onceMore) && act._tag === "Undo" && act.carry) {
@@ -2022,8 +2070,8 @@ export const make = (options: {
           think(utterance, along(thought, { _tag: "Answer", said: first.say, about: on }), [
             // All he said, still with what of it may have been yapd's own voice, so none of that is taken for more he asked.
             { speaker: "user", text: thought.utterance.heard, ...overItself(thought.utterance.echo, thought.utterance.afterPause) },
-            // Nothing said of the step before, like a thanks, is nothing to show.
-            ...(first.say === "" ? [] : [{ speaker: "yapd", text: first.say } satisfies Line]),
+            // Nothing said of the step before, like a thanks, is nothing to show. One of his routines' steps in it, by its name alone.
+            ...(first.say === "" ? [] : [{ speaker: "yapd", text: first.say, ...routinesOf(first.subject) } satisfies Line]),
           ]),
           utterance.turns,
         )
@@ -2080,12 +2128,14 @@ export const make = (options: {
         // Said with no app to show its card by then, each step is said as it is with none watching.
         const unseen = kept.unseen === undefined ? undefined : joined(before.unseen ?? before.say, after.unseen ?? after.say, said)
         // What "it" means is what the rest was about, and what's said again is the lot, as heard, with what he missed that the lot told him, but never a question asked as part of it.
+        // Said with the step before, what's said again holds its routines' steps too, by their names alone for a model.
+        const routines = [...new Set([...(routinesOf(before.subject).routines ?? []), ...(routinesOf(after.subject).routines ?? [])])]
         const subject: Subject =
           after.kind === "question" || after.subject._tag === "Nothing"
             ? after.subject
             : after.subject._tag === "Answer"
-              ? { ...after.subject, said: say, ...(missed.length === 0 ? {} : { missed }) }
-              : { ...after.subject, said: say }
+              ? { ...after.subject, said: say, ...(missed.length === 0 ? {} : { missed }), ...(routines.length === 0 ? {} : { routines }) }
+              : { ...after.subject, said: say, ...(routines.length === 0 ? {} : { routines }) }
         const { unseen: _, ...rest } = after
         // Of two lines for going ahead, the one said last is the one a step after both is kept from, and the last he heard: each is noted in turn, once it's known to play.
         const onIt = after.onIt ?? before.onIt
@@ -2138,6 +2188,7 @@ export const make = (options: {
                   ...(at.quietly === true ? { quietly: true } : {}),
                   ...(at.besides === undefined ? {} : { besides: at.besides }),
                   ...(putBy ? { putBy } : {}),
+                  ...(plan.routine === undefined ? {} : { routine: plan.routine }),
                 },
                 free,
               ),
@@ -2213,7 +2264,7 @@ export const make = (options: {
         const agreed = Brain.agrees(open, given, situation.desk)
         if (!agreed && !timed) {
           yield* forgo(open, "He asked for something else instead.")
-          const checked = Brain.check(instead, situation, said)
+          const checked = Brain.routined(Brain.check(instead, situation, said), sends(open, thought.decision, instead, situation))
           if (checked._tag === "Ask") {
             yield* Effect.logInfo("Leaving it, rather than ask again")
             return unfinished(reply(said.leaving, thought.subject), instead.rest, said)
@@ -2231,7 +2282,9 @@ export const make = (options: {
           yield* forgo(open, "Its words may have been my own voice.")
           return yield* unworded(open, thought, said)
         }
-        const checked = Brain.check(decision, situation, said)
+        // What was asked about, said yes to, or its same words at another time, is still one of his routines when it was, by its name.
+        const routine = sends(open, thought.decision, decision, situation)
+        const checked = Brain.routined(Brain.check(decision, situation, said), routine)
         const resend = Option.filter(open.resend, () => checked._tag === "Do" && checked.plan.decision.act === "send" && Option.isSome(target))
         if (Option.isNone(resend)) yield* forgo(open, "His yes didn't stand.")
         if (checked._tag === "Ask") {
@@ -2244,7 +2297,9 @@ export const make = (options: {
           const act: Hands.Act = { _tag: "Message", to: target.value.ref, text: decision.text, how: when(decision.how) }
           const commandId = resend.value
           return yield* Effect.uninterruptibleMask((free) =>
-            Effect.flatMap(hands.again(commandId, { how: act.how }), (outcome) => told(act, outcome, { ...thought, decision }, said, { step: 0, commandId }, free)),
+            Effect.flatMap(hands.again(commandId, { how: act.how }), (outcome) =>
+              told(act, outcome, { ...thought, decision }, said, { step: 0, commandId, ...(routine === undefined ? {} : { routine }) }, free),
+            ),
           )
         }
         return yield* follow(checked, { ...thought, decision }, said, { step: 0, twice: open.reminder === undefined })
@@ -2924,12 +2979,19 @@ export const make = (options: {
     const under = (reminder: Pick<Reminders.Reminder, "machine" | "thread">) =>
       Option.match(Reminders.ref(reminder), { onNone: () => ({}), onSome: ({ machine, id }) => ({ machine, thread: id }) })
 
-    /** What's said of a reminder he set, cancelled or took back, which "it" goes on meaning what it was about, if anything. */
-    const remindedOf = (line: string, reminder: Pick<Reminders.Reminder, "machine" | "thread">): Outcome => ({
+    /**
+     * What's said of a reminder he set, cancelled or took back, which "it"
+     * goes on meaning what it was about, if anything: of an offer of one of
+     * his routines, its name, which is all a model is told of the line.
+     */
+    const remindedOf = (line: string, reminder: Pick<Reminders.Reminder, "machine" | "thread" | "routine">): Outcome => ({
       say: line,
-      subject: { _tag: "Answer", said: line, about: Reminders.ref(reminder) },
+      subject: { _tag: "Answer", said: line, about: Reminders.ref(reminder), ...ofRoutine(reminder) },
       kind: "done",
     })
+
+    /** Where what's said of an offer came from, noted with it: one of his routines, by its name, which is all a model is told of it. */
+    const ofRoutine = (reminder: Pick<Reminders.Reminder, "routine">) => (reminder.routine === undefined ? {} : { routines: [reminder.routine] })
 
     /**
      * Keeps what he asked to be told later, or to be offered to send a
@@ -2954,7 +3016,7 @@ export const make = (options: {
           // His words as he said them, all of them for the rest of a request, unless some may have been yapd's own voice, which never stand for his.
           heard: thought.utterance.whole ?? ownWords(thought.utterance),
           text: offer ? "" : decision.text.trim(),
-          ...(offer ? { propose: decision.text.trim() } : {}),
+          ...(offer ? { propose: decision.text.trim(), ...(plan.routine === undefined ? {} : { routine: plan.routine }) } : {}),
           ...(event === undefined ? { due: Brain.dueAt(decision.when, now) } : { event }),
           ...(listed === undefined ? {} : { machine: listed.ref.machine, thread: listed.ref.id, called }),
         }
@@ -2967,7 +3029,7 @@ export const make = (options: {
         // A thread to hear finish that isn't at work now is heard of when it next finishes, which he's told.
         const running = listed === undefined || ["running", "finishing", "queued", "approval", "question"].includes(listed.state)
         const line = told.set(asked, called, running)
-        yield* journal.write({ at: now, kind: "action", ...under(asked), said: line, utterance: thought.utterance.id, detail: { reminder: kept.right.id } })
+        yield* journal.write({ at: now, kind: "action", ...under(asked), said: line, utterance: thought.utterance.id, detail: { reminder: kept.right.id, ...ofRoutine(asked) } })
         return remindedOf(line, asked)
       })
 
@@ -3011,8 +3073,19 @@ export const make = (options: {
         return remindedOf(line, changed.value)
       })
 
-    /** What's said of what he had kept in mind, forgotten or brought back, which is about no thread. */
-    const memorized = (line: string): Outcome => ({ say: line, subject: { _tag: "Answer", said: line, about: Option.none() }, kind: "done" })
+    /**
+     * What's said of what he had kept in mind, forgotten or brought back,
+     * which is about no thread: of a routine read back, its name, which is
+     * all a model is told of the line.
+     */
+    const memorized = (line: string, kept?: Pick<Memory.Memory, "kind" | "name">): Outcome => ({
+      say: line,
+      subject: { _tag: "Answer", said: line, about: Option.none(), ...(kept === undefined ? {} : readBack(kept)) },
+      kind: "done",
+    })
+
+    /** Where what's said of a memory came from, noted with it: a routine read back, by its name, which is all a model is told of it. */
+    const readBack = (kept: Pick<Memory.Memory, "kind" | "name">) => (kept.kind === "routine" && kept.name !== undefined ? { routines: [kept.name] } : {})
 
     /**
      * Keeps what he asked yapd to keep in mind, in his words, with all he
@@ -3051,7 +3124,7 @@ export const make = (options: {
         }
         if (kept.right._tag === "Full") return reply(told.full, thought.subject)
         // Kept already, as when he didn't hear it was, nothing changed: what "scratch that" takes back is still what he last changed.
-        if (kept.right._tag === "Already") return memorized(told.kept(kept.right.memory, false))
+        if (kept.right._tag === "Already") return memorized(told.kept(kept.right.memory, false), kept.right.memory)
         const { memory, retired } = kept.right
         noted = { at: now, kind: "memory", id: memory.id, about: Option.none(), ...Option.match(retired, { onNone: () => ({}), onSome: ({ id }) => ({ replaced: id }) }) }
         const line = told.kept(memory, Option.isSome(retired))
@@ -3060,9 +3133,9 @@ export const make = (options: {
           kind: "action",
           said: line,
           utterance: utterance.id,
-          detail: { memory: memory.id, ...Option.match(retired, { onNone: () => ({}), onSome: ({ id }) => ({ replaced: id }) }) },
+          detail: { memory: memory.id, ...Option.match(retired, { onNone: () => ({}), onSome: ({ id }) => ({ replaced: id }) }), ...readBack(memory) },
         })
-        return memorized(line)
+        return memorized(line, memory)
       })
 
     /** Forgets one of what he asked yapd to keep in mind, as he pointed at it, and says which. */
@@ -3120,12 +3193,12 @@ export const make = (options: {
         if (Option.isNone(restored.right)) return reply(told.over, thought.subject)
         if (restored.right.value._tag === "Full") return reply(told.full, thought.subject)
         // Kept since, as he said it again, nothing changed: this stays forgotten, and taking it back again still brings it back.
-        if (restored.right.value._tag === "Already") return memorized(told.restored(restored.right.value.memory, false))
+        if (restored.right.value._tag === "Already") return memorized(told.restored(restored.right.value.memory, false), restored.right.value.memory)
         const { memory, retired } = restored.right.value
         noted = { at: now, kind: "memory", id: memory.id, about: Option.none(), ...Option.match(retired, { onNone: () => ({}), onSome: ({ id }) => ({ replaced: id }) }) }
         const line = told.restored(memory, Option.isSome(retired))
-        yield* journal.write({ at: now, kind: "action", said: line, utterance: thought.utterance.id, detail: { undo: { memory: memory.id } } })
-        return memorized(line)
+        yield* journal.write({ at: now, kind: "action", said: line, utterance: thought.utterance.id, detail: { undo: { memory: memory.id }, ...readBack(memory) } })
+        return memorized(line, memory)
       })
 
     /**
@@ -3381,7 +3454,7 @@ export const make = (options: {
           // What a thread waits on him for is asked after instead, so there's nothing to tell him of it now.
           if (requestOf(open) !== undefined) return yield* follow(Brain.check(decision, decided.situation, said), decided, said)
           const left = open.news === undefined ? Brain.left(open, said) : `${open.news} ${unaskedAfter(open)}, since you'd moved on.`
-          yield* deliver(unfinished(reply(left, decided.subject), open.decision.rest, said), decided)
+          yield* deliver(unfinished(ofRoutines(reply(left, decided.subject), askedRoutines(open)), open.decision.rest, said), decided)
           return yield* follow(Brain.check(decision, decided.situation, said), decided, said)
         }
         // Saying again just what was asked about, like the same message to the same thread, is a yes to it. To sending one again, whatever
@@ -3508,7 +3581,7 @@ export const make = (options: {
         if (open.kind !== "which") return yield* agreeing(open, decision.pending === "answers" ? decided : { ...decided, decision: same }, said)
         const picked = filled(decision, open)
         if (picked === undefined) return yield* unworded(open, decided, said)
-        const checked = Brain.check(picked, decided.situation, said)
+        const checked = Brain.routined(Brain.check(picked, decided.situation, said), sends(open, decision, picked, decided.situation))
         // At most one question: one the answer doesn't settle is let go.
         if (checked._tag === "Ask") {
           yield* Effect.logInfo("Leaving it, since the answer didn't settle which one")
@@ -3567,7 +3640,11 @@ export const make = (options: {
           yield* deliver(regarding(Brain.dealtWith(yield* persona.lines), askedAbout(open)), utterance)
         })
         if (gone.has(open.id)) return Option.some(late)
-        const thought = yield* think(utterance, { _tag: "Answer", said: open.asked, about: askedAbout(open), question: open }, [{ speaker: "yapd", text: heardOf(open.asked, utterance.unsaid) }])
+        // Its words holding one of his routines' steps, a model is only told of them by the routine's name.
+        const routines = askedRoutines(open)
+        const thought = yield* think(utterance, { _tag: "Answer", said: open.asked, about: askedAbout(open), question: open, ...routines }, [
+          { speaker: "yapd", text: heardOf(open.asked, utterance.unsaid), ...routines },
+        ])
         // Taken by the model for yapd's own voice, over its first seconds, it's asked on from just before, as when only that was heard.
         if ((thought.source === "fast" || echo !== undefined) && thought.decision.act === "resume") return Option.none()
         // Too little speech to be his, a yes or a pick that would change a thread isn't taken: the question stays open, as if unanswered.
@@ -3594,7 +3671,7 @@ export const make = (options: {
           const at = yield* Clock.currentTimeMillis
           const { turns } = yield* options.power
           const utterance: Utterance = { id: mint(at, "u"), heard, via: "reply", at, voiced, turns, ...overItself(echo, afterPause) }
-          const thought = yield* think(utterance, about, [{ speaker: "yapd", text: yield* line }])
+          const thought = yield* think(utterance, about, [{ speaker: "yapd", text: yield* line, ...routinesOf(about) }])
           if (thought.decision.act === "resume") return Option.none()
           if (Brain.murmured(thought.decision, utterance)) {
             yield* Effect.logInfo(`Not taking ${quoted(heard)} as a follow-up, with only ${voiced.toFixed(2)} s of speech`)
@@ -3666,6 +3743,16 @@ export const make = (options: {
         const from = open === undefined ? undefined : asking?.from
         const claim = from !== undefined && from.kept === undefined ? from : undefined
         const request = open === undefined ? undefined : requestOf(open)
+        // The question on its own too, apart from the news before it, for a catch-up what it told him of, and the routines whose steps it
+        // holds, by name, which is all a model is told of it.
+        const beside = {
+          ...(open === undefined
+            ? outcome.subject._tag === "Answer" && outcome.subject.catchup !== undefined
+              ? { covered: outcome.subject.catchup.covered }
+              : {}
+            : { question: Brain.alone(open), open: open.id }),
+          ...routinesOf(outcome.subject),
+        }
         // Work that started has its own entry.
         const entry =
           outcome.kind === "done" || claim !== undefined
@@ -3676,12 +3763,7 @@ export const make = (options: {
                 ...Option.match(about, { onNone: () => ({}), onSome: ({ machine, id }) => ({ machine, thread: id }) }),
                 ...(revealing ? {} : { said: outcome.say }),
                 utterance: utterance.id,
-                // The question on its own too, apart from the news before it, and for a catch-up, what it told him of.
-                ...(open === undefined
-                  ? outcome.subject._tag === "Answer" && outcome.subject.catchup !== undefined
-                    ? { detail: { covered: outcome.subject.catchup.covered } }
-                    : {}
-                  : { detail: { question: Brain.alone(open), open: open.id } }),
+                ...(Object.keys(beside).length === 0 ? {} : { detail: beside }),
               })
         yield* Effect.logInfo(revealing ? "Said something that could give a secret away, so it isn't logged" : `Said: ${outcome.say}`)
         const { missed, card } = outcome
@@ -3836,6 +3918,8 @@ export const make = (options: {
         // Said back to what he missed, cutting it off or after it, it's part of catching up, so it never hides what he didn't hear
         // of that from the next "what did I miss?": heard to the end, it's heard, and never told again anyway.
         const over = utterance.via === "reply" && caughtUp(thought.subject) ? { over: "catch-up" } : {}
+        // His words that kept one of his routines hold its steps, which a model is only told of by its name.
+        const kept = thought.decision.act === "remember" ? routinesOf(outcome.subject) : {}
         // What was said back has an entry of its own.
         yield* journal.write({
           at: utterance.at,
@@ -3843,6 +3927,7 @@ export const make = (options: {
           ...(withheld ? {} : { text: utterance.heard }),
           utterance: utterance.id,
           detail: {
+            ...kept,
             via: utterance.via,
             // What may have been its own voice in his words, kept with them for whatever reads them back.
             ...(withheld ? {} : overItself(utterance.echo, utterance.afterPause)),
@@ -4038,8 +4123,9 @@ export const make = (options: {
         const id = mint(at, "n")
         const missed = Option.toArray(kept)
         const about = Reminders.ref(reminder)
+        // An offer of one of his routines, said in words, holds its steps: a model is only told of it by its name.
         const tell = (line: string) =>
-          deliver({ say: line, subject: { _tag: "Answer", said: line, about }, kind: "answer", ...(missed.length === 0 ? {} : { missed }) }, { id, turns })
+          deliver({ say: line, subject: { _tag: "Answer", said: line, about, ...ofRoutine(reminder) }, kind: "answer", ...(missed.length === 0 ? {} : { missed }) }, { id, turns })
         // Typed, as it were: nothing of it was heard, so nothing of it can be faint or yapd's own voice.
         const utterance: Utterance = { id, heard: "", via: "typed", at, voiced: Number.POSITIVE_INFINITY, turns }
         const situation = yield* situate(utterance, { _tag: "Nothing" }, [])
@@ -4066,6 +4152,10 @@ export const make = (options: {
             material: Option.none(),
             resend: Option.none(),
             reminder: reminder.id,
+            // One of his routines is asked about by its name alone, as a model is shown the question.
+            ...(reminder.routine === undefined
+              ? {}
+              : { routine: reminder.routine, shown: told.asking({ ...reminder, propose: routinesNamed([reminder.routine]) }, called).question }),
           },
           { turns, at },
         )

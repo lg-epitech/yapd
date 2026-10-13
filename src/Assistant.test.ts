@@ -12427,4 +12427,127 @@ describe("Assistant memories", () => {
     expect(result.kept).toEqual(["C: review the C parser", "C++: review the C++ parser", "let's ship: merge the PR and deploy"])
     expect(result.retired).toBe("Let’s ship")
   })
+
+  describe("a routine's steps never reach the model but by its name", () => {
+    // Words of his own, never the example the model is shown.
+    const steps = "have Codex audit the fee code twice"
+    const defining = "When I say review it, have Codex audit the fee code twice."
+    /** Every section of what the model is told for what he said last, which only code can put a routine's steps in. */
+    const told = (made: { readonly seen: ReadonlyArray<Brain.Situation> }) => Brain.prompt(made.seen.at(-1)!, Option.none())
+    const routine = (situation: Brain.Situation) => Brain.remembered(situation).find(({ name }) => name === "review it")?.handle ?? ""
+
+    test("kept, read back as kept and noted as said, it's shown in every section by its name alone: his words that kept it and what he heard", async () => {
+      const result = await run(
+        Effect.gen(function* () {
+          const made = yield* assistant(
+            (situation) =>
+              situation.utterance.heard === defining
+                ? Brain.decision({ act: "remember", how: "routine", text: `review it: ${steps}` })
+                : Brain.decision({ act: "answer", spoken: "Yes, sir." }),
+            undefined,
+            { memories: true },
+          )
+          yield* made.dictate(defining)
+          const said = made.spoken().at(-1)
+          yield* made.dictate("Did you get that?")
+          return { said, journaled: (yield* made.journal.since(0)).map(({ kind, said, text }) => [kind, said ?? text]), prompt: told(made) }
+        }),
+      )
+      // He hears the steps read back, and the journal keeps what was heard and said as it was.
+      expect(result.said).toBe("Noted, sir. Review it: have Codex audit the fee code twice.")
+      expect(result.journaled).toContainEqual(["dictation", defining])
+      expect(result.journaled).toContainEqual(["action", "Noted, sir. Review it: have Codex audit the fee code twice."])
+      expect(result.prompt).not.toContain(steps)
+      expect(result.prompt).toContain("he asked you to keep his routine «review it»")
+      expect(result.prompt).toContain("you kept his routine «review it», reading its steps back to him")
+      expect(result.prompt).toContain("What you just told him was of his routine «review it», whose steps you never see.")
+    })
+
+    test("sent, or asked about sending again, it's shown by its name alone, and a yes still sends its steps as kept", async () => {
+      const result = await run(
+        Effect.gen(function* () {
+          const made = yield* assistant(
+            (situation) => {
+              const { heard } = situation.utterance
+              if (heard === defining) return Brain.decision({ act: "remember", how: "routine", text: `review it: ${steps}` })
+              if (heard === "Review it on the Mina one.") return Brain.decision({ act: "send", target: handle(situation, mina), text: routine(situation), how: "now" })
+              // A yes the model hears, to what's asked about, as it was shown.
+              if (heard === "Go on then, send it again.") return Brain.decision({ act: "send", target: handle(situation, mina), how: "now", pending: "answers" })
+              return Brain.decision({ act: "answer", spoken: "Yes, sir." })
+            },
+            undefined,
+            { memories: true },
+          )
+          yield* made.dictate(defining)
+          yield* made.dictate("Review it on the Mina one.")
+          yield* made.dictate("Did that go?")
+          const sent = told(made)
+          // Again within ten minutes, it's asked about, and what a yes sends is the routine, by its name.
+          yield* made.dictate("Review it on the Mina one.")
+          const again = made.spoken().at(-1)
+          yield* made.answer("Go on then, send it again.")
+          const asked = told(made)
+          return {
+            sent,
+            again,
+            asked,
+            messages: made.dispatched.filter(({ type }) => type === "message.dispatch").map(({ text }) => text),
+            journaled: (yield* made.journal.since(0)).filter(({ kind }) => kind === "sent").map(({ text, detail }) => [text, (detail as { routines?: unknown }).routines]),
+          }
+        }),
+      )
+      expect(result.sent).not.toContain(steps)
+      expect(result.sent).toContain(`you sent his routine «review it» to the thread`)
+      expect(result.again).toBe("I sent that to Open Mina SSV2 Bug Tickets a minute ago, sir. Again?")
+      expect(result.asked).not.toContain(steps)
+      expect(result.asked).toContain(`What a yes does: "send" with his routine «review it»`)
+      expect(result.messages).toEqual([steps, steps])
+      // Kept as sent, with the routine it came from beside it.
+      expect(result.journaled).toEqual([
+        [steps, ["review it"]],
+        [steps, ["review it"]],
+      ])
+    })
+
+    test("offered, as it's set and as it comes due, it's shown by its name alone, in REMINDERS and the question too", async () => {
+      const later = Math.floor((now + 3 * 60 * 60_000) / 60_000) * 60_000
+      const result = await run(
+        Effect.gen(function* () {
+          const made = yield* assistant(
+            (situation) => {
+              const { heard } = situation.utterance
+              if (heard === defining) return Brain.decision({ act: "remember", how: "routine", text: `review it: ${steps}` })
+              if (heard === "Later, offer to review it on the Mina one.") {
+                return Brain.decision({ act: "offer", how: "at", when: local(later), target: handle(situation, mina), text: routine(situation) })
+              }
+              return Brain.decision({ act: "answer", spoken: "Yes, sir." })
+            },
+            undefined,
+            { memories: true, reminders: true },
+          )
+          yield* made.dictate(defining)
+          yield* made.dictate("Later, offer to review it on the Mina one.")
+          const set = made.spoken().at(-1)
+          yield* made.dictate("Is that set?")
+          const offered = told(made)
+          for (const reminder of yield* made.reminders!.due(later)) {
+            const kept = yield* made.reminders!.fire(reminder, { at: later, kind: "notice", said: "offer", detail: { reminder: reminder.id } })
+            yield* made.offered(reminder, Option.flatten(kept))
+          }
+          yield* made.flush
+          const asked = made.spoken().at(-1)
+          yield* made.dictate("Which thread is that for?")
+          return { set, offered, asked, due: told(made) }
+        }),
+      )
+      // He hears the steps, as for any offer.
+      expect(result.set).toMatch(/I'll offer to tell Open Mina SSV2 Bug Tickets: have Codex audit the fee code twice, sir\.$/)
+      expect(result.asked).toBe("Shall I tell Open Mina SSV2 Bug Tickets: have Codex audit the fee code twice, sir?")
+      for (const prompt of [result.offered, result.due]) expect(prompt).not.toContain(steps)
+      expect(result.offered).toContain("offer his routine «review it» to")
+      expect(result.offered).toContain("you set an offer of his routine «review it»")
+      expect(result.due).toContain(`OPEN, your question: «Shall I tell Open Mina SSV2 Bug Tickets: his routine "review it", sir?»`)
+      expect(result.due).toContain(`What a yes does: "send" with his routine «review it»`)
+    })
+  })
 })

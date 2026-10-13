@@ -2082,4 +2082,55 @@ describe("memories", () => {
     expect(send("C++ the Tezos one.", "p2")).toBe("review the C++ parser")
     expect(send("C the Tezos one.", "p1")).toBe("review the C parser")
   })
+
+  test("whatever holds a routine's steps reaches the model by its name alone: an offer come due, unheard or briefed, and the steps a thread was sent, as it was asked them and shows them", () => {
+    // Words of his own, never the example the model is shown.
+    const steps = "have Codex audit the fee code twice"
+    const on = desk()
+    const due: Kept = {
+      id: 1,
+      at: now - 60_000,
+      kind: "notice",
+      machine: "Rosie",
+      thread: mina.id,
+      said: `At 9:58 PM you wanted me to offer to tell Open Mina SSV2 Bug Tickets: ${steps}, sir.`,
+      detail: { reminder: 1, held: "off", routines: ["review it"] },
+    }
+    const sent: Kept = { id: 2, at: now - 120_000, kind: "sent", machine: "Rosie", thread: mina.id, text: steps, said: "On it, sir.", detail: { routines: ["review it"] } }
+    const groups = Missed.group([due], on)
+    const update: Conversation.Update = {
+      session: "claude:s-mina",
+      project: "integration-connectors",
+      turn: { prompt: Option.some(steps), message: "Both audits came back clean." },
+      needsYou: false,
+      spoken: "Both audits of the fee code came back clean.",
+      audio: "/tmp/update.wav",
+      thread: { agent: "claude", session: "s-mina", cwd: "/code/integration-connectors", message: "Both audits came back clean.", origin: {} },
+      at: now - 20_000,
+      about: ref(mina),
+    }
+    const detail: T3Actions.Detail = {
+      messages: [
+        { role: "user", text: steps, createdAt: "2026-10-08T21:58:00.000Z", streaming: false },
+        { role: "assistant", text: "Both audits came back clean.", createdAt: "2026-10-08T21:59:00.000Z", streaming: false },
+      ],
+      runs: [],
+      request: Option.none(),
+      plan: Option.none(),
+      pending: [],
+      resolved: () => true,
+    }
+    const prompt = Brain.prompt(
+      situation("What did I miss?", { lately: [sent, due], missed: { since: now - 24 * 60 * 60_000, spoke: now - 24 * 60 * 60_000, groups }, subject: { _tag: "Session", update, said: update.spoken }, second: Option.some({ ref: ref(mina), detail }) }),
+      Option.none(),
+    )
+    expect(prompt).not.toContain(steps)
+    expect(prompt).toContain("you sent his routine «review it» to the thread")
+    expect(prompt).toContain("that his offer of his routine «review it» came due")
+    expect(prompt).toContain(`latest: «what was said of his routine "review it"»`)
+    expect(prompt).toContain("What it was asked: his routine «review it»")
+    expect(prompt).toContain("- user: his routine «review it»")
+    const brief = Brain.briefPrompt({ kind: "catchup", groups, left: { threads: 0, rows: 0 } }, on, now, Option.none())
+    expect(brief).not.toContain(steps)
+  })
 })

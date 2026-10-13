@@ -22,6 +22,8 @@ export interface Line {
   readonly echo?: string
   /** With `echo`, what they said once they carried on after a pause, which is surely theirs. */
   readonly afterPause?: string
+  /** For yapd, the routines whose steps its line holds, as code put them in: a model is only ever told of it by their names. */
+  readonly routines?: ReadonlyArray<string>
 }
 
 /** The user said something while yapd was reading an update, or right after. */

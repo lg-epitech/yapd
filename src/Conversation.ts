@@ -5,7 +5,7 @@ import { Audio, AudioError, type Playback } from "./Audio.ts"
 import type { Turn } from "./Condenser.ts"
 import * as Endpointer from "./Endpointer.ts"
 import { plain, RelayError, type Thread } from "./Relay.ts"
-import { Journal } from "./Journal.ts"
+import { Journal, routinesIn, routinesNamed } from "./Journal.ts"
 import { Persona } from "./Persona.ts"
 import { agreed, gist, halts, type Line, noted, type Reply, Responder } from "./Responder.ts"
 import * as T3Actions from "./T3Actions.ts"
@@ -924,6 +924,22 @@ export const make = (options: {
     const unlogged = (audio: Float32Array, terms?: ReadonlyArray<string>) =>
       transcriber.transcribe(audio, terms).pipe(Effect.catchAll((error) => Effect.logWarning("Could not transcribe", error).pipe(Effect.as(""))))
 
+    /**
+     * An update's turn as the model is shown it: a prompt that's one of his
+     * routines' steps, as yapd sent them its thread and noted them sent, is
+     * the routine by its name alone, never its steps, which only the shortcut
+     * sends for its name.
+     */
+    const shownTurn = (update: Update) =>
+      Effect.gen(function* () {
+        const prompt = Option.getOrUndefined(update.turn.prompt)?.trim() ?? ""
+        if (prompt === "" || update.about === undefined) return update.turn
+        const sent = (yield* journal.byThread(update.about.machine, update.about.id, 20, ["sent"])).find(
+          (kept) => routinesIn(kept).length > 0 && kept.text?.trim() === prompt,
+        )
+        return sent === undefined ? update.turn : { ...update.turn, prompt: Option.some(routinesNamed(routinesIn(sent))) }
+      })
+
     /** All he said, as it's logged: never what could give a secret away, however he split it between pauses, like a code said two digits at a time. */
     const heardLine = (heard: string) => (T3Actions.revealing(heard) ? "Heard something that could give a secret away, so it isn't logged" : `Heard: ${heard}`)
 
@@ -1066,10 +1082,10 @@ export const make = (options: {
             const left = unsaid(text, fraction)
             /** What the model makes of what he said, as ever. */
             const responding = (heard: string, afterPause: string) =>
-              Effect.flatMap(options.routines ?? Effect.succeed<ReadonlyArray<string>>([]), (routines) =>
+              Effect.flatMap(Effect.zip(options.routines ?? Effect.succeed<ReadonlyArray<string>>([]), shownTurn(update)), ([routines, turn]) =>
                 responder.respond({
                   project: update.project,
-                  turn: update.turn,
+                  turn,
                   needsYou: update.needsYou,
                   lines: [...lines, { speaker: "yapd", text: said }],
                   heard,
