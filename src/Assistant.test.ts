@@ -12113,6 +12113,30 @@ describe("Assistant memories", () => {
     expect(result).toEqual({ spoken: [...again, ...again], dispatched: 0 })
   })
 
+  test("an answer to a thread's question that's a handle shown, said any way, sends nothing, while one that only looks like a handle is his answer", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const items = [{ type: "user_input_request", status: "waiting", requestId: "q1", questions: [{ id: "next", question: "What should I do next?" }] }]
+    const answering = (heard: string, text: (situation: Brain.Situation) => string) =>
+      run(
+        Effect.gen(function* () {
+          const made = yield* assistant((situation) => Brain.decision({ act: "reply", target: handle(situation, cloud), text: text(situation), pending: "answers" }), undefined, {
+            others: [cloud],
+            items,
+          })
+          yield* asked(made, cloud)
+          yield* made.answer(heard)
+          return { spoken: made.spoken().slice(1), answers: answered(made.dispatched) }
+        }),
+      )
+    // The thread's own handle in THREADS, as the model may give it for his naming the thread.
+    expect(await answering("The cloud one.", (situation) => `${handle(situation, cloud).toUpperCase()}.`)).toEqual({
+      spoken: ["I couldn't tell which one you meant, sir.", "Here's the question on Cloud deployment discovery, sir: What should I do next?"],
+      answers: [],
+    })
+    // No reminder is shown, so "r2" is only his answer.
+    expect(await answering("R2.", () => "r2")).toMatchObject({ answers: [{ next: "r2" }] })
+  })
+
   test("a secret isn't remembered, nor kept in the journal, whatever else would turn it down", async () => {
     const result = await run(
       Effect.gen(function* () {

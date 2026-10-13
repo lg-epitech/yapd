@@ -3415,9 +3415,10 @@ export const make = (options: {
           const leaned = { ...open, ...leaning(open) }.wording?.part
           const part = leaned ?? (asked === undefined ? undefined : Questions.said(asked, Option.none()))
           const answer: Questions.Reply | undefined = decision.how === "skip" ? { _tag: "Skip" } : part === undefined ? undefined : Questions.resolve(part, decision.text)
-          // Words that are only a handle, like p1 for a routine he named, are the model's, never his, and no agent could make anything of
-          // them: nothing goes, and the question is asked again after. An option called so is still that option.
-          if (answer?._tag === "Words" && Brain.bareHandle(answer.text)) {
+          // Words that are only a handle the model was shown, in any case or punctuation, like p1 for a routine he named, are the model's,
+          // never his, and no agent could make anything of them: nothing goes, and the question is asked again after. An option called so
+          // is still that option, and words that only look like a handle, like his "r2" with no r2 shown, are his answer.
+          if (answer?._tag === "Words" && Brain.bareHandle(answer.text, decided.situation)) {
             yield* close(open, "dropped: unclear", utterance.id)
             return unfinished(reply(said.cantTell, decided.subject), decision.rest, said, decided.situation.desk)
           }

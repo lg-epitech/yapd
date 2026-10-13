@@ -1868,12 +1868,27 @@ export const remembered = (situation: Pick<Situation, "memories">): ReadonlyArra
 /** The memory a handle in MEMORIES stands for. */
 export const rememberedBy = (handle: string, situation: Pick<Situation, "memories">) => Option.fromNullable(remembered(situation).find((one) => one.handle === handle.trim()))
 
+/** What the model is shown with a handle: MEMORIES, REMINDERS, MUTED, THREADS and UNHEARD. */
+type Handled = Pick<Situation, "memories" | "reminders" | "mutes" | "desk" | "missed">
+
+/** Every handle the model is shown this turn, in MEMORIES, REMINDERS, MUTED, THREADS and UNHEARD, as `prompt` lists them. */
+const handlesShown = (situation: Handled) =>
+  new Set([
+    ...remembered(situation).map(({ handle }) => handle),
+    ...(situation.reminders ?? []).slice(0, remindersShown).map((_, index) => remindedHandle(index)),
+    ...situation.mutes.flatMap((mute, index) => (mutedListed(mute, situation.desk) === undefined ? [mutedHandle(index)] : [])),
+    ...situation.desk.threads.map(({ handle }) => handle),
+    ...situation.missed.groups.slice(0, missedShown).map(({ handle }) => handle),
+  ])
+
 /**
- * Whether the model's words are only a handle yapd gave something, as it
- * gives them, like p1, k2, r1 or m1, which a thread could make nothing of: a
- * routine's stands for its steps, which only code puts in.
+ * Whether the model's words are only one of the handles it was shown, as
+ * words compare, whatever their case or punctuation, like "p1", "P1." or
+ * "t2", which a thread could make nothing of: a routine's stands for its
+ * steps, which only code puts in. Never words that only look like one, like
+ * his answer "r2" with no r2 shown.
  */
-export const bareHandle = (text: string) => /^[pkrma]\d+$/.test(text.trim())
+export const bareHandle = (text: string, situation: Handled) => handlesShown(situation).has(Ledger.digest(text))
 
 /**
  * Whether he said a routine's whole name, as words compare, in all he said,
@@ -1887,16 +1902,17 @@ const nameSaid = (name: string, utterance: Pick<Assistant.Utterance, "heard" | "
 
 /**
  * A message, or an offer, whose words the model gave as a routine's handle,
- * with the routine's steps in their place, exactly as they're kept: the model
- * never sees them, so only code puts them in. None for any other bare handle,
- * nor one that's no routine, nor one whose name he didn't say, nor an answer
- * to a thread's question by a handle, which is only ever his own words or the
+ * just as it was shown, with the routine's steps in their place, exactly as
+ * they're kept: the model never sees them, so only code puts them in. None
+ * for any other handle it was shown, in any case or punctuation, nor one
+ * that's no routine, nor one whose name he didn't say, nor an answer to a
+ * thread's question by a handle, which is only ever his own words or the
  * option he picked: a handle never reaches a thread as it is. Anything else is
  * as it was, whatever its words.
  */
-const routining = (choice: Decision, situation: Pick<Situation, "memories" | "utterance">): Option.Option<Decision> => {
+const routining = (choice: Decision, situation: Handled & Pick<Situation, "utterance">): Option.Option<Decision> => {
   if (choice.act !== "send" && choice.act !== "offer" && choice.act !== "reply") return Option.some(choice)
-  if (!bareHandle(choice.text)) return Option.some(choice)
+  if (!bareHandle(choice.text, situation)) return Option.some(choice)
   if (choice.act === "reply") return Option.none()
   return Option.map(
     Option.filter(rememberedBy(choice.text, situation), ({ kind, name }) => kind === "routine" && name !== undefined && nameSaid(name, situation.utterance)),
@@ -1910,7 +1926,7 @@ const routining = (choice: Decision, situation: Pick<Situation, "memories" | "ut
  * again to "Again?" about those steps; one that's no routine, or whose name he
  * didn't say, is as it was, which checking it turns down.
  */
-export const resolved = (choice: Decision, situation: Pick<Situation, "memories" | "utterance">): Decision =>
+export const resolved = (choice: Decision, situation: Handled & Pick<Situation, "utterance">): Decision =>
   Option.getOrElse(routining(choice, situation), () => choice)
 
 /** The most words a routine kept by voice is called. */

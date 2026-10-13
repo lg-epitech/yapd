@@ -2010,9 +2010,22 @@ describe("memories", () => {
     expect(prompt).not.toContain("have Codex review the diff twice")
   })
 
-  test("a routine's handle sends its steps only for its name said, and no other bare handle ever reaches a thread, while his own words go whatever they are", () => {
+  test("a routine's handle sends its steps only for its name said, and no other handle the model was shown ever reaches a thread, while his own words go whatever they are", () => {
+    // Every kind of handle shown: a fact's and a routine's in MEMORIES, a reminder's, a mute's, the threads' and one of UNHEARD's own.
+    const shown: Partial<Brain.Situation> = {
+      memories: { kept: [{ id: 1, at: now, kind: "fact", text: "rig's T3 Code runs the nightly", heard: "Remember that rig's T3 Code runs the nightly." }], written: routines.written },
+      reminders: [{ id: 1, at: now, heard: "Remind me at six to stretch.", text: "stretch", due: now + 60 * 60_000, state: "pending" }],
+      mutes: [{ key: "session:rig:s-importer", called: "the importer session", at: now }],
+      missed: {
+        since: now - 24 * 60 * 60_000,
+        spoke: now - 60 * 60_000,
+        groups: Missed.group([{ id: 1, at: now - 60_000, kind: "update", machine: "rig", thread: "claude:s-importer", project: "importer", said: "The importer compiles.", detail: { priority: "done" } }], desk()),
+      },
+    }
+    const prompt = Brain.prompt(situation("Ship the Tezos one.", shown), Option.none())
+    for (const listed of ["- k1 «", "- p1 «", "- r1 «", "m1 «", `\n${handleOf(std)} · «`, "- u1 «"]) expect([listed, prompt.includes(listed)]).toEqual([listed, true])
     const check = (heard: string, given: Partial<Brain.Decision> & Pick<Brain.Decision, "act">) =>
-      Brain.check(Brain.decision({ how: given.act === "send" ? "now" : given.act === "offer" ? "finished" : "", ...given }), situation(heard, { memories: routines }), lines)
+      Brain.check(Brain.decision({ how: given.act === "send" ? "now" : given.act === "offer" ? "finished" : "", ...given }), situation(heard, shown), lines)
     const refused = { _tag: "Say" as const, spoken: lines.cantTell }
     const sent = (checked: Brain.Checked) => (checked._tag === "Do" ? checked.plan.decision.text : checked)
     expect(sent(check("Ship the Tezos one.", { act: "send", target: handleOf(tezos), text: "p1" }))).toBe("merge the PR")
@@ -2021,10 +2034,17 @@ describe("memories", () => {
     expect(sent(check("Tell the Tezos one to merge the PR.", { act: "send", target: handleOf(tezos), text: "merge the PR" }))).toBe("merge the PR")
     expect(sent(check("Tell the std one to merge the PR.", { act: "reply", target: handleOf(std), text: "merge the PR" }))).toBe("merge the PR")
     expect(sent(check("Wrap the Tezos one up.", { act: "send", target: handleOf(tezos), text: "merge the PR" }))).toBe("merge the PR")
-    // Its name not said, the handle sends nothing; nor does a fact's, a reminder's or a mute's, nor an answer by any handle, even with its name said.
+    // Its name not said, the handle sends nothing; nor does any other handle shown, in any case or punctuation, the routine's too, nor an answer
+    // by any of them, even with its name said.
     expect(check("Wrap the Tezos one up.", { act: "send", target: handleOf(tezos), text: "p1" })).toEqual(refused)
-    for (const text of ["k1", "r1", "m1", "a1", " p2 "]) expect([text, check("Ship the Tezos one.", { act: "send", target: handleOf(tezos), text })]).toEqual([text, refused])
+    const handles = ["k1", "R1.", "m1", "u1", handleOf(std).toUpperCase(), "P1", " p1. "]
+    for (const text of handles) expect([text, check("Ship the Tezos one.", { act: "send", target: handleOf(tezos), text })]).toEqual([text, refused])
     expect(check("Ship the Tezos one.", { act: "offer", target: handleOf(tezos), text: "k1" })).toEqual(refused)
-    expect(check("Tell the std one to ship.", { act: "reply", target: handleOf(std), text: "p1" })).toEqual(refused)
+    for (const text of [...handles, "p1"]) expect([text, check("Tell the std one to ship.", { act: "reply", target: handleOf(std), text })]).toEqual([text, refused])
+    // What only looks like a handle, with none such shown, is words like any: like his answer "r2", with one reminder.
+    for (const text of ["r2", "k2", "p2", "m2", "u2", "a1", "t99"]) {
+      expect([text, sent(check(`Tell the std one ${text}.`, { act: "reply", target: handleOf(std), text }))]).toEqual([text, text])
+      expect([text, sent(check(`Tell the Tezos one ${text}.`, { act: "send", target: handleOf(tezos), text }))]).toEqual([text, text])
+    }
   })
 })
