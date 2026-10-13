@@ -13,9 +13,9 @@ import { addressed, type Lines, unaddressed } from "./Persona.ts"
 import type * as Preferences from "./Preferences.ts"
 import * as Questions from "./Questions.ts"
 import * as Reminders from "./Reminders.ts"
-import { agreed, enough, gist, hallucinated, halts, type Line, morePlease, noted, padding, wakes } from "./Responder.ts"
 import * as T3Actions from "./T3Actions.ts"
 import * as Threads from "./Threads.ts"
+import { again, agreed, enough, gist, hallucinated, halts, type Line, morePlease, noted, padding, wakes } from "./Words.ts"
 
 // What the user wants, worked out in one call to the model from all yapd
 // knows right now: their threads, what it said lately, what they missed and
@@ -1432,11 +1432,6 @@ const repeating = (said: string) => {
   }
   return undefined
 }
-
-const again: ReadonlySet<string> = new Set([
-  "say again", "say that again", "say it again", "repeat", "repeat that", "repeat it", "what", "pardon", "come again",
-  "sorry what", "what was that", "can you repeat that", "could you repeat that",
-])
 
 const needs: ReadonlySet<string> = new Set([
   "who needs me", "what's waiting", "what's waiting on me", "what's waiting for me", "who's waiting on me", "who's waiting for me",

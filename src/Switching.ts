@@ -1,5 +1,5 @@
 import { Deferred, Effect, Queue, type Scope, Stream } from "effect"
-import { switches } from "./Responder.ts"
+import { switches } from "./Words.ts"
 
 // Turning yapd on or off, from the menu bar, the API, as it starts or by
 // voice, kept apart from `yapd serve` so what it drops, and what it doesn't

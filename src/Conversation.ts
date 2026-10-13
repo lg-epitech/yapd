@@ -7,12 +7,13 @@ import * as Endpointer from "./Endpointer.ts"
 import { plain, RelayError, type Thread } from "./Relay.ts"
 import { Journal, routinesIn, routinesNamed } from "./Journal.ts"
 import { Persona } from "./Persona.ts"
-import { agreed, gist, halts, type Line, noted, type Reply, Responder } from "./Responder.ts"
+import { type Reply, Responder } from "./Responder.ts"
 import * as T3Actions from "./T3Actions.ts"
 import type * as Threads from "./Threads.ts"
 import { Transcriber } from "./Transcriber.ts"
 import { Vad } from "./Vad.ts"
 import { extension, Voice } from "./Voice.ts"
+import { agreed, gist, halts, type Line, noted } from "./Words.ts"
 
 /** An update, rendered and ready to be read out. */
 export interface Update {

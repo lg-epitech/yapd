@@ -6,7 +6,7 @@ import type * as Memory from "./Memory.ts"
 import { WriterModel } from "./Model.ts"
 import { unroutined } from "./Preferences.ts"
 import type { Heard } from "./Recent.ts"
-import type { Line } from "./Responder.ts"
+import type { Line } from "./Words.ts"
 
 // The user dictates new work to yapd, not to an agent. One call to the model
 // decides where it goes and writes the prompt: what the request leans on in

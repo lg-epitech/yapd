@@ -35,6 +35,7 @@ import { ProcessError } from "./Process.ts"
 import * as Settings from "./Settings.ts"
 import * as Store from "./Store.ts"
 import { Voice, Warmth } from "./Voice.ts"
+import * as Words from "./Words.ts"
 
 const update: Conversation.Update = {
   session: "s",
@@ -2599,7 +2600,7 @@ describe("Responder", () => {
   })
 
   test("tells the model what of what he said earlier on may have been yapd's own voice, and what after a pause was his, only for what he began over it", () => {
-    const told = (line: Partial<Responder.Line>) =>
+    const told = (line: Partial<Words.Line>) =>
       Responder.prompt(
         {
           project: "yapd",
@@ -2807,7 +2808,7 @@ describe("more, and how yapd talks, over an update", () => {
     expect(quickly(over("More."))).toBeUndefined()
     expect(quickly(over("More tests, please.", rest))).toBeUndefined()
     // "Go on" stays a yes, never the rest.
-    expect(Responder.agreed.has("go on")).toBe(true)
+    expect(Words.agreed.has("go on")).toBe(true)
   })
 
   test("the model is given the rest to say if he asks for more, and told how yapd talks is never for the agent", () => {
@@ -3000,10 +3001,10 @@ describe("quick replies", () => {
 
 describe("Transcriber", () => {
   test("only 'Mute.' on its own, however often Whisper heard it, is his emergency off, and only so many words turn yapd back on", () => {
-    for (const heard of ["Mute.", "mute mute", "Mute, mute, mute.", "Jarvis, mute.", "Mute, sir!"]) expect(Responder.halts(heard)).toBe(true)
-    for (const heard of ["Mute it.", "Mute that for an hour.", "Mute the Tezos one.", "What's muted?", "Unmute.", "Mute it, mute it.", "Mute?", "Mute, mute?", ""]) expect(Responder.halts(heard)).toBe(false)
-    for (const heard of ["Unmute.", "Un-mute.", "Turn on.", "Turn it on, please.", "Jarvis, turn yourself on.", "Turn back on.", "Unmute, unmute."]) expect(Responder.wakes(heard)).toBe(true)
-    for (const heard of ["Unmute it.", "Unmute the Tezos one.", "Turn on the lights.", "Turn it off.", "Mute.", "Unmute?", "Turn on?", ""]) expect(Responder.wakes(heard)).toBe(false)
+    for (const heard of ["Mute.", "mute mute", "Mute, mute, mute.", "Jarvis, mute.", "Mute, sir!"]) expect(Words.halts(heard)).toBe(true)
+    for (const heard of ["Mute it.", "Mute that for an hour.", "Mute the Tezos one.", "What's muted?", "Unmute.", "Mute it, mute it.", "Mute?", "Mute, mute?", ""]) expect(Words.halts(heard)).toBe(false)
+    for (const heard of ["Unmute.", "Un-mute.", "Turn on.", "Turn it on, please.", "Jarvis, turn yourself on.", "Turn back on.", "Unmute, unmute."]) expect(Words.wakes(heard)).toBe(true)
+    for (const heard of ["Unmute it.", "Unmute the Tezos one.", "Turn on the lights.", "Turn it off.", "Mute.", "Unmute?", "Turn on?", ""]) expect(Words.wakes(heard)).toBe(false)
   })
 
   test("drops what Whisper writes for sounds that aren't words", () => {

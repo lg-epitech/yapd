@@ -4,9 +4,9 @@ import * as Ledger from "./Ledger.ts"
 import type * as Memory from "./Memory.ts"
 import { afterOnIt, type Lines, Persona, withOnIt } from "./Persona.ts"
 import type { Heard } from "./Recent.ts"
-import type { Line } from "./Responder.ts"
 import { progress, readied, unstarted } from "./T3CodeLauncher.ts"
 import type * as T3Live from "./T3Live.ts"
+import type { Line } from "./Words.ts"
 import { type Decision, grounded, type Listing, type Material, vocabulary, Writer } from "./Writer.ts"
 
 // New work, from what the user said to where it starts: the writer decides

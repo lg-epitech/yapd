@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { Option } from "effect"
 import type { Catalog } from "./Launcher.ts"
 import type * as Memory from "./Memory.ts"
-import type { Line } from "./Responder.ts"
+import type { Line } from "./Words.ts"
 import * as Writer from "./Writer.ts"
 
 const now = Date.parse("2026-09-29T18:00:00.000Z")

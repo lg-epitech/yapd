@@ -6,8 +6,8 @@ import * as Ledger from "./Ledger.ts"
 import * as Persona from "./Persona.ts"
 import { ProcessError } from "./Process.ts"
 import * as Remote from "./Remote.ts"
-import type { Line } from "./Responder.ts"
 import * as Store from "./Store.ts"
+import type { Line } from "./Words.ts"
 import { type Decision, type Material, WriteError, Writer } from "./Writer.ts"
 
 const models: Catalog["models"] = [
