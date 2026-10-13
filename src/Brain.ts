@@ -2214,17 +2214,6 @@ export const asSaid = (words: string, said: string) => {
 }
 
 /**
- * Whether words are his as he said them, as `asSaid` has it, but symbols and
- * all, as `calledAs` compares them, whatever quotes he put around them, so
- * the model's "C parser" is never his "C++ parser", nor its "NET" his ".NET",
- * yet his quoted "C++ parser" is.
- */
-const wordForWord = (words: string, said: string) => {
-  const kept = calledAs(words)
-  return kept !== "" && ` ${calledAs(said)} `.includes(` ${kept} `)
-}
-
-/**
  * Words to yapd that may come around what he asks, never part of it when
  * said before he asks it, or when a pause sets them off from his other
  * words, like the "thanks" of ", thanks.": never the "Jarvis" of "ask
@@ -2302,18 +2291,39 @@ const edges = (said: string) => {
  * His words in `said` that the model's `words` say the same as, symbols and
  * all, as speech recognition wrote them: all of `said` but for what's
  * `before` and `after` it, never any other, nor the marks around it. None
- * when no such part of it says the same. Where his words start and end is
- * code's to say, never the model's.
+ * when no such part of it says the same, `as` words compare. Where his words
+ * start and end is code's to say, never the model's.
  */
-const inHisWords = (said: string, words: string, before: RegExp, after: RegExp) => {
-  const wanted = worded(words)
+const inHisWords = (said: string, words: string, before: RegExp, after: RegExp, as: (words: string) => string = worded) => {
+  const wanted = as(words)
   const { starts, ends } = edges(said)
   for (const start of starts.filter((at) => before.test(said.slice(0, at)))) {
     for (const end of ends.filter((at) => after.test(said.slice(at)))) {
-      if (end > start && worded(said.slice(start, end)) === wanted) return said.slice(start, end)
+      if (end > start && as(said.slice(start, end)) === wanted) return said.slice(start, end)
     }
   }
   return undefined
+}
+
+/** What gives a thread its new title as he says it: the "to" of "rename it to", "call it" or "name it". */
+const retitling = new RegExp(phrased(["to", "call it", "name it"]), "giu")
+
+/** What may come around a new title: before it, marks and a pause filled, like "uh"; after it, words to yapd a pause sets off, like ", please.". */
+const aroundTitle = { ahead: ahead(`(?:${gap}|${phrased(["uh", "um", "erm", "hmm"])})*`), behind: behind([]) }
+
+/**
+ * Whether a new title is all he said after his last "to", "call it" or
+ * "name it", symbols and all, whatever quotes he put around it, but for
+ * what may come around it: so the model's "deploy yet" for his "do not
+ * deploy yet" is never his, nor its "C parser" his "C++ parser", while his
+ * quoted "C++ parser" is. Where it starts and ends is code's to say, never
+ * the model's: a title he didn't say so, like one with a "to" in it, is read
+ * back to him.
+ */
+const titled = (title: string, said: string) => {
+  const last = Array.from(said.matchAll(retitling)).at(-1)
+  if (last === undefined || calledAs(title) === "") return false
+  return inHisWords(said.slice(last.index + last[0].length), title, aroundTitle.ahead, aroundTitle.behind, calledAs) !== undefined
 }
 
 /** A fact said: what may come before it, "remember that" and an everyday way of asking before that, and after it, words to yapd a pause sets off. */
@@ -3134,9 +3144,10 @@ const tidyDoing = (choice: Pick<Decision, "how" | "text" | "when">, names: strin
 
 /**
  * Asks before tidying one thread: one he only fairly surely meant, a title
- * that isn't his words as heard, or archiving one that's busy, which he's
- * told stops what it's doing, as his yes then agrees to. `news` comes first,
- * like those left out of several. With every wording asked lately, it isn't.
+ * that isn't all he said after "to" or "call it", or archiving one that's
+ * busy, which he's told stops what it's doing, as his yes then agrees to.
+ * `news` comes first, like those left out of several. With every wording
+ * asked lately, it isn't.
  */
 const tidyConfirm = (
   choice: Decision,
@@ -3222,8 +3233,9 @@ const tidyMany = (choice: Decision, all: ReadonlyArray<Threads.Listed>, situatio
  * to a time to come within a month. Whether a thread is busy is its state's
  * to say, never his words: one T3 Code won't settle as it is is said so, and
  * archiving one stops it, which he's asked about. One thread goes ahead as
- * any write does, but only fairly sure of it, or with a title that isn't his
- * words as heard, he's asked first; several, he's always asked, naming each.
+ * any write does, but only fairly sure of it, or with a title that isn't all
+ * he said after "to" or "call it", he's asked first; several, he's always
+ * asked, naming each.
  */
 const tidying = (
   choice: Decision,
@@ -3267,9 +3279,9 @@ const tidying = (
   // T3 Code won't settle one waiting on him till he answers it, nor one at work, or with something in its queue.
   if (choice.how === "settle" && (listed.state === "question" || listed.state === "approval")) return { _tag: "Say", spoken: said.asking(Reminders.named(listed)) }
   if (choice.how === "settle" && occupied(listed)) return { _tag: "Say", spoken: said.working(Reminders.named(listed)) }
-  // His words, never the model's: a title that isn't in all he said, word for word, symbols and all, is read back to him first.
+  // His words, never the model's: a title that isn't all he said after "to" or "call it", symbols and all, is read back to him first.
   const heard = utterance.whole ?? utterance.heard
-  const unsaid = choice.how === "rename" && (utterance.echo !== undefined || !wordForWord(choice.text, heard))
+  const unsaid = choice.how === "rename" && (utterance.echo !== undefined || !titled(choice.text, heard))
   if (choice.sure === "medium" || unsaid || (choice.how === "archive" && occupied(listed))) {
     return tidyConfirm(choice, { ref: listed.ref, called: Reminders.named(listed), listed }, situation, lines)
   }

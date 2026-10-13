@@ -2178,6 +2178,16 @@ describe("memories", () => {
     }
   })
 
+  test("a new title goes unasked only as all he said after \"to\" or \"call it\", so the model's \"deploy yet\" for his \"do not deploy yet\" is read back to him first", () => {
+    const rename = (heard: string, text: string) => {
+      const checked = Brain.check(Brain.decision({ act: "tidy", how: "rename", target: handleOf(mina), sure: "high", text }), situation(heard), lines)
+      return checked._tag === "Do" ? checked.plan.decision.text : checked._tag === "Ask" ? checked.open.asked : checked
+    }
+    expect(rename("Rename the Mina tickets to do not deploy yet.", "deploy yet")).toBe("Rename Open Mina SSV2 Bug Tickets to deploy yet, sir?")
+    expect(rename("Rename the Mina tickets to Mina fee tables.", "Mina fee tables")).toBe("Mina fee tables")
+    expect(rename("Call it C++ parser.", "C++ parser")).toBe("C++ parser")
+  })
+
   test("a routine's name is his as he said it, symbols and all, so the model's \"C\" for his \"C++\" keeps nothing, and saying \"C++\" never sends one called \"C\"", () => {
     const remember = (text: string) =>
       Brain.check(Brain.decision({ act: "remember", how: "routine", text }), situation("When I say C++, review the C++ parser."), lines)

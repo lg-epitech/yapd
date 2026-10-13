@@ -13841,7 +13841,7 @@ describe("Assistant tidying", () => {
     expect(result.answers).toEqual([{ [colour.id]: message, [extras.id]: ["Alpha"] }])
   })
 
-  test("a new title he gives to the one read back to him, like his \"C++ parser\" to \"C parser?\", is never a yes to it: it's renamed to his, only when it's his words", async () => {
+  test("a new title he gives to the one read back to him, like his \"C++ parser\" to \"C parser?\", is never a yes to it: it's renamed to his, only when it's all he said after \"call it\"", async () => {
     /** The model's "C parser" for his "C++ parser" read back, then his `answer`, which the model takes for the title "C++ parser". */
     const renaming = (answer: string) =>
       run(
@@ -13859,10 +13859,11 @@ describe("Assistant tidying", () => {
           return { asked, said: made.spoken().at(-1), titles }
         }),
       )
-    const his = await renaming("No, C++ parser, with the plus signs.")
+    const his = await renaming("No, call it C++ parser.")
     expect(his.asked).toBe("Rename Open Mina SSV2 Bug Tickets to C parser, sir?")
     expect(his.titles).toEqual(["C++ parser"])
-    // Not his words, it's left, never renamed to the model's.
+    // Not all he said after "call it", or not his words, it's left, never renamed to the model's.
+    expect((await renaming("No, C++ parser, with the plus signs.")).titles).toEqual([])
     expect((await renaming("No, the one with the plus signs.")).titles).toEqual([])
   })
 
