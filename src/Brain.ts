@@ -352,8 +352,10 @@ const when = (how: string) => (how === "after" || how === "restart" ? how : "now
  * put: the same act on the same thread, and for a message the same words and
  * timing, or none given, which leaves them as asked. Tidying, it's any of the
  * threads asked about, all of them for none named, as for "yes, but not the
- * Tezos fees", the same way, title and time, or none given. Anything else,
- * like another thread or other words, is something else he wants instead.
+ * Tezos fees", the same way, title and time, or none given. Fewer than were
+ * asked about is the model's pick of those he kept, which only a sure one
+ * stands for. Anything else, like another thread or other words, is
+ * something else he wants instead.
  */
 export const agrees = (open: Pick<Assistant.Open, "decision" | "candidates">, decided: Decision, situation: Pick<Situation, "desk" | "archived">) => {
   const asked = open.decision
@@ -361,7 +363,12 @@ export const agrees = (open: Pick<Assistant.Open, "decision" | "candidates">, de
   if (decided.act !== asked.act) return false
   if (decided.act === "tidy") {
     const named = tidyTargets(decided.target, situation)
-    const among = Option.exists(named, (named) => named.every(({ ref }) => open.candidates.some((candidate) => Threads.same(candidate, ref))))
+    const among = Option.exists(
+      named,
+      (named) =>
+        named.every(({ ref }) => open.candidates.some((candidate) => Threads.same(candidate, ref))) &&
+        (decided.sure === "high" || decided.target.trim() === "" || open.candidates.every((candidate) => named.some(({ ref }) => Threads.same(candidate, ref)))),
+    )
     return (
       among &&
       (decided.how.trim() === "" || decided.how === asked.how) &&

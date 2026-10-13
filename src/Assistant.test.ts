@@ -12070,4 +12070,28 @@ describe("Assistant tidying", () => {
     expect(result.said).toBe("Archived one of the two, sir. I left Tezos wallets: it's started working.")
     expect(result.sent).toEqual([{ type: "thread.archive", commandId: "0:1", threadId: importer.id }])
   })
+
+  test("an answer that keeps fewer of the threads asked about tidies them only when the model is sure which he kept", async () => {
+    /** Archiving the four Tezos threads, answered with "just the Tezos one", which the model takes for the importer as `sure` says. */
+    const narrowing = (sure: Brain.Sure) =>
+      run(
+        Effect.gen(function* () {
+          const made = yield* assistant(
+            (situation) =>
+              situation.utterance.heard.startsWith("Archive")
+                ? Brain.decision({ act: "tidy", how: "archive", target: tezosThreads.map((one) => handle(situation, one)).join(", "), sure: "high" })
+                : Brain.decision({ act: "tidy", how: "archive", target: handle(situation, importer), sure, pending: "answers" }),
+            undefined,
+            { others: tezosThreads },
+          )
+          yield* made.dictate("Archive all the finished Tezos threads.")
+          yield* made.answer("Just the Tezos one.")
+          return { said: made.spoken().at(-1), sent: tidied(made.dispatched) }
+        }),
+      )
+    expect(await narrowing("high")).toEqual({ said: "Archived, sir: Tezos importer.", sent: [{ type: "thread.archive", commandId: "0", threadId: importer.id }] })
+    // A guess at which one is never archived.
+    expect(await narrowing("medium")).toEqual({ said: "I'll leave that one, sir.", sent: [] })
+    expect(await narrowing("low")).toEqual({ said: "I couldn't tell which one you meant, sir.", sent: [] })
+  })
 })
