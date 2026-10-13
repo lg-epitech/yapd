@@ -752,7 +752,7 @@ export const make = (reach: Effect.Effect<Server.Transport, Server.Trouble>) => 
   const message = (threadId: string, messageId: string) => Effect.map(bounded(threadId), ({ projection }) => found(projection, messageId))
 
   /** The folder behind T3 Code's scratch project, once it said: it's the same for as long as T3 Code keeps its data where it does. */
-  let scratch: Option.Option<string> | undefined
+  let scratch: string | undefined
 
   return {
     /** Where it got to. `pending` is the request the shell says it waits on, when it knows. */
@@ -848,17 +848,17 @@ export const make = (reach: Effect.Effect<Server.Transport, Server.Trouble>) => 
 
     /**
      * The folder behind T3 Code's scratch project, which is how its threads,
-     * outside his projects, are told: asked once, and kept. None on a T3 Code
-     * without one.
+     * outside his projects, are told: kept once it's said. None on a T3 Code
+     * without one, asked again next time, as it may have one once updated.
      */
     scratchRoot: Effect.suspend(() =>
       scratch !== undefined
-        ? Effect.succeed(scratch)
+        ? Effect.succeedSome(scratch)
         : Effect.flatMap(reach, ({ call }) => call("server.getConfig", {}, Scratch)).pipe(
             Effect.map(({ scratchWorkspaceRoot }) => Option.fromNullable(scratchWorkspaceRoot)),
             Effect.tap((found) =>
               Effect.sync(() => {
-                scratch = found
+                scratch = Option.getOrUndefined(found)
               }),
             ),
           ),

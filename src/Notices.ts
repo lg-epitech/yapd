@@ -768,10 +768,11 @@ export const make = (options: {
       reconcile: reconciling(() => true),
       /**
        * What waits on him on one machine, each time its T3 Code has caught up,
-       * as `lookBack` has it: what was put by while it couldn't be seen, then
-       * what he never heard.
+       * as `lookBack` has it, once where it keeps work outside his projects is
+       * known, so none of it is said as "No project": what was put by while it
+       * couldn't be seen, then what he never heard.
        */
-      reconcileOn: (machine: string) => Effect.zipRight(options.returned(machine), reconciling((on) => on === machine)),
+      reconcileOn: (machine: string) => Effect.zipRight(threads.warm(machine), Effect.zipRight(options.returned(machine), reconciling((on) => on === machine))),
     }
   })
 

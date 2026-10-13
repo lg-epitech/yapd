@@ -1,5 +1,5 @@
 import type { Database } from "bun:sqlite"
-import { Clock, Context, Data, type Duration, Effect, Either, Option, Stream } from "effect"
+import { Clock, Context, Data, type Duration, Effect, Either, Fiber, Option, Stream } from "effect"
 import { realpath } from "node:fs/promises"
 import { english, speakable } from "./Condenser.ts"
 import type { Journal, Kept } from "./Journal.ts"
@@ -132,6 +132,12 @@ export class Threads extends Context.Tag("yapd/Threads")<
      * alongside a newer one still waits. Not, when that can't be read.
      */
     readonly waiting: (ref: Ref, requestId: string) => Effect.Effect<boolean>
+    /**
+     * Asks where a machine's T3 Code keeps work outside his projects, unless
+     * it said, waiting a moment for it: for once its threads can be seen, so
+     * none of them is said as "No project" for want of it.
+     */
+    readonly warm: (machine: string) => Effect.Effect<void>
   }
 >() {}
 
@@ -718,29 +724,35 @@ export const make = (options: {
         onSome: ({ live }) => Effect.map(live.view, Option.flatMap((view) => Option.fromNullable(view.threads.get(ref.id)))),
       })
 
-    /** The folder behind each machine's scratch project, by machine, once its T3 Code said: none where it has none. */
-    const scratches = new Map<string, Option.Option<string>>()
-    /** When each machine's T3 Code was last asked for it, while it hasn't said. */
-    const sought = new Map<string, number>()
+    /** The folder behind each machine's scratch project, by machine, once its T3 Code said. */
+    const scratches = new Map<string, string>()
+    /** When each machine's T3 Code was last asked for it, while it hasn't said where, and its answer, which may be on its way. */
+    const sought = new Map<string, { readonly at: number; readonly answer: Fiber.RuntimeFiber<void> }>()
     /**
-     * What's known of the folder behind a machine's scratch project, its T3
-     * Code asked in the background the first time it's wanted, and at most
-     * once a minute while it doesn't say, so the desk never waits on it.
+     * Asks a machine's T3 Code where its scratch project is, in the
+     * background, unless it said: while it hasn't, at most once a minute, as
+     * one without a scratch project may have one once it's updated. What it's
+     * answering, if it's asked.
      */
-    const scratchOf = (link: Link) =>
+    const seek = (link: Link) =>
       Effect.gen(function* () {
-        const known = scratches.get(link.machine)
+        if (scratches.has(link.machine) || Option.isNone(link.actions)) return Option.none<Fiber.RuntimeFiber<void>>()
         const now = yield* Clock.currentTimeMillis
-        if (known !== undefined || Option.isNone(link.actions) || now - (sought.get(link.machine) ?? Number.NEGATIVE_INFINITY) < 60_000) {
-          return Option.flatten(Option.fromNullable(known))
-        }
-        sought.set(link.machine, now)
-        yield* link.actions.value.scratchRoot.pipe(
-          Effect.tap((found) => Effect.sync(() => void scratches.set(link.machine, found))),
+        const last = sought.get(link.machine)
+        if (last !== undefined && now - last.at < 60_000) return Option.some(last.answer)
+        const answer = yield* link.actions.value.scratchRoot.pipe(
+          Effect.flatMap((found) => Effect.sync(() => void Option.map(found, (root) => scratches.set(link.machine, root)))),
           Effect.catchAllCause((cause) => Effect.logWarning(`Could not ask where ${link.machine}'s T3 Code keeps work outside your projects`, cause)),
           Effect.forkIn(scope),
         )
-        return Option.none<string>()
+        sought.set(link.machine, { at: now, answer })
+        return Option.some(answer)
+      })
+    /** What's known of the folder behind a machine's scratch project, asked for meanwhile, so the desk never waits on it. */
+    const scratchOf = (link: Link) =>
+      Effect.suspend(() => {
+        const known = scratches.get(link.machine)
+        return known !== undefined ? Effect.succeedSome(known) : Effect.as(seek(link), Option.none<string>())
       })
 
     /** When usage was last asked for, so a T3 Code that doesn't answer isn't asked on every request. */
@@ -867,6 +879,12 @@ export const make = (options: {
           const read = yield* Effect.either(Effect.flatMap(reach(ref), (actions) => actions.detail(ref.id, requestId)))
           if (Either.isLeft(read)) yield* Effect.logWarning(`Could not read whether it still waits on ${requestId}`, read.left)
           return Either.isRight(read) && read.right.pending.includes(requestId)
+        }),
+      warm: (name) =>
+        Option.match(Option.fromNullable(linked(name)), {
+          onNone: () => Effect.void,
+          onSome: (link) =>
+            Effect.flatMap(seek(link), (answer) => (Option.isNone(answer) ? Effect.void : Effect.asVoid(Effect.timeoutOption(Fiber.join(answer.value), "2 seconds")))),
         }),
     } satisfies Threads["Type"]
   })

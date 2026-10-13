@@ -417,6 +417,41 @@ describe("Threads on several machines", () => {
     expect(found).toEqual({ matches: [{ ref: { machine: "Rosie", id: "tests" }, snippet: "the std tests" }], missed: ["rig"] })
   })
 
+  test("a scratch thread is never \"No project\" once its machine's T3 Code has caught up, and one that had no scratch project is asked again", async () => {
+    // Rosie's T3 Code says where its scratch project is; rig's had none at first, and has one once it's updated.
+    const roots: Array<Option.Option<string>> = [Option.none(), Option.some("/t3/scratch")]
+    const scratching = (root: Effect.Effect<Option.Option<string>>) => ({ scratchRoot: root }) as unknown as T3Actions.Actions
+    const view: T3Live.View = {
+      projects: new Map([["s", { id: "s", title: "No project", workspaceRoot: "/t3/scratch" }]]),
+      threads: new Map([["glucose", thread("glucose", "Glucose sensors", "2026-10-08T21:00:00.000Z", { projectId: "s" })]]),
+      sequence: 1,
+      synced: true,
+    }
+    const seen = await Effect.gen(function* () {
+      yield* TestClock.setTime(now)
+      const store = yield* Store.make(":memory:")
+      const threads = yield* Threads.make({
+        machine: "Rosie",
+        live: live(Option.some(view)),
+        actions: Option.some(scratching(Effect.succeedSome("/t3/scratch"))),
+        others: [{ machine: "rig", live: live(Option.some(view)), actions: scratching(Effect.sync(() => roots.shift() ?? Option.none())), status: Effect.succeed({ _tag: "Up" }) }],
+        journal: Journal.fromStore(store),
+        store,
+      })
+      const projects = Effect.map(threads.desk(Option.none(), [], 5), ({ threads }) => threads.map(({ ref, project }) => `${ref.machine}: ${project}`).toSorted())
+      // As each machine's T3 Code catches up.
+      yield* threads.warm("Rosie")
+      yield* threads.warm("rig")
+      const first = yield* projects
+      yield* TestClock.adjust("1 minute")
+      // Asked again in the background, it's known by the next time.
+      yield* projects
+      yield* Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 20)))
+      return { first, later: yield* projects }
+    }).pipe(Effect.scoped, Effect.provide(TestContext.TestContext), Effect.runPromise)
+    expect(seen).toEqual({ first: ["Rosie: scratch", "rig: No project"], later: ["Rosie: scratch", "rig: scratch"] })
+  })
+
   test("names this machine when its T3 Code isn't running while rig's threads can be seen, since rig's are his threads too", async () => {
     const away = await Effect.gen(function* () {
       yield* TestClock.setTime(now)
