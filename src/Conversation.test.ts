@@ -840,6 +840,8 @@ const overHelper = (
     readonly off?: boolean
     /** How long Whisper takes on each thing it's given, in seconds: at once unless said. */
     readonly transcribing?: number
+    /** With `tell`, it says a notice in the same words instead, like a failure, which nothing else said over it is for. */
+    readonly tell?: boolean
   } = {},
 ) =>
   Effect.gen(function* () {
@@ -971,7 +973,15 @@ const overHelper = (
       replied: Effect.void,
       saying: () => Effect.void,
       withholds: () => Effect.succeed(false),
-      ...(options.off === true ? { off: Effect.sync(() => void offs++) } : {}),
+      // In the timeline too, so what's done before it is known.
+      ...(options.off === true
+        ? {
+            off: Effect.sync(() => {
+              offs++
+              timeline.push({ type: "off", at: (now() - (first ?? now())) / 1000 })
+            }),
+          }
+        : {}),
     }).pipe(Effect.provide(context))
     // Lets the helper, the microphone and the fibers catch up on what the test did, since the clock only moves when told to.
     const flush = Effect.promise(async () => {
@@ -1010,7 +1020,9 @@ const overHelper = (
         ? made.ask({ audio: "/tmp/question.wav", spoken, answer: respond })
         : options.answer === true
           ? made.answer({ audio: "/tmp/answer.wav", spoken, followUp: respond })
-          : made.converse({ ...long, spoken }),
+          : options.tell === true
+            ? Effect.as(made.tell({ audio: "/tmp/notice.wav", spoken }), false)
+            : made.converse({ ...long, spoken }),
     )
     yield* flush
     yield* flush
@@ -1545,7 +1557,8 @@ describe("Over its first seconds, while yapd's own voice can still get into the 
       }),
     )
     expect(result).toEqual({
-      commands: ["play", "volume", "stop", "play", "volume", "stop", "play", "volume", "stop", "play"],
+      // Only "Mute." stops it, at once.
+      commands: ["play", "volume", "stop", "play", "volume", "stop", "play", "volume", "stop", "play", "stop"],
       transcribed: ["", "", "", "", "Mute."],
       responded: [],
       offs: [0, 1],
@@ -1597,6 +1610,23 @@ describe("Over its first seconds, while yapd's own voice can still get into the 
       }),
     )
     expect(result).toEqual({ offs: 1, worked: [] })
+  })
+
+  test("over a notice, what he says ducks it until it's heard out, and 'Mute.' stops it before yapd is turned off", async () => {
+    const over = (said: string) =>
+      overHelperScoped(
+        Effect.gen(function* () {
+          const helper = yield* overHelper([[0.95, said]], { off: true, tell: true })
+          yield* helper.wait(4)
+          yield* helper.talk(0.95, 10)
+          yield* helper.quiet
+          yield* helper.wait(0.5)
+          return { timeline: helper.timeline.map(({ type, value }) => (value === undefined ? type : `${type} ${value}`)), offs: helper.offs() }
+        }),
+      )
+    expect(await over("Mute.")).toEqual({ timeline: ["play", "volume 0.25", "stop", "off"], offs: 1 })
+    // Anything else plays on as it was, at full volume once he's done.
+    expect(await over("What time is it?")).toEqual({ timeline: ["play", "volume 0.25", "volume 1"], offs: 0 })
   })
 
   /** What's said as a line ends, `at` seconds into its `duration`, `frames` long, and what came of it. */

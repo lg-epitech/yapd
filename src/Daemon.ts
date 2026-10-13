@@ -1810,8 +1810,9 @@ export const make = (
         return
       }
       if (question === undefined) {
-        // Nothing else he'd say over it has anywhere to go, so it plays through all he says but "Mute.", which it listens for a moment
-        // after it too: heard as soon as it's said to the end, so a dictation then neither puts it back nor finds it missed.
+        // Nothing else he'd say over it has anywhere to go, so it plays through all he says, only ducked while he talks, but "Mute.",
+        // which it listens for a moment after it too: heard as soon as it's said to the end, so a dictation then neither puts it back
+        // nor finds it missed.
         const heard = Effect.zipRight(said.notice.heard ?? Effect.void, dealtWith).pipe(Effect.uninterruptible)
         return yield* conversation.tell({ audio: played, spoken, saying, confirmed, through: heard })
       }
