@@ -99,10 +99,15 @@ export interface Recent {
   readonly head?: Head
 }
 
-/** The thread a subagent is part of, by its key and title. */
+/** The thread a subagent is part of, by its key and title, and whether it's muted. */
 export interface Head {
   readonly key: string
   readonly title: string
+  /**
+   * Whether that thread is muted, which mutes the subagent too, whatever its
+   * own mute: taking the subagent's own off leaves it muted.
+   */
+  readonly muted: boolean
 }
 
 /** A card as `/state` points at it. */

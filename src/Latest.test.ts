@@ -247,7 +247,7 @@ describe("Latest", () => {
     expect(result.found).toBe(false)
   })
 
-  test("a thread's subagents read to him take one row, the newest, by the thread they're part of, kept quiet when it's muted; those kept to yapd take none, though a muted thread keeps its row", async () => {
+  test("a thread's subagents read to him take one row, the newest, by the thread they're part of, kept quiet when it's muted, which its head says apart from its own mute; those kept to yapd take none, though a muted thread keeps its row", async () => {
     const result = await run(
       Effect.gen(function* () {
         const of = { lineage: { parentThreadId: "t-jarvis", relationshipToParent: "subagent" } }
@@ -271,10 +271,17 @@ describe("Latest", () => {
         yield* TestClock.adjust("250 millis")
         yield* flush
         const rows = (yield* latest.current).map(({ key, title, muted, subagents, head, replayable }) => ({ key, title, muted, subagents, head, replayable }))
+        const mutedNow = Effect.map(latest.current, (rows) => rows.map(({ key, muted, head }) => [key, muted, head?.muted]))
+        // Muted on its own, its thread isn't; then with its thread, its own mute taken off.
+        yield* mutes.mute({ key: "t3:Rosie:t-review2" })
+        yield* TestClock.adjust("250 millis")
+        yield* flush
+        const own = yield* mutedNow
+        yield* mutes.unmute("t3:Rosie:t-review2")
         yield* mutes.mute({ key: "t3:Rosie:t-jarvis" })
         yield* TestClock.adjust("250 millis")
         yield* flush
-        return { rows, muted: (yield* latest.current).map(({ key, muted }) => [key, muted]) }
+        return { rows, own, muted: yield* mutedNow }
       }),
     )
     expect(result.rows).toEqual([
@@ -286,14 +293,20 @@ describe("Latest", () => {
         title: "Sol review: second pass",
         muted: false,
         subagents: true,
-        head: { key: "t3:Rosie:t-jarvis", title: "Reimagine Yapd as a Jarvis Companion" },
+        head: { key: "t3:Rosie:t-jarvis", title: "Reimagine Yapd as a Jarvis Companion", muted: false },
         replayable: false,
       },
     ])
+    expect(result.own).toEqual([
+      ["t3:Rosie:t-jarvis", false, undefined],
+      ["t3:Rosie:t-tezos", false, undefined],
+      ["t3:Rosie:t-review2", true, false],
+    ])
+    // Muted with its thread, which taking its own mute off would leave.
     expect(result.muted).toEqual([
-      ["t3:Rosie:t-jarvis", true],
-      ["t3:Rosie:t-tezos", false],
-      ["t3:Rosie:t-review2", true],
+      ["t3:Rosie:t-jarvis", true, undefined],
+      ["t3:Rosie:t-tezos", false, undefined],
+      ["t3:Rosie:t-review2", true, true],
     ])
   })
 
@@ -866,6 +879,40 @@ describe("Latest", () => {
         ],
       })
       expect(result.unchanged).toBe(true)
+    })
+
+    test("tells of a subagent the thread it's part of, listed or not, and whether that thread is muted now, apart from its own mute", async () => {
+      const result = await run(
+        Effect.gen(function* () {
+          const of = { lineage: { parentThreadId: "t-jarvis", relationshipToParent: "subagent" } }
+          const { journal, mutes, look, settle } = yield* detailsOf(
+            {
+              Rosie: [
+                thread("t-jarvis", "Reimagine Yapd as a Jarvis Companion"),
+                thread("t-review", "Sol review: release blockers", of),
+                thread("t-held", "Sol review: first pass", of),
+              ],
+            },
+            [{ machine: "Rosie", threads: [] }],
+          )
+          yield* mutes.read({ key: "t3:Rosie:t-jarvis" }, true)
+          yield* journal.write({ at: 1, kind: "update", machine: "Rosie", thread: "t-review", said: "For the Jarvis work: one blocker.", detail: { session: "codex:s-review", subagent: true, head: "t-jarvis" } })
+          yield* mutes.mute({ key: "t3:Rosie:t-review" })
+          yield* settle
+          const own = { listed: (yield* look("t3:Rosie:t-review")).shown, kept: (yield* look("t3:Rosie:t-held")).shown }
+          yield* mutes.unmute("t3:Rosie:t-review")
+          yield* mutes.mute({ key: "t3:Rosie:t-jarvis" })
+          yield* settle
+          return { own, head: { listed: (yield* look("t3:Rosie:t-review")).shown, kept: (yield* look("t3:Rosie:t-held")).shown } }
+        }),
+      )
+      const told = (shown: Server.Details | undefined) => shown && { muted: shown.muted, subagents: shown.subagents, head: shown.head }
+      const jarvis = { key: "t3:Rosie:t-jarvis", title: "Reimagine Yapd as a Jarvis Companion" }
+      expect(told(result.own.listed)).toEqual({ muted: true, subagents: true, head: { ...jarvis, muted: false } })
+      expect(told(result.own.kept)).toEqual({ muted: false, subagents: true, head: { ...jarvis, muted: false } })
+      // Muted with the thread it's part of, which taking its own mute off would leave.
+      expect(told(result.head.listed)).toEqual({ muted: true, subagents: true, head: { ...jarvis, muted: true } })
+      expect(told(result.head.kept)).toEqual({ muted: true, subagents: true, head: { ...jarvis, muted: true } })
     })
   })
 

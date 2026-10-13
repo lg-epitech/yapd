@@ -3,13 +3,14 @@ import AppKit
 // yapd's icon in the menu bar, and its menu. The icon shows what yapd is
 // doing as it changes. The menu is built from yapd's state each time it
 // opens, as Menu has it: whether it's on, its mode, the threads waiting on
-// him, what he hasn't heard, the last card, and the threads with the latest
-// updates, each opening a panel beside it on hover, as CodexBar's do, with
-// what the thread is doing and the latest told of it, to hear it again, mute
-// it or open its pull request. While the menu is open, what changes is
-// changed in place, and what comes or goes waits for the next time it opens,
-// so nothing moves under his pointer, unless yapd stops or starts, when it's
-// built again, as there are no rows on one side to move.
+// him, what he hasn't heard, to be caught up on or cleared, the last card, and
+// the threads with the latest updates, each opening a panel beside it on
+// hover, as CodexBar's do, with what the thread is doing and the latest told
+// of it, to hear it again, mute it, have its subagents read or open its pull
+// request. While the menu is open, what changes is changed in place, and what
+// comes or goes waits for the next time it opens, so nothing moves under his
+// pointer, unless yapd stops or starts, when it's built again, as there are no
+// rows on one side to move.
 
 @MainActor
 final class MenuBar: NSObject, NSMenuDelegate {
@@ -289,11 +290,13 @@ final class MenuBar: NSObject, NSMenuDelegate {
     case .talk(let mode): yapd.talk(in: mode)
     case .whoNeedsMe: yapd.whoNeedsMe()
     case .catchMeUp: yapd.catchMeUp()
+    case .clearCatchUp: yapd.clearCatchUp()
     case .showLast: yapd.showLast()
     case .replay(let update): yapd.replay(update)
     case .hear(let row): yapd.replay(row)
     case .mute(let row, let forAnHour): yapd.mute(row, forAnHour: forAnHour)
     case .unmute(let row): yapd.unmute(row)
+    case .subagents(let row, let on): yapd.subagents(row, on: on)
     // Only ever an https page, as a card's links are.
     case .open(let address): if opens(address) { NSWorkspace.shared.open(address) }
     case .quit: NSApplication.shared.terminate(nil)

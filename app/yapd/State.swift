@@ -56,6 +56,31 @@ struct Status: Decodable {
       }
     }
 
+    /// The thread a subagent's row is part of, which its subagents being read goes by, and whether it's muted.
+    struct Head: Decodable, Equatable {
+      /// What its subagents are read by, as a name, never taken apart.
+      let key: String
+      let title: String
+      /// Whether that thread is muted, which mutes the subagent too, whatever its own mute. Not from a yapd from before it, or
+      /// what the app can't read of it.
+      let muted: Bool
+
+      private enum CodingKeys: String, CodingKey { case key, title, muted }
+
+      init(key: String, title: String, muted: Bool = false) {
+        self.key = key
+        self.title = title
+        self.muted = muted
+      }
+
+      init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        key = try container.decode(String.self, forKey: .key)
+        title = try container.decode(String.self, forKey: .title)
+        muted = (try? container.decodeIfPresent(Bool.self, forKey: .muted)) ?? false
+      }
+    }
+
     /// What it's muted and heard again by, as a name, never taken apart.
     let key: String
     let machine: String
@@ -77,17 +102,23 @@ struct Status: Decodable {
     let replayable: Bool
     /// How many of its updates and notices he hasn't heard, muted or not. 0 from a yapd from before it.
     let unheard: Int
+    /// Whether its subagents are read to him, or for a subagent's row, those of the thread it's part of. None for a session's row,
+    /// whose subagents can't be, and from a yapd from before it.
+    let subagents: Bool?
+    /// The thread it's part of, only for a subagent's row.
+    let head: Head?
 
     var id: String { key }
 
     /// When the agent's turn ended, unless yapd sent a time the app can't read.
     var ended: Date? { Status.date(at) }
 
-    private enum CodingKeys: String, CodingKey { case key, machine, thread, title, project, text, at, muted, until, waiting, replayable, unheard }
+    private enum CodingKeys: String, CodingKey { case key, machine, thread, title, project, text, at, muted, until, waiting, replayable, unheard, subagents, head }
 
     init(
       key: String, machine: String, thread: String? = nil, title: String, project: Project? = nil, text: String, at: String,
-      muted: Bool = false, until: String? = nil, waiting: Bool = false, replayable: Bool = true, unheard: Int = 0
+      muted: Bool = false, until: String? = nil, waiting: Bool = false, replayable: Bool = true, unheard: Int = 0,
+      subagents: Bool? = nil, head: Head? = nil
     ) {
       self.key = key
       self.machine = machine
@@ -101,6 +132,8 @@ struct Status: Decodable {
       self.waiting = waiting
       self.replayable = replayable
       self.unheard = max(0, unheard)
+      self.subagents = subagents
+      self.head = head
     }
 
     init(from decoder: Decoder) throws {
@@ -117,6 +150,10 @@ struct Status: Decodable {
       waiting = (try? container.decodeIfPresent(Bool.self, forKey: .waiting)) ?? false
       replayable = (try? container.decodeIfPresent(Bool.self, forKey: .replayable)) ?? true
       unheard = max(0, (try? container.decodeIfPresent(Int.self, forKey: .unheard)) ?? 0)
+      // What the app can't read of either leaves the row as one from a yapd from before them, with no subagents to read: a
+      // subagent's too, whose thread can't be read, rather than offer its own, which yapd turns away.
+      head = try? container.decodeIfPresent(Head.self, forKey: .head)
+      subagents = head == nil && container.contains(.head) ? nil : try? container.decodeIfPresent(Bool.self, forKey: .subagents)
     }
   }
 

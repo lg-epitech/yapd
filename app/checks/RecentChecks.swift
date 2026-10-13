@@ -1,7 +1,8 @@
 import Foundation
 
 /// The menu reads the threads with the latest updates from any yapd, old or new, draws each icon it's sent, or the monogram it
-/// carries, in T3 Code's colours as yapd makes them, tells how long ago each ended, and mutes and replays a thread by its key.
+/// carries, in T3 Code's colours as yapd makes them, tells how long ago each ended, mutes and replays a thread by its key, and
+/// has its subagents read, a subagent's by the key of the thread it's part of, which it reads whether it's muted.
 @MainActor func checkRecent() {
   let decoded = { (json: String) in try? JSONDecoder().decode(Status.self, from: Data(json.utf8)) }
   let row = """
@@ -38,6 +39,23 @@ import Foundation
   let session = odd?.recent?.first
   check(session?.thread == nil && session?.project == Status.Recent.Project(name: "Tezos 2"), "keeps a session row whose icon can't be read, with none")
   check(session?.ended == Date(timeIntervalSince1970: 1_790_949_700), "reads a time without fractions of a second")
+
+  // Whether a thread's subagents are read, and the thread a subagent's row is part of; none of either from a yapd from before them,
+  // nor on a session's row, and what can't be read of them as none.
+  let fields = { (fields: String) in
+    decoded(#"{"on": true, "activity": "idle", "recent": [{"key": "t3:Rosie:7", "machine": "Rosie", "thread": "7", "title": "Sol review: release blockers", "text": "Done.", "at": "2026-10-02T14:01:40Z"\#(fields)}]}"#)?.recent?.first
+  }
+  let part = fields(#", "subagents": true, "head": {"key": "t3:Rosie:850299f8", "title": "Migrate the Tezos integration"}"#)
+  check(part?.subagents == true && part?.head == Status.Recent.Head(key: "t3:Rosie:850299f8", title: "Migrate the Tezos integration"), "reads a subagent's row with the thread it's part of, not \(String(describing: part?.head))")
+  check(fields(#", "subagents": false"#)?.subagents == false && fields(#", "subagents": false"#)?.head == nil, "reads a thread whose subagents aren't read")
+  check(first?.subagents == nil && first?.head == nil && session?.subagents == nil, "reads neither from a yapd from before them, nor of a session")
+  check(fields(#", "subagents": "yes", "head": {"key": 7}"#).map { $0.subagents == nil && $0.head == nil } == true, "reads a row whose subagents and head it can't read as one with neither")
+  check(fields(#", "subagents": true, "head": "t3:Rosie:850299f8""#).map { $0.subagents == nil && $0.head == nil } == true, "offers nothing to read for a subagent whose thread it can't read, rather than its own")
+  // Whether the thread a subagent is part of is muted, which mutes it too; not from a yapd from before it, nor what can't be read.
+  let headMuted = { (muted: String) in fields(#", "muted": true, "subagents": true, "head": {"key": "t3:Rosie:850299f8", "title": "Migrate the Tezos integration"\#(muted)}"#)?.head }
+  check(headMuted(#", "muted": true"#) == Status.Recent.Head(key: "t3:Rosie:850299f8", title: "Migrate the Tezos integration", muted: true), "reads that a subagent's thread is muted, not \(String(describing: headMuted(#", "muted": true"#)))")
+  check(headMuted(#", "muted": false"#)?.muted == false && part?.head?.muted == false, "reads that it isn't, and takes it as not from a yapd from before it")
+  check(headMuted(#", "muted": "yes""#) == Status.Recent.Head(key: "t3:Rosie:850299f8", title: "Migrate the Tezos integration"), "reads a thread's mute it can't read as none, keeping the thread")
 
   // Whether a row can be heard again, as yapd says, and a row it can't still listed and muted as before.
   let says = { (replayable: String) in
@@ -134,6 +152,20 @@ import Foundation
   let replaying = Replaying(first)
   check(replaying.method == "POST" && replaying.url(at: api)?.absoluteString == "http://127.0.0.1:4747/threads/t3%3ARosie%3A850299f8/replay", "hears a thread again by POST to its key")
   check(Muting(first, on: true).url(at: URL(string: "http://127.0.0.1:4848")!)?.absoluteString == "http://127.0.0.1:4848/threads/t3%3ARosie%3A850299f8/mute", "asks yapd on its own port")
+
+  // A thread's subagents read by PUT to its key, and kept to yapd again by DELETE; a subagent's by its thread's key, never its own,
+  // and its mute by its own.
+  let reading = Subagents(first, on: true)
+  check(reading.method == "PUT" && reading.body == nil && reading.url(at: api)?.absoluteString == "http://127.0.0.1:4747/threads/t3%3ARosie%3A850299f8/subagents", "reads a thread's subagents by PUT to its key, not \(reading.method) \(String(describing: reading.url(at: api)))")
+  let keeping = Subagents(first, on: false)
+  check(keeping.method == "DELETE" && keeping.body == nil && keeping.url(at: api) == reading.url(at: api), "keeps them to yapd again by DELETE to the same address")
+  if let part {
+    check(Subagents(part, on: false).url(at: api)?.absoluteString == "http://127.0.0.1:4747/threads/t3%3ARosie%3A850299f8/subagents", "stops reading a subagent's by the key of the thread it's part of")
+    check(Subagents(part, on: true).method == "PUT" && Subagents(part, on: true).url(at: api) == reading.url(at: api), "reads them again by the same address")
+    check(Muting(part, on: true).url(at: api)?.absoluteString == "http://127.0.0.1:4747/threads/t3%3ARosie%3A7/mute" && Muting.forAnHour(part, from: now).url(at: api) == Muting(part, on: true).url(at: api), "mutes a subagent by its own key, never its thread's")
+  } else {
+    check(false, "reads a subagent's row")
+  }
 
   check(imageAddress("/projects/Rosie/5c1e/icon", at: api)?.absoluteString == "http://127.0.0.1:4747/projects/Rosie/5c1e/icon", "fetches a project's image from yapd")
   for path in ["//evil.example/icon", "https://evil.example/icon", "projects/Rosie/5c1e/icon", "/projects/x/icon?token=1", "/projects/x/icon#a", "/\\evil.example/icon", "file:///etc/passwd"] {

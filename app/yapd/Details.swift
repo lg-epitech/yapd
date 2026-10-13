@@ -172,6 +172,8 @@ struct Glance: Equatable {
   let title: String
   /// Its project and its machine.
   let place: String
+  /// For a subagent's row, the thread it's part of, like "Subagent of Reimagine Yapd as a Jarvis Companion". None for any other.
+  let head: String?
   /// What yapd says it's doing, else, while it waits on him, what the row says. None while yapd can't see it in T3 Code, and for
   /// a session.
   let doing: Doing?
@@ -193,6 +195,7 @@ struct Glance: Equatable {
   init(_ row: Status.Recent, details: Details?, now: Date, zone: TimeZone = .current, locale: Locale = .current) {
     title = row.title
     place = [row.project?.name, row.machine].compactMap { $0 }.joined(separator: " · ")
+    head = row.head.map { "Subagent of \($0.title)" }
     // Until yapd tells more, or when it can't, the row still says whether it waits on him.
     doing =
       details.flatMap { details in details.state.map { Glance.doing($0, since: details.since.flatMap(Status.date), now: now) } }
