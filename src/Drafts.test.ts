@@ -308,6 +308,8 @@ describe("Drafts", () => {
     expect(await asked({ settled: "named", evidence: "Apple", project: "No project", machine: "" })).toEqual({ started: [], spoken: ["Which project is the glucose question for?"] })
     // Outside and yet for a project, the writer contradicted itself, so it's asked about rather than started in either.
     expect(await asked({ evidence: "the Watch", project: "yapd", machine: "" })).toEqual({ started: [], spoken: ["Which project is the glucose question for?"] })
+    // His words that put it outside, given for it, are no project, so it starts all the same.
+    expect((await asked({ evidence: "in scratch", machine: "", spoken: "Looking into it, on Sol." })).started.map(({ request }) => request.project)).toEqual(["/t3/scratch"])
     // A machine that couldn't say what it can start says why, as there's nothing for him to answer.
     expect(await asked({ machine: "rig" }, true)).toEqual({ started: [], spoken: ["About the glucose question: I can't reach rig."] })
   })

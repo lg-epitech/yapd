@@ -393,8 +393,9 @@ export const make = (options: {
           case "start": {
             // Outside his projects by the writer's word, it goes where only that can start, checked by the catalog's mark alone.
             if (decision.settled === "outside") {
-              // Outside his projects and yet for one, the writer contradicted itself: that's no more settled than unclear.
-              if (decision.project.trim() !== "" || decision.evidence.trim() !== "") {
+              // Outside his projects and yet for one, the writer contradicted itself: that's no more settled than unclear. Its words for
+              // it alone, like "in scratch", say nothing against it.
+              if (decision.project.trim() !== "") {
                 yield* Effect.logInfo(`Asking, since it was outside the projects and yet for "${decision.project}" by "${decision.evidence}". ${decision.why}`)
                 return asking(`Which project is ${about || "that"} for?`)
               }
