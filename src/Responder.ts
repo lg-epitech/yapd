@@ -68,7 +68,7 @@ Reply with only a JSON object with the keys "intent", "spoken" and "message".
 - Muting or unmuting this thread or any other, like "mute this", "silence it for now" or "unmute the Tezos one", or asking what's muted, is for you, never the agent: never "send". It's "answer", telling them in a few words to ask you that with their shortcut. Taking back a mute or unmute you just told them of, like "scratch that" or "undo that" right after you said you muted it, is never "send" either: it's "answer", asking them in a few words to say it again.
 - How you talk to them is for you, never the agent: focus, quiet, goodnight, being back, shorter updates or everything in full, like "let me focus till three", "I'm off to bed" or "stop giving me the short version". Never "send". It's "answer", telling them in a few words to ask you that with their shortcut.
 - Catching up is for you, never the agent: hearing what they missed or haven't heard, or what came in while they were away or had you off, however they put it, like "what did I miss?", "catch me up" or "anything else from rig?". Never "send". It's "answer", telling them in a few words to ask you that with their shortcut.
-- What they want you to keep in mind, or forget, is for you, never the agent: a fact, like "remember that rig's T3 Code runs the nightly", or steps for when they say a name, like "when I say review it, have Sol review it until it's clean". Never "send". It's "answer", telling them in a few words to ask you that with their shortcut.
+- What they want you to keep in mind, or forget, is for you, never the agent: a fact, like "remember that rig's T3 Code runs the nightly", or steps for when they say a name, like "when I say review it, have Sol review it until it's clean". Never "send". It's "answer", telling them in a few words to ask you that with their shortcut. A bare "forget it" or "never mind" isn't that: it's "dismiss".
 
 "spoken": what you say back. They're listening, not reading.
 ${aloud}
@@ -153,6 +153,9 @@ export const enough: ReadonlySet<string> = new Set([
   "stop", "quiet", "be quiet", "shut up", "silence", "mute", "skip", "skip it", "next", "enough", "that's enough", "never mind",
 ])
 
+/** Calling it off, said on its own to an update: hearing enough of it, never something for yapd to forget, which is asked with the shortcut. */
+const callingOff: ReadonlySet<string> = new Set(["forget it", "forget about it"])
+
 /** What Whisper writes for near-silence, which nobody said. */
 export const hallucinated: ReadonlySet<string> = new Set(["you", "thank you", "bye", "see you again", "kid", "thanks for watching"])
 
@@ -205,7 +208,7 @@ const typed = (heard: string) => {
 export const quick = (interruption: Interruption, onIt: Effect.Effect<string>): Effect.Effect<Reply | undefined> => {
   const said = gist(interruption.heard)
   if (said === "") return Effect.succeed(undefined)
-  if (enough.has(said)) return Effect.succeed({ intent: "dismiss", spoken: "", message: "" })
+  if (enough.has(said) || callingOff.has(said)) return Effect.succeed({ intent: "dismiss", spoken: "", message: "" })
   // The rest of an update said in its headline. Begun while yapd's own voice could still get into the microphone, "more" may be its own word: the model weighs that.
   const more = interruption.more?.trim() ?? ""
   if (more !== "" && interruption.echo === undefined && morePlease.has(said)) return Effect.succeed({ intent: "answer", spoken: more, message: "" })

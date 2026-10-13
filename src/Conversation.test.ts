@@ -2403,6 +2403,19 @@ describe("more, and how yapd talks, over an update", () => {
     for (const heard of ["What did I miss?", "Catch me up.", "Anything else from rig?"]) expect(quickly(over(heard, "Retries back off now."))).toBeUndefined()
   })
 
+  test("a bare forget it or never mind over an update is hearing enough, without the model, even when the agent asked something: never asked to use the shortcut", () => {
+    const dismissed: Responder.Reply = { intent: "dismiss", spoken: "", message: "" }
+    for (const heard of ["Forget it.", "Forget about it.", "Never mind."]) {
+      expect(quickly(over(heard))).toEqual(dismissed)
+      expect(quickly({ ...over(heard), needsYou: true, turn: { prompt: Option.none(), message: "The PR is up. Should I merge it?" } })).toEqual(dismissed)
+    }
+    // Forgetting something in particular is for yapd, which the model is told to have him ask with the shortcut.
+    expect(quickly(over("Forget that one about rig."))).toBeUndefined()
+    expect(Responder.prompt(over("Forget that one about rig."), Option.none())).toContain(
+      `telling them in a few words to ask you that with their shortcut. A bare "forget it" or "never mind" isn't that: it's "dismiss".`,
+    )
+  })
+
   test("a routine's name said over an update is never for its agent as the bare words: the model is told his routines, and to have him say one with the shortcut", async () => {
     const result = await scoped(
       Effect.gen(function* () {
