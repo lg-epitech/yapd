@@ -112,6 +112,12 @@ Updates that only say how running work is going, like another review round, are 
 
 yapd keeps every update it sums up, and knows which you heard to the end. Ask it to catch you up, however you put it, "catch me up", "what did I miss on Distribox?" or "anything from rig since lunch?", and the model decides that's what you want and what about; yapd first reads you what needs you as it was kept, a failure or an agent's question with its options, and the answer to what you asked a thread, then briefs you on the rest in about ninety words and eight threads at most. "More" gets the threads it left out, or the detail of the ones it told you of. What it told you counts as heard only once you've heard it to the end. Muted threads are left out unless you ask about one. Nothing it does reaches an agent.
 
+## Reminders
+
+Ask yapd to remind you of something later, however you put it: "remind me at three to call the bank", "tell me when the Tezos one finishes", "let me know when the Mina one asks me something". It says what it kept, like "I'll remind you at 3:00 PM, sir: call the bank.", and tells you then, naming the time, so a reminder that came due while yapd was down or off still reads right; one due while yapd was off is kept for when you catch up rather than said. When a thread you're waiting on finishes, you hear that first, then its update, as one, whatever you muted. "At five, offer to tell the std fix to ship it" asks you then, "Shall I tell the std fix: ship it, sir?", and only your yes sends it. "What reminders do I have?", "cancel the bank reminder" and "scratch that" right after setting or cancelling one work too. yapd doesn't watch pull requests. Reminders need a [T3 Code token](#where-follow-ups-go) for anything about a thread.
+
+yapd also says when a provider's limit passes 95 percent of a window, once a window, and keeps 80 percent for the next digest.
+
 ## Dictating
 
 Press ctrl+option+cmd+space from any app and talk to yapd, then press it again to send, or Escape to drop it. A short rising sound says it's listening, a higher one that it's sent, a falling one that it's dropped. Take your time: pausing to think doesn't end it, only the shortcut does. What you said becomes [new work](#starting-new-work).
