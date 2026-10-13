@@ -1020,10 +1020,17 @@ export const make = (
         )
       : Effect.succeed(false)
 
-  /** An update that couldn't be got ready, so nothing of it was said or kept: its Stop told of nothing. */
+  /**
+   * An update that couldn't be got ready, so nothing of it was said or kept:
+   * its Stop told of nothing, and a turn said in its hook's place is let go
+   * of, so T3 Code's word for either, heard again, tries it again, said once
+   * all the same under its run's key.
+   */
   const unprepared = (finished: Finished) =>
     Effect.sync(() => {
       if (finished.stop !== undefined) finished.stop.skipped = "dropped"
+      const { fallback } = finished
+      if (fallback !== undefined && fallbacks.get(fallback.key) === fallback && !fallback.heard) fallbacks.delete(fallback.key)
     })
 
   const prepare = (finished: Finished) => {

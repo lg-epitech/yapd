@@ -8,7 +8,7 @@ import * as Notices from "./Notices.ts"
 import * as Persona from "./Persona.ts"
 import * as Store from "./Store.ts"
 import * as T3Actions from "./T3Actions.ts"
-import type * as Server from "./T3CodeServer.ts"
+import * as Server from "./T3CodeServer.ts"
 import * as T3Live from "./T3Live.ts"
 import * as Threads from "./Threads.ts"
 
@@ -89,6 +89,8 @@ const notices = (
     readonly dropping?: boolean
     /** The work yapd started, as the ledger has it. */
     readonly started?: ReadonlyArray<{ readonly at: number; readonly thread: string; readonly messageId: string | null }>
+    /** Whether reading a thread fails now, as when T3 Code fails a moment. */
+    readonly troubled?: (thread: string) => boolean
   },
 ) =>
   Effect.gen(function* () {
@@ -114,6 +116,7 @@ const notices = (
         api: (<A, I>(path: string, schema: Schema.Schema<A, I>) => {
           const id = decodeURIComponent(path.split("/").at(-2) ?? "")
           reads.push(`${machine} ${id}`)
+          if (given.troubled?.(id) === true) return Effect.fail(new Server.Trouble({ reason: "T3 Code is taking too long." }))
           const read = bounded[id] ?? {}
           const providerThreads = (read.sessions ?? []).map((nativeId) => ({ nativeThreadRef: { driver: "claudeAgent", nativeId, strength: "strong" } }))
           return Schema.decodeUnknown(schema)({
@@ -1194,6 +1197,52 @@ describe("Notices while yapd is off", () => {
       }),
     )
     expect(result).toEqual([{ key: "done:Rosie:run-glucose", message: "Apple hasn't shipped one.", answering: true }])
+  })
+
+  test("the first turn of work yapd started that ended while yapd restarted is looked into again, under its run's key, until what it tells is kept", async () => {
+    const glucose = thread("glucose", "glucose", { latestRunId: "run-glucose", latestRunCompletedAt: minutes(2) })
+    const bounded = {
+      glucose: {
+        runs: [{ id: "run-glucose", status: "completed", ordinal: 1, startedAt: minutes(8), userMessageId: "yapd:glucose:0:m" }],
+        messages: [
+          { id: "yapd:glucose:0:m", runId: "run-glucose", role: "user", text: "Find out.", createdAt: minutes(8) },
+          { id: "a-glucose", runId: "run-glucose", role: "assistant", text: "Apple hasn't shipped one.", createdAt: minutes(2) },
+        ],
+      },
+    }
+    const result = await run(
+      Effect.gen(function* () {
+        let troubled = false
+        const made = yield* notices({
+          view: [glucose],
+          bounded,
+          started: [{ at: now - 10 * 60_000, thread: "glucose", messageId: "yapd:glucose:0:m" }],
+          troubled: () => troubled,
+        })
+        const told = () => made.finished.map(({ key }) => key)
+        // Found to be its first turn, then T3 Code fails a moment as what it said is read.
+        yield* made.reconcileOn("Rosie")
+        troubled = true
+        yield* made.wait(13)
+        troubled = false
+        for (let i = 0; i < 6; i++) yield* made.wait(5)
+        const read = told()
+        // Handed on, but nothing of it was kept, as when it couldn't be got ready: it's looked into again, under the same key.
+        for (let i = 0; i < 18; i++) yield* made.wait(5)
+        const again = told()
+        // Once it's kept, it's done with, even when T3 Code catches up again.
+        yield* made.journal.write({ at: now, kind: "update", machine: "Rosie", thread: "glucose", project: "", said: "Apple hasn't shipped one." })
+        for (let i = 0; i < 18; i++) yield* made.wait(5)
+        yield* made.reconcileOn("Rosie")
+        for (let i = 0; i < 6; i++) yield* made.wait(5)
+        return { read, again, kept: told() }
+      }),
+    )
+    expect(result).toEqual({
+      read: ["done:Rosie:run-glucose"],
+      again: ["done:Rosie:run-glucose", "done:Rosie:run-glucose"],
+      kept: ["done:Rosie:run-glucose", "done:Rosie:run-glucose"],
+    })
   })
 
   test("a question asked while yapd is off isn't worded then, and is asked once it's on", async () => {
