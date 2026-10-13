@@ -12094,4 +12094,38 @@ describe("Assistant tidying", () => {
     expect(await narrowing("medium")).toEqual({ said: "I'll leave that one, sir.", sent: [] })
     expect(await narrowing("low")).toEqual({ said: "I couldn't tell which one you meant, sir.", sent: [] })
   })
+
+  test("a question about tidying he never hears says what it would have asked, never sending anything again, when something new takes its place", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(
+          (situation) =>
+            situation.utterance.heard.startsWith("Archive the Tezos migration")
+              ? Brain.decision({ act: "tidy", how: "archive", target: handle(situation, tezos), sure: "high" })
+              : situation.utterance.heard.startsWith("Archive")
+                ? Brain.decision({ act: "tidy", how: "archive", target: tezosThreads.map((one) => handle(situation, one)).join(", "), sure: "high" })
+                : minaStatus(situation),
+          undefined,
+          { others: tezosThreads, waiting: true },
+        )
+        yield* made.dictate("Archive all the finished Tezos threads.")
+        // He pressed again before what it asked was said.
+        yield* made.dictate("What's the Mina one doing?")
+        // A busy one, which he's told archiving it stops.
+        yield* made.dictate("Archive the Tezos migration.")
+        yield* made.dictate("What's the Mina one doing?")
+        return { spoken: made.spoken(), sent: tidied(made.dispatched) }
+      }),
+    )
+    const status = "The Mina SSV2 tickets are filed, sir: four bugs, and fee rounding is the worst."
+    expect(result.spoken).toEqual([
+      "That's four threads, sir: Tezos importer, Tezos fees, Tezos wallets and Tezos docs. Archive them all?",
+      "That's four threads, sir: Tezos importer, Tezos fees, Tezos wallets and Tezos docs. I didn't ask whether to archive them, since you'd moved on.",
+      status,
+      "Migrate Tezos Integration is still working, sir, and archiving it stops what it's doing. Archive it anyway?",
+      "Migrate Tezos Integration is still working, sir, and archiving it stops what it's doing. I didn't ask whether to archive Migrate Tezos Integration, since you'd moved on.",
+      status,
+    ])
+    expect(result.sent).toEqual([])
+  })
 })

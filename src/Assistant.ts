@@ -445,9 +445,17 @@ const onceBack = "I'll ask you again once I can."
 /** What's said of something left rather than asked about, since a question is open already. */
 const unasked = (about: string, said: Lines) => `I left ${about || "that"} for now, since I'd have to ask you something about it${addressed(said)}.`
 
-/** What a question left unasked would have asked, said after the news it follows, which named what it's about already. */
-const unaskedAfter = (open: Pick<Open, "kind" | "about">) =>
-  open.kind === "resend" || open.kind === "confirm" ? "I didn't ask about sending it again" : `I didn't ask whether to ${open.about}`
+/**
+ * What a question left unasked would have asked, said after the news it
+ * follows, which named what it's about already: tidying, the threads it
+ * counted as "them", and any other yes or no to the same words, sending them again.
+ */
+const unaskedAfter = (open: Pick<Open, "kind" | "about" | "decision" | "candidates">) =>
+  open.decision.act === "tidy"
+    ? `I didn't ask whether to ${open.candidates.length > 1 ? `${open.decision.how} them` : open.about}`
+    : open.kind === "resend" || open.kind === "confirm"
+      ? "I didn't ask about sending it again"
+      : `I didn't ask whether to ${open.about}`
 
 /** The thread a yes or no question, or a thread's own, is about, which it names, so what's said once it's answered needn't name it again. */
 const askedAbout = (open: Pick<Open, "kind" | "candidates">) =>
