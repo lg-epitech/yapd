@@ -11878,11 +11878,50 @@ describe("Assistant memories", () => {
       kept: [],
       sent: [],
     })
+    // An if in its name, as the model may split it, which saying "ship" would leave out.
+    expect(await saving("When I say ship, if the checks are green, merge the PR and deploy.", "ship, if the checks are green: merge the PR and deploy")).toEqual({
+      said: "Keep the name short, sir: when I say ship, then the steps.",
+      kept: [],
+      sent: [],
+    })
     // A fact is kept as his words wherever they are in what he said, with the rest of it done after.
     expect(await saving("Remember that rig runs the nightly, and tell the Mina one to rebase.", "rig runs the nightly", "fact")).toMatchObject({
       kept: ["rig runs the nightly"],
       sent: ["Rebase."],
     })
+  })
+
+  test("a routine's steps go only when he says its whole name, whichever the model picks, said or in his preferences", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        let picked = ""
+        const made = yield* assistant(
+          (situation) => {
+            const { heard } = situation.utterance
+            if (heard === "When I say ship, merge the PR, then deploy.") return Brain.decision({ act: "remember", how: "routine", text: "ship: merge the PR, then deploy" })
+            const routine = Brain.remembered(situation).find(({ name }) => name === picked)
+            return Brain.decision({ act: "send", text: routine?.handle ?? "", target: handle(situation, tezos), how: "now" })
+          },
+          undefined,
+          { memories: true, routines: [{ name: "ship deploy", steps: "Deploy straight to production." }] },
+        )
+        const sent = () => made.dispatched.filter(({ type }) => type === "message.dispatch").map(({ text }) => text)
+        picked = "ship deploy"
+        yield* made.dictate("Ship.")
+        const written = { said: made.spoken().at(-1), sent: sent() }
+        yield* made.dictate("When I say ship, merge the PR, then deploy.")
+        yield* made.memories!.add({ at: yield* TestClock.currentTimeMillis, kind: "routine", name: "review it all", text: "Review every PR.", heard: "When I say review it all, review every PR." })
+        picked = "review it all"
+        yield* made.dictate("Review it.")
+        const kept = { said: made.spoken().at(-1), sent: sent() }
+        picked = "ship"
+        yield* made.dictate("Ship.")
+        return { written, kept, plain: { said: made.spoken().at(-1), sent: sent() } }
+      }),
+    )
+    expect(result.written).toEqual({ said: "I couldn't tell which one you meant, sir.", sent: [] })
+    expect(result.kept).toEqual({ said: "I couldn't tell which one you meant, sir.", sent: [] })
+    expect(result.plain).toEqual({ said: "On it, sir: Migrate Tezos Integration.", sent: ["merge the PR, then deploy"] })
   })
 
   test("a secret isn't remembered, nor kept in the journal, whatever else would turn it down", async () => {

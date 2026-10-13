@@ -1872,26 +1872,37 @@ export const rememberedBy = (handle: string, situation: Pick<Situation, "memorie
 const routineHandle = (text: string) => /^p\d+$/.test(text.trim())
 
 /**
+ * Whether he said a routine's whole name, as words compare, in all he said,
+ * the rest of a request too: whichever handle the model gave, the steps go
+ * only then, so one called "ship deploy" never goes for his "ship", whether
+ * said or in his preferences.
+ */
+const nameSaid = (name: string, utterance: Pick<Assistant.Utterance, "heard" | "whole">) => asSaid(name, utterance.whole ?? utterance.heard)
+
+/**
  * A message, or an offer, whose words the model gave as a routine's handle,
  * with the routine's steps in their place, exactly as they're kept, never as
- * the model would write them; none for a handle that's no routine. Anything
- * else is as it was.
+ * the model would write them; none for a handle that's no routine, or for one
+ * whose name he didn't say. Anything else is as it was.
  */
-const routining = (choice: Decision, situation: Pick<Situation, "memories">): Option.Option<Decision> =>
+const routining = (choice: Decision, situation: Pick<Situation, "memories" | "utterance">): Option.Option<Decision> =>
   (choice.act !== "send" && choice.act !== "offer") || !routineHandle(choice.text)
     ? Option.some(choice)
     : Option.map(
-        Option.filter(rememberedBy(choice.text, situation), ({ kind }) => kind === "routine"),
+        Option.filter(rememberedBy(choice.text, situation), ({ kind, name }) => kind === "routine" && name !== undefined && nameSaid(name, situation.utterance)),
         ({ text }) => ({ ...choice, text }),
       )
 
 /**
  * A decision with a routine's handle as its words read as the steps it stands
  * for, so it's compared as what it sends, like his saying a routine's name
- * again to "Again?" about those steps; one that's no routine is as it was,
- * which checking it turns down.
+ * again to "Again?" about those steps; one that's no routine, or whose name he
+ * didn't say, is as it was, which checking it turns down.
  */
-export const resolved = (choice: Decision, situation: Pick<Situation, "memories">): Decision => Option.getOrElse(routining(choice, situation), () => choice)
+export const resolved = (choice: Decision, situation: Pick<Situation, "memories" | "utterance">): Decision => Option.getOrElse(routining(choice, situation), () => choice)
+
+/** The most words, as words compare, a routine kept by voice is called. */
+const namedIn = 3
 
 /** A routine as the model gives it to be kept, "name: steps": none without both. */
 export const routineOf = (text: string) => {
@@ -1991,6 +2002,7 @@ const rememberLines = (lines: Pick<Lines, "address">) => {
     steps: (missing?: string) => `I couldn't keep the steps in your own words${sir}${which(missing)} so I didn't save it.`,
     // His words, but with more than the steps, it's how to say it so they're all of it, by its name as he said it.
     whole: (name?: string) => `I couldn't keep the steps in your own words${sir}. Say it as one request: when I say ${name ?? "its name"}, then the steps.`,
+    short: `Keep the name short${sir}: when I say ship, then the steps.`,
     written: `That one's in your preferences${sir}.`,
     answered: `That's something I already answer to${sir}.`,
   }
@@ -2179,6 +2191,9 @@ export const check = (given: Decision, situation: Situation, lines: Lines): Chec
       const routine = choice.how === "routine" ? routineOf(choice.text) : undefined
       const text = choice.how === "routine" ? (routine?.steps ?? "") : choice.text.trim()
       if (text === "") return { _tag: "Say", spoken: lines.cantTell }
+      // Where its name ends is the model's to say, so a longer one may hold what he asked of the steps, like "ship, if the checks are
+      // green", which his saying "ship" would leave out: it's refused, whatever else is right with it.
+      if (routine !== undefined && Ledger.digest(routine.name).split(" ").length > namedIn) return { _tag: "Say", spoken: said.short }
       // His words, never the model's: what's kept is in all he said, as heard, word for word. What may have been yapd's own voice is
       // never kept, which he's told as it's done.
       const { utterance } = situation
@@ -2382,7 +2397,7 @@ const contract = `Reply with only a JSON object with the keys "act", "target", "
 - "mode": he wants you to change how and when you talk. "how" is "focus" to say only what needs him for a while, "quiet" for the night, like "goodnight", "I'm off to bed" or "turn yourself off", which also says only what needs him, "normal" when he's back, like "I'm back" or "you can talk normally again", which gives him the catch-up, "brief" to say only headlines again, like "talk shorter", or "full" to say every update in full, like "give me everything" or "stop giving me the short version". "when" is when focus or quiet ends, if he says, worked out from NOW as his clock reads it, "YYYY-MM-DDTHH:mm", like three o'clock today for "till three". It's about you, never a message for a thread, and never "mute", which is one thread. "stop", "quiet" or "be quiet" on their own only mean stop talking: "dismiss".
 - "remind": he wants to be told something later. At a time: "how" is "at", and "when" the time worked out from NOW, as his clock reads it, "YYYY-MM-DDTHH:mm" with no offset, like "2026-10-12T15:00" for three this afternoon. Or once a thread finishes its turn, "how" "finished", or asks him something, "how" "asked", with "target" that thread. "text" is what to tell him then, in a few words, like "call the bank", or "" when it's only that the thread finished or asks. "rest" keeps its meaning: what he wants done now, in the same breath, like "and tell the Mina one to rebase". Not "send" with "after", which tells the thread itself once it's done; something he wants offered to a thread then is "offer". You don't watch pull requests: told to say when one's checks pass or it's merged, "answer" that you don't.
 - "offer": he wants you to offer, at a time or when a thread finishes or asks him something, to send a thread a message. "how" and "when" as for "remind"; "target" is the thread told, and the one watched; "text" is the message as "send" writes it. yapd asks him then, and only his yes sends it. One that watches one thread and tells another, you can't: "answer" so.
-- "remember": he wants you to keep something in mind from now on. "how" is "fact" for something that's so about him or his work, like "remember that rig's T3 Code runs the nightly", with "text" the fact copied from what he said word for word, mistakes and all, like "rig's T3 Code runs the nightly". Or "routine" for steps to send a thread whenever he says a name, like "when I say review it, have Sol review it until it's clean", with "text" "name: steps", each copied from what he said word for word, like "review it: have Sol review it until it's clean". Either is copied as it came through, names too: what "hearing" says of misheard names never applies to it, and a word you put right isn't his, so nothing is kept. A routine's steps go to an agent as they're kept, so when a name in them came through as another word, like "Saul" for Sol, keep nothing: "answer" that the name didn't come through as he said it, and that a routine typed in his preferences keeps it as he writes it. Said again with other steps, it's the same name: yapd changes it. "target" is "". Being told something at a time, or once a thread does something, is "remind".
+- "remember": he wants you to keep something in mind from now on. "how" is "fact" for something that's so about him or his work, like "remember that rig's T3 Code runs the nightly", with "text" the fact copied from what he said word for word, mistakes and all, like "rig's T3 Code runs the nightly". Or "routine" for steps to send a thread whenever he says a name, like "when I say review it, have Sol review it until it's clean", with "text" "name: steps", each copied from what he said word for word, like "review it: have Sol review it until it's clean". The name is only what he'll say for it, three words at most, and all else he asked of the steps is in them. Either is copied as it came through, names too: what "hearing" says of misheard names never applies to it, and a word you put right isn't his, so nothing is kept. A routine's steps go to an agent as they're kept, so when a name in them came through as another word, like "Saul" for Sol, keep nothing: "answer" that the name didn't come through as he said it, and that a routine typed in his preferences keeps it as he writes it. Said again with other steps, it's the same name: yapd changes it. "target" is "". Being told something at a time, or once a thread does something, is "remind".
 - "forget": he wants one of REMINDERS cancelled, or one of MEMORIES forgotten. "target" is its handle there, like r2, k1 or p3. "sure" is "high" when his words point at one of them; when another fits nearly as well, it's lower, with the rest in "others". Of REMINDERS, yapd asks him which, like between two that say the same. Of MEMORIES, one is forgotten only when his words point at it: otherwise yapd tells him it couldn't tell which, and asks nothing. "Forget it" or "never mind" on its own is "dismiss".
 - This you can't do yet, but name it when it's what he wants, with "target" and "text" filled in, and yapd tells him: "tidy" a thread away, like archiving or renaming it.`
 
