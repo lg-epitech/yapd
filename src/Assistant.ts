@@ -3586,16 +3586,23 @@ export const make = (options: {
       })
 
     /**
-     * Whether the last thing done was an archive that dropped reminders he'd
-     * set on what it archived, of the thread he named if he did, since the
-     * last reminder he set or cancelled.
+     * Whether an archive dropped reminders he'd set on what it archived,
+     * since the last reminder he set or cancelled: with no thread named, the
+     * last thing done; of the thread he named, its own last tidy, still
+     * standing, within as long as "scratch that" reaches, whatever was done
+     * since, like taking back another of those it archived with it.
      */
     const droppedLately = (situation: Brain.Situation, named: Option.Option<Threads.Ref>) =>
       Effect.gen(function* () {
+        const since = (row: Ledger.Row) => !Option.exists(situation.noted ?? Option.none(), ({ at }) => at >= row.at)
+        if (Option.isSome(named)) {
+          const own = yield* ledger.latest(scratchable, { kinds: ["tidy"], machine: named.value.machine, thread: named.value.id })
+          return Option.exists(own, (row) => Hands.dropped(row) && since(row))
+        }
         const acted = Option.getOrUndefined(situation.acted)
-        if (acted === undefined || acted.kind !== "tidy" || Option.exists(situation.noted ?? Option.none(), ({ at }) => at >= acted.at)) return false
+        if (acted === undefined || acted.kind !== "tidy" || !since(acted)) return false
         const rows = yield* ledger.steps(0, { kinds: ["tidy"], utterance: acted.utterance, step: acted.step })
-        return rows.some((row) => Hands.dropped(row) && Option.match(named, { onNone: () => true, onSome: (ref) => ref.machine === row.machine && ref.id === row.thread }))
+        return rows.some(Hands.dropped)
       })
 
     /**
@@ -3611,11 +3618,12 @@ export const make = (options: {
      * an archive just dropped come back with the thread, as taking that back
      * brings both, never as a reminder he set or cancelled before it: of the
      * thread he named, on the desk or by its handle in ARCHIVED, that thread
-     * alone, only when the model's sure which. A reminder of a handle that's
-     * neither is nothing taken back, never one of another thread. Every
-     * thread a tidy did is taken back, with none named, for "scratch that" or
-     * when the model's sure he means that, never on a guess, which would
-     * tidy threads he didn't ask about.
+     * alone, as its own archive dropped them, though another archived with it
+     * was taken back since, only when the model's sure which. A reminder of
+     * a handle that's neither is nothing taken back, never one of another
+     * thread. Every thread a tidy did is taken back, with none named, for
+     * "scratch that" or when the model's sure he means that, never on a
+     * guess, which would tidy threads he didn't ask about.
      */
     const undoing = (plan: Brain.Plan, thought: Thought, said: Lines, at: Stepping): Effect.Effect<Outcome> =>
       Effect.gen(function* () {
@@ -3629,15 +3637,16 @@ export const make = (options: {
         // The thread he named, on the desk, even one taken for filled in for a reminder of none, or in ARCHIVED.
         const listed = taking === "reminder" ? Option.orElse(plan.target, () => Option.fromNullable(situation.desk.threads.find((one) => one.handle === handle))) : plan.target
         const whose = Option.orElse(Option.map(listed, ({ ref }) => ref), () => Option.map(archived, ({ ref }) => ref))
+        // Of the thread he named, what its own archive dropped, though another it archived with it was taken back since: that thread alone.
+        if (taking === "reminder" && Option.isSome(whose) && (yield* droppedLately(situation, whose))) {
+          if (!Brain.surely(plan.decision.sure, whose.value, situation)) return unsure()
+          return yield* write({ decision: { ...plan.decision, how: "tidy", target: handle }, target: listed }, thought, said, at)
+        }
         const dropping = taking === "reminder" && (yield* droppedLately(situation, Option.none()))
         if (dropping) {
           if (unnamed && plan.decision.sure !== "high") return unsure()
           if (unnamed) return yield* write({ decision: { ...plan.decision, how: "tidy", target: "" }, target: Option.none() }, thought, said, at)
           if (Option.isNone(whose)) return unsure()
-          if (yield* droppedLately(situation, whose)) {
-            if (!Brain.surely(plan.decision.sure, whose.value, situation)) return unsure()
-            return yield* write({ decision: { ...plan.decision, how: "tidy", target: handle }, target: listed }, thought, said, at)
-          }
         }
         // A handle that's no thread, on the desk or in ARCHIVED, is never taken for none, which would take back another thread's reminder.
         if (taking === "reminder" && handle !== "" && Option.isNone(whose)) return unsure()
