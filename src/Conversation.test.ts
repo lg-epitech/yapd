@@ -2651,9 +2651,9 @@ describe("quick replies", () => {
 describe("Transcriber", () => {
   test("only 'Mute.' on its own, however often Whisper heard it, is his emergency off, and only so many words turn yapd back on", () => {
     for (const heard of ["Mute.", "mute mute", "Mute, mute, mute.", "Jarvis, mute.", "Mute, sir!"]) expect(Responder.halts(heard)).toBe(true)
-    for (const heard of ["Mute it.", "Mute that for an hour.", "Mute the Tezos one.", "What's muted?", "Unmute.", "Mute it, mute it.", ""]) expect(Responder.halts(heard)).toBe(false)
+    for (const heard of ["Mute it.", "Mute that for an hour.", "Mute the Tezos one.", "What's muted?", "Unmute.", "Mute it, mute it.", "Mute?", "Mute, mute?", ""]) expect(Responder.halts(heard)).toBe(false)
     for (const heard of ["Unmute.", "Un-mute.", "Turn on.", "Turn it on, please.", "Jarvis, turn yourself on.", "Turn back on.", "Unmute, unmute."]) expect(Responder.wakes(heard)).toBe(true)
-    for (const heard of ["Unmute it.", "Unmute the Tezos one.", "Turn on the lights.", "Turn it off.", "Mute.", ""]) expect(Responder.wakes(heard)).toBe(false)
+    for (const heard of ["Unmute it.", "Unmute the Tezos one.", "Turn on the lights.", "Turn it off.", "Mute.", "Unmute?", "Turn on?", ""]) expect(Responder.wakes(heard)).toBe(false)
   })
 
   test("drops what Whisper writes for sounds that aren't words", () => {
