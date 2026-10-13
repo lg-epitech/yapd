@@ -1038,6 +1038,11 @@ export const make = (options: {
           let ended: { readonly duration: number; readonly finished?: number } | undefined
           let lingered = false
           /**
+           * Whether the line being said is one the journal keeps none of, like the model's answer to a secret he said, which could give it
+           * away: then nor is what he hadn't heard of it when he talks over it, which a few words at a time may not show to be one.
+           */
+          let unkept = false
+          /**
            * Where to pick the update up again once yapd has said what it did of his over it, like going into focus or muting it, when it
            * needs him and he hadn't heard all of it: what it asks him always comes through, as it does whatever the mode or mute.
            */
@@ -1049,6 +1054,7 @@ export const make = (options: {
             resume = undefined
             path = update.audio
             text = update.spoken
+            unkept = false
             missed = 0
             lingered = false
             return true
@@ -1201,7 +1207,7 @@ export const make = (options: {
                   source,
                   ms,
                   ...(modelMs === undefined ? {} : { modelMs }),
-                  ...(left === "" || withheld || T3Actions.revealing(left) ? {} : { left }),
+                  ...(left === "" || withheld || unkept || T3Actions.revealing(left) ? {} : { left }),
                   after,
                   lateBy: hundredths(outcome.lateBy),
                   needsYou: update.needsYou,
@@ -1237,6 +1243,8 @@ export const make = (options: {
             // Over an update that needs him, before all of it was said, what he changed is said, then it carries on from where it stopped.
             if (reply.intent === "mute" && update.needsYou && !after && path === update.audio) resume = Math.max(from, outcome.at - rewind)
             text = reply.intent === "send" ? yield* pass(update, reply) : answer
+            // Kept only as the reply's `said`, which it isn't when it could give a secret away, or when what he said is held back.
+            unkept = withheld || T3Actions.revealing(text)
             if (text === "") {
               if (pickUp()) continue
               return true
@@ -1247,6 +1255,8 @@ export const make = (options: {
             if (early !== undefined) {
               path = early
               text = more
+              // The update's own words, which it keeps.
+              unkept = false
             }
             else {
               path = join(options.dir, `${crypto.randomUUID()}${extension}`)

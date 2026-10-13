@@ -1218,19 +1218,28 @@ describe("Over its first seconds, while yapd's own voice can still get into the 
 
   test("keeps and logs none of a secret said over it, whatever the model makes of it, like a remember he's told to ask with his shortcut", async () => {
     const secret = "Remember that the staging key is sk-live-4f9a8b7c6d5e."
-    /** What's logged and kept of his secret when the model answers it with `spoken`. */
-    const answered = async (spoken: string) => {
+    /** What's logged and kept of his secret when the model answers it with `spoken`, and he says `over` halfway through that, which it lets be. */
+    const answered = async (spoken: string, over?: string) => {
       const lines: Array<string> = []
       const logger = Logger.make(({ message }) => {
         lines.push((Array.isArray(message) ? message : [message]).join(" "))
       })
       const result = await overHelperScoped(
         Effect.gen(function* () {
-          const helper = yield* overHelper([[0.9, secret]], { reply: () => ({ intent: "answer", spoken, message: "" }) })
+          const helper = yield* overHelper([[0.9, secret], ...(over === undefined ? [] : [[0.8, over] as const])], {
+            reply: ({ heard }) => (heard === secret ? { intent: "answer", spoken, message: "" } : { intent: "dismiss", spoken: "", message: "" }),
+          })
           yield* helper.wait(1)
           yield* helper.talk(0.9, 15)
           yield* helper.quiet
           yield* helper.wait(1)
+          if (over !== undefined) {
+            // Five seconds into the answer's ten, long past when its own voice could get into the microphone.
+            yield* helper.wait(4)
+            yield* helper.talk(0.8, 47)
+            yield* helper.quiet
+            yield* helper.wait(1)
+          }
           return { responded: helper.responded.map(({ heard, echo }) => ({ heard, told: echo !== undefined })), journal: yield* helper.journal }
         }).pipe(Effect.provide(Logger.replace(Logger.defaultLogger, logger))),
       )
@@ -1255,6 +1264,14 @@ describe("Over its first seconds, while yapd's own voice can still get into the 
     expect(JSON.stringify(echoed.journal)).not.toContain("4f9a8b7c6d5e")
     expect(echoed.lines.filter((line) => line.includes("4f9a8b7c6d5e"))).toEqual([])
     expect(echoed.lines).toContain("Reply: answer")
+    // Nor what he hadn't heard of that answer when he talks over it, which a few words of may not show to be one, like the last
+    // digits of a code.
+    const talkedOver = await answered("I won't keep the key ending four eight one five nine two, sir. Ask me that with your shortcut.", "What?")
+    expect(talkedOver.journal.map(({ kind, text, said, detail }) => ({ kind, text, said, detail }))).toEqual([
+      { kind: "reply", text: undefined, said: undefined, detail: { intent: "answer", withheld: true, ...worked } },
+      { kind: "reply", text: "What?", said: "", detail: { intent: "dismiss", ...worked, voiced: 1.18 } },
+    ])
+    expect(JSON.stringify(talkedOver.journal)).not.toContain("nine two")
   })
 
   test.each([
