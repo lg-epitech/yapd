@@ -651,7 +651,9 @@ export const make = (options: {
      * be its own; or the last of it, said on its own once he carried on after
      * a pause, which is surely his, so what someone else said first, like a
      * colleague walking in, doesn't hide it. Never after what trailed off
-     * into it, like "Can you…" then "mute.", which mutes something.
+     * into it, like "Can you…" then "mute.", which mutes something. Unless
+     * it trails off itself, it's given back at once, never waiting on
+     * whether he carries on.
      */
     const settle = <R>(
       ear: Ear,
@@ -675,7 +677,8 @@ export const make = (options: {
             unfinished(heard) && (hesitates || heard !== first)
               ? Effect.zipRight(Effect.sleep(hesitation), respond(heard, speech, afterPause, halt))
               : respond(heard, speech, afterPause, halt)
-          if (ear.deaf || (yield* Clock.currentTimeMillis) > until) return { heard, afterPause, halt, reply: yield* replying }
+          // "Mute." not trailing off is acted on at once, so what's said after it, like his phone answered, can't take it back.
+          if (ear.deaf || (yield* Clock.currentTimeMillis) > until || (halt && !unfinished(heard))) return { heard, afterPause, halt, reply: yield* replying }
           const id = fresh()
           const fiber = yield* replying.pipe(
             Effect.flatMap((reply) => Queue.offer(ear.signals, { _tag: "Replied", id, reply })),

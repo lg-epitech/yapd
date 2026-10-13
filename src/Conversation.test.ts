@@ -838,6 +838,8 @@ const overHelper = (
     readonly failing?: boolean
     /** Whether "Mute." turns yapd off, counted in `offs`, which here leaves it on. */
     readonly off?: boolean
+    /** How long Whisper takes on each thing it's given, in seconds: at once unless said. */
+    readonly transcribing?: number
   } = {},
 ) =>
   Effect.gen(function* () {
@@ -949,7 +951,7 @@ const overHelper = (
               .join(" ")
             transcribed.push(heard)
             return heard
-          }),
+          }).pipe((heard) => (options.transcribing === undefined ? heard : Effect.delay(heard, `${options.transcribing} seconds`))),
       }),
       Layer.succeed(Responder.Responder, {
         respond: (interruption) =>
@@ -1573,6 +1575,28 @@ describe("Over its first seconds, while yapd's own voice can still get into the 
     expect(await over("Are you coming to the standup?")).toEqual({ offs: 1, worked: ["Are you coming to the standup?"] })
     // Trailed off into it, it's the rest of what he was saying, like a thread to mute, for the model to work out once he's done.
     expect(await over("Can you…")).toEqual({ offs: 0, worked: ["Can you Mute."] })
+  })
+
+  test.each([
+    ["an update", {}],
+    ["a question", { ask: true }],
+    ["an answer", { answer: true }],
+  ] as const)("'Mute.' said on its own over %s turns yapd off, even with talk after it begun while Whisper is still on it", async (_, given) => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        const helper = yield* overHelper([[0.95, "Mute."], [0.9, "Hello?"]], { off: true, transcribing: 0.4, ...given })
+        yield* helper.wait(4)
+        yield* helper.talk(0.95, 10)
+        yield* helper.quiet
+        // His phone rings, and he answers it while "Mute." is still being transcribed.
+        yield* helper.talk(0.9, 20)
+        yield* helper.wait(0.4)
+        yield* helper.quiet
+        yield* helper.wait(0.4)
+        return { offs: helper.offs(), worked: [...helper.responded, ...helper.offered].map(({ heard }) => heard) }
+      }),
+    )
+    expect(result).toEqual({ offs: 1, worked: [] })
   })
 
   /** What's said as a line ends, `at` seconds into its `duration`, `frames` long, and what came of it. */
