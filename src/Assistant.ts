@@ -3630,7 +3630,7 @@ export const make = (options: {
         const last = Option.getOrUndefined(changed)
         const latest =
           taking === "reminder" || taking === "memory" || taking === "catchup"
-            ? Brain.newest({ noted: changed, acted: Option.none(), muteChange: Option.none() }, taking === "reminder" ? Option.getOrUndefined(plan.target)?.ref : undefined)
+            ? Brain.newest({ noted: changed, acted: Option.none(), muteChange: Option.none() }, taking === "reminder" ? Option.getOrUndefined(named) : undefined)
             : Brain.newest(situation)
         if (latest === "noted" && last !== undefined) {
           const change = Brain.changeOf(last)
