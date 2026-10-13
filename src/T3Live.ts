@@ -69,7 +69,11 @@ export const Thread = Schema.Struct({
   ),
   goal: nullable(Schema.Struct({ objective: Schema.String, status: Schema.String })),
   settledOverride: nullable(Schema.String),
+  /** When it was settled, by his hand or T3 Code's. */
+  settledAt: nullable(Schema.String),
   snoozedUntil: nullable(Schema.String),
+  /** When he pinned it, while it's pinned. */
+  pinnedAt: nullable(Schema.String),
   archivedAt: nullable(Schema.String),
   latestUserMessageAt: nullable(Schema.String),
   createdAt: Schema.String,

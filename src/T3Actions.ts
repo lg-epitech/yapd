@@ -545,9 +545,14 @@ export type Command =
   | { readonly _tag: "Archive" }
   | { readonly _tag: "Unarchive" }
   | { readonly _tag: "Rename"; readonly title: string }
+  /** Until when, as T3 Code takes it and gives it back: in UTC, to the millisecond. */
   | { readonly _tag: "Snooze"; readonly until: string }
+  | { readonly _tag: "Unsnooze" }
   | { readonly _tag: "Settle" }
+  /** Marks it active by his hand, which isn't how T3 Code would have it on its own. */
+  | { readonly _tag: "Unsettle" }
   | { readonly _tag: "Pin" }
+  | { readonly _tag: "Unpin" }
 
 /** The command T3 Code takes for it, under an id of its own, so sending it twice does it once. */
 export const command = (threadId: string, what: Command, runId: string | undefined, commandId: string) => {
@@ -586,10 +591,16 @@ export const command = (threadId: string, what: Command, runId: string | undefin
       return { ...base, type: "thread.metadata.update", title: what.title }
     case "Snooze":
       return { ...base, type: "thread.snooze", snoozedUntil: what.until }
+    case "Unsnooze":
+      return { ...base, type: "thread.unsnooze", reason: "user" }
     case "Settle":
       return { ...base, type: "thread.settle" }
+    case "Unsettle":
+      return { ...base, type: "thread.unsettle", reason: "user" }
     case "Pin":
       return { ...base, type: "thread.pin" }
+    case "Unpin":
+      return { ...base, type: "thread.unpin" }
   }
 }
 
