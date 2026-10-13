@@ -9,7 +9,7 @@ import * as Codex from "./Codex.ts"
 import { ProviderCondenser } from "./Condenser.ts"
 import * as Config from "./Config.ts"
 import * as Daemon from "./Daemon.ts"
-import { Dictation, Turns, WhisperDictation } from "./Dictation.ts"
+import { Ahead, Dictation, Turns, WhisperDictation } from "./Dictation.ts"
 import * as Drafts from "./Drafts.ts"
 import * as Floor from "./Floor.ts"
 import * as Hands from "./Hands.ts"
@@ -343,9 +343,13 @@ export const serve = Effect.gen(function* () {
   // holds up none of the rest, and what waits on him there is said once it's back.
   yield* Effect.forEach(followed, ({ machine: name, live }) => Effect.forkScoped(Notices.lookBack(notices, live.view, name)), { discard: true })
   const shortcut = yield* Shortcut
-  // Built once the daemon is, so each press keeps how many times yapd had been turned on or off by then, however late what was said is handed on.
+  // Built once the daemon is, so each press keeps how many times yapd had been turned on or off by then, however late what was said is handed
+  // on, and "Mute." while it's on is handed on at once, never waiting for what he dictated before it to be heard.
   const dictation = Context.get(
-    yield* Layer.build(WhisperDictation).pipe(Effect.provideService(Turns, Effect.map(daemon.power, ({ turns }) => turns))),
+    yield* Layer.build(WhisperDictation).pipe(
+      Effect.provideService(Turns, Effect.map(daemon.power, ({ turns }) => turns)),
+      Effect.provideService(Ahead, (heard) => Switching.urgent(heard, daemon.power)),
+    ),
     Dictation,
   )
 
@@ -458,7 +462,7 @@ export const serve = Effect.gen(function* () {
   // Asked as the user starts talking, so it's there by the time they've finished.
   yield* Effect.forkScoped(Stream.runForEach(dictation.presses, ({ press, turns, began }) => assistant.prepare(press, switcher.turns(press, turns), began)))
   // Each with the press it began with, which keeps what "it" meant then, however long the dictation took. "Mute." is heard at once, ahead
-  // of what's still being worked out; "unmute" in its turn, so what he says after it is handed on once yapd is on.
+  // of what's still being heard or worked out; "unmute" in its turn, so what he says after it is handed on once yapd is on.
   yield* Effect.forkScoped(
     Switching.dictations(dictation.transcripts, daemon.power, ({ press, turns, heard: text, voiced, at }) =>
       text === "" ? assistant.nothing(press) : heard(text, "shortcut", voiced, switcher.turns(press, turns), press, at),

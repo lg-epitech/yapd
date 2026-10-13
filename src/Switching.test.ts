@@ -90,4 +90,11 @@ describe("Handing on what he dictates", () => {
     expect(result.handed).toEqual(["What's Tezos doing?", "Mute.", "Tell it to merge."])
     expect(result.done).toEqual(["Mute.", "What's Tezos doing?", "Tell it to merge."])
   })
+
+  test("only 'Mute.' while yapd is on goes ahead of what he dictated before it, never 'unmute' or 'turn on' while it's off", () => {
+    const ahead = (heard: string, on: boolean) => Effect.runSync(Switching.urgent(heard, Effect.succeed({ on })))
+    expect(["Mute.", "Mute, mute."].map((heard) => ahead(heard, true))).toEqual([true, true])
+    expect(["Mute.", "Unmute.", "Turn on.", "Mute?"].map((heard) => ahead(heard, false))).toEqual([false, false, false, false])
+    expect(["Mute it.", "Mute?", "What's Tezos doing?"].map((heard) => ahead(heard, true))).toEqual([false, false, false])
+  })
 })

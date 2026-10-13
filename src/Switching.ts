@@ -74,6 +74,9 @@ export const promptly = (turn: (switched: Effect.Effect<void>) => Effect.Effect<
     yield* Deferred.await(switched)
   })
 
+/** Whether what he said is "Mute." while yapd is on, as `power` has it, which goes ahead of whatever he said before. */
+export const urgent = (heard: string, power: Effect.Effect<{ readonly on: boolean }>) => Effect.map(power, ({ on }) => switches(heard, on) === false)
+
 /**
  * Hands on what he dictates one at a time, in the order he said it, each
  * once the one before has been dealt with, since one can build on another,
@@ -91,8 +94,8 @@ export const dictations = <A extends { readonly heard: string }>(
     const waiting = yield* Queue.unbounded<A>()
     yield* Effect.forkScoped(Stream.runForEach(Stream.fromQueue(waiting), hand))
     return yield* Stream.runForEach(transcripts, (transcript) =>
-      Effect.flatMap(power, ({ on }) =>
-        switches(transcript.heard, on) === false ? Effect.asVoid(Effect.forkScoped(hand(transcript))) : Queue.offer(waiting, transcript),
+      Effect.flatMap(urgent(transcript.heard, power), (first) =>
+        first ? Effect.asVoid(Effect.forkScoped(hand(transcript))) : Queue.offer(waiting, transcript),
       ),
     )
   })
