@@ -92,6 +92,10 @@ const notices = (
     readonly started?: ReadonlyArray<{ readonly at: number; readonly thread: string; readonly messageId: string | null }>
     /** Whether he can be reminded of things, kept in the same database, offers asked as they come due kept in `offers`. */
     readonly reminding?: boolean
+    /** What T3 Code says each provider has used of its limits, as it says it, when it's asked. */
+    readonly usage?: () => ReadonlyArray<Record<string, unknown>>
+    /** Focus or quiet, while one is on. */
+    readonly holding?: () => Option.Option<"focus" | "quiet">
   },
 ) =>
   Effect.gen(function* () {
@@ -112,7 +116,7 @@ const notices = (
     }
     /** Each machine's T3 Code, reading what `bounded` says, and noting which thread each read was of, by machine. */
     const reads: Array<string> = []
-    const reaching = (machine: string, bounded: Readonly<Record<string, Bounded>>): Effect.Effect<Server.Transport, Server.Trouble> =>
+    const reaching = (machine: string, bounded: Readonly<Record<string, Bounded>>, usage = given.usage): Effect.Effect<Server.Transport, Server.Trouble> =>
       Effect.succeed({
         api: (<A, I>(path: string, schema: Schema.Schema<A, I>) => {
           const id = decodeURIComponent(path.split("/").at(-2) ?? "")
@@ -123,9 +127,11 @@ const notices = (
             projection: { runs: read.runs ?? [], messages: read.messages ?? [], turnItems: read.turnItems ?? [], providerThreads, runtimeRequests: read.runtimeRequests ?? [] },
           }).pipe(Effect.orDie)
         }) as Server.Transport["api"],
-        // With no scratch project to tell of.
+        // With no scratch project to tell of, and its providers' usage when the test gives it.
         call: (<A, I>(method: string, _: unknown, schema: Schema.Schema<A, I>) =>
-          method === "server.getConfig" ? Schema.decodeUnknown(schema)({}).pipe(Effect.orDie) : Effect.die("not expected")) as Server.Transport["call"],
+          method === "server.getConfig"
+            ? Schema.decodeUnknown(schema)(usage === undefined ? {} : { providers: usage() }).pipe(Effect.orDie)
+            : Effect.die("not expected")) as Server.Transport["call"],
         asset: () => Effect.die("not expected"),
       })
     /** Whether rig's threads can be seen, and what its T3 Code tells of. */
@@ -201,6 +207,7 @@ const notices = (
       ...(given.started === undefined ? {} : { started: (_, since) => Effect.succeed((given.started ?? []).filter(({ at }) => at >= since)) }),
       shortest: 60_000,
       ...(reminders === undefined ? {} : { reminders, offered: (reminder) => Effect.sync(() => void offers.push(reminder.propose ?? "")) }),
+      ...(given.holding === undefined ? {} : { holding: Effect.sync(given.holding) }),
     }).pipe(Effect.provide(Layer.merge(persona, condenser(rewritten))))
     yield* Effect.forkScoped(made.follow)
     const flush = Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 20)))
@@ -1301,5 +1308,53 @@ describe("Notices of reminders", () => {
     expect(result.ids[1]).not.toBe(result.ids[0])
     expect(result.told).toHaveLength(2)
     expect(result.told[1]).toMatch(/: pick up the parcel\.$/)
+  })
+})
+
+describe("Notices of usage", () => {
+  test("a usage threshold is said once per window, however often it's read", async () => {
+    let used = 82
+    let resets = new Date(now + 3 * 24 * 60 * 60_000).toISOString()
+    const usage = () => [
+      {
+        instanceId: "claudeAgent",
+        displayName: "Claude",
+        enabled: true,
+        status: "ready",
+        usageLimits: { checkedAt: new Date(now).toISOString(), windows: [{ id: "claude-weekly", kind: "weekly", label: "Weekly", usedPercent: used, resetsAt: resets }] },
+      },
+    ]
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* notices({ view: [], bounded: {}, usage })
+        /** Read again, as every five minutes, once what was read before is old enough to be asked again. */
+        const read = (made: { readonly usage: Effect.Effect<void>; readonly wait: (seconds: number) => Effect.Effect<void> }) =>
+          Effect.zipRight(made.wait(16 * 60), made.usage)
+        yield* made.usage
+        // At 80 percent it's kept for the digest, never said.
+        const held = (yield* made.journal.held(0)).map(({ said }) => said)
+        used = 96
+        yield* read(made)
+        yield* read(made)
+        // When it resets moves a little from one read to the next: still the same window.
+        resets = new Date(Date.parse(resets) + 40_000).toISOString()
+        yield* read(made)
+        // And after a restart.
+        const restarted = yield* notices({ view: [], bounded: {}, usage, store: made.store })
+        yield* read(restarted)
+        const once = [...made.told, ...restarted.told]
+        const heldAfter = (yield* made.journal.held(0)).length
+        // A new window, once the last one reset, is said again.
+        resets = new Date(now + 10 * 24 * 60 * 60_000).toISOString()
+        yield* restarted.wait(4 * 24 * 60 * 60)
+        yield* read(restarted)
+        return { held, once, heldAfter, next: restarted.told }
+      }),
+    )
+    expect(result.held).toEqual([expect.stringMatching(/^Claude's weekly limit is at 82 percent, sir\. It resets .*\.$/)])
+    expect(result.once).toEqual([expect.stringMatching(/^Claude's weekly limit is at 96 percent, sir\. It resets .*\.$/)])
+    // Said at 95, what was kept at 80 of the same window isn't for the digest any more.
+    expect(result.heldAfter).toBe(0)
+    expect(result.next).toHaveLength(1)
   })
 })
