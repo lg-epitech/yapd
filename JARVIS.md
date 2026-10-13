@@ -107,6 +107,8 @@ Live on `dev` now: everything below, headline first, focus and quiet, off keepin
 - A turn T3 Code told of before its own Stop came can be told twice, the second time often in a catch-up: when the Stop comes after a restart, as yapd can't tell then whether it's that turn or a newer one, or when the Stop doesn't end in the turn's words, so it may be another, or when what the two say isn't word for word the same, as when the turn asked two things and its Stop only the last. It's never dropped or hidden instead.
 - The first answer of work yapd started, told before a restart through a hook yapd hadn't tied to its thread, can be told again after the restart from T3 Code's word.
 - After a restart, a research thread's answer whose hook can't find its thread in time and that's rated an ordinary update is said as one, held in focus, or for the digest if rated progress, rather than as the answer to what you asked. It's kept, never lost.
+- A research answer whose hook reaches yapd more than twenty seconds after T3 Code says its turn ended, can't be tied to its thread in time and is rated slight isn't said. It's kept unheard, so a catch-up has it.
+- After a restart, if a research answer was said from its hook but couldn't be tied to its thread, and T3 Code then can't be reached for over an hour, it can be said a second time once T3 Code is back.
 
 - With exactly two lines of your own for going ahead, one picked for something that never plays can let the other come twice in a row.
 - After a message was moved from the queue into the turn under way, "I sent that a minute ago. Again?" can be asked for its same words until ten minutes have passed.
