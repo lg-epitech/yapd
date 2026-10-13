@@ -2417,6 +2417,45 @@ const mentionsCredential = (words: string) =>
   T3Actions.namesCredential(words) || alsoCredentials.test(words) || mentionsVague(words)
 
 /**
+ * What says the tests pass rather than names a pass: a word before it that's
+ * a plural, as in "the tests pass", or one like "should", "all" or "to", as
+ * in "the build should pass" or "wait for the build to pass"; or what's a
+ * look over something, as in "the final pass".
+ */
+const passing = String.raw`[\w.'’-]*[^\Ws]s|all|both|still|always|never|now|also|just|really|then|finally|actually|even|each|to|not|that|which|who|they|we|you|it|should|must|will|would|can|could|might|may|shall|do|did|don['’]t|didn['’]t|won['’]t|can['’]t|wouldn['’]t|shouldn['’]t|couldn['’]t|first|second|third|last|final|next|another|quick|full|review|cleanup|lint`
+
+/**
+ * What names only ever something only he should know, which a routine's steps
+ * have no use for: a password, as it's said out loud, or as Whisper writes it
+ * down, like a pw, a pwd, a pword, a passwd, a passcode or a passphrase, or a
+ * pass after "the" or "my" and a name or two, as in "the Wi-Fi pass" or "my
+ * AWS pass", never "the tests pass"; a PIN; credentials or creds; a login,
+ * as in "my login" or "the router login is …", never "log in" nor "the login
+ * page"; or a door, alarm, gate, access, lock, safe or garage code, never
+ * thread-safe code. A key, a token, a secret or a plain code is everyday in
+ * steps to an agent, so it isn't one.
+ */
+const strongCredentials = [
+  new RegExp(
+    String.raw`(?<![a-z0-9])(?:${[
+      String.raw`pass(?:words?|wds?|codes?|phrases?)|pass[ -]phrases?|pwords?|pwds?|pws?`,
+      String.raw`p(?:\. ?| )i(?:\. ?| )n\.?|pin (?:codes?|numbers?)|${asNoun("pins?")}`,
+      String.raw`credentials?|creds|${asNoun("log-?ins?")}|log-?in (?:details|info|information)`,
+      String.raw`(?:door|alarm|gate|access|lock|(?<!-)safe|garage)['’]?s? codes?`,
+    ].join("|")})(?![a-z0-9])`,
+    "i",
+  ),
+  /\bPINs?\b/,
+  // As it's written, never in other words' case, so a plural like "tests" is told from a name like "AWS".
+  new RegExp(
+    String.raw`(?<![A-Za-z0-9])(?:[Tt]he|[Mm]y|[Yy]our|[Oo]ur|[Hh]is|[Hh]er|[Tt]heir|[Ii]ts) (?:(?!(?:${passing})(?![\w'’-]))[\w.'’-]+ ){0,2}[Pp]ass(?![\w'’-]| (?:rate|count)s?(?![\w'’-]))`,
+  ),
+]
+
+/** Whether what's said names something only he should know, as `strongCredentials` has it, however little else it says of it. */
+const namesStrongly = (words: string) => strongCredentials.some((pattern) => pattern.test(words))
+
+/**
  * Whether what he asked to be kept in mind may give a secret away, in all he
  * said or in what the model made of it. A fact is refused broadly, since a
  * secret kept is in every prompt: one that gives a value or mentions a
@@ -2424,12 +2463,16 @@ const mentionsCredential = (words: string) =>
  * word that names it, like "the garage opens with 4827", gets through. A
  * routine's steps are words to an agent, where a code, a key or a token is
  * everyday, as in "when I say ship, push the code", so a routine is refused
- * only for what gives a value. It's refused as a secret before anything else
- * would turn it down, since only that keeps his words out of the journal.
+ * for what gives a value, or for naming what only ever is one, like a
+ * password, a PIN or a door code, value or not. It's refused as a secret
+ * before anything else would turn it down, since only that keeps his words
+ * out of the journal.
  */
 export const secretive = (choice: Pick<Decision, "how" | "text">, utterance: Pick<Assistant.Utterance, "heard" | "whole">) => {
   const routine = choice.how === "routine" && routineOf(choice.text) !== undefined
-  return [utterance.heard, utterance.whole ?? "", choice.text].some((words) => givesValue(words) || (!routine && mentionsCredential(words)))
+  return [utterance.heard, utterance.whole ?? "", choice.text].some(
+    (words) => givesValue(words) || (routine ? namesStrongly(words) : mentionsCredential(words)),
+  )
 }
 
 /** What's said of what can't be kept in mind, or forgotten. */

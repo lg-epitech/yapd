@@ -12481,7 +12481,7 @@ describe("Assistant memories", () => {
     expect(result.journal).not.toContain(value)
   })
 
-  test("a routine whose steps only name a code, a key, a login or the like is kept, while one that gives a value isn't, nor kept in the journal", async () => {
+  test("a routine whose steps only name a code, a key, a sign-in or the like is kept, while one that gives a value isn't, nor kept in the journal", async () => {
     const routines: Readonly<Record<string, string>> = {
       "When I say ship, push the code, then sign in to Vercel and rotate the deploy key.": "ship: push the code, then sign in to Vercel and rotate the deploy key",
       "When I say staging, sign in to Vercel, the password is hunter2.": "staging: sign in to Vercel, the password is hunter2",
@@ -12553,6 +12553,53 @@ describe("Assistant memories", () => {
     expect(result.spoken).not.toContain("hunter2")
     for (const prompt of result.told) expect(prompt).not.toContain("hunter2")
     expect(result.journal).not.toContain("hunter2")
+  })
+
+  test("a routine that names a password, a door code or an alarm code isn't kept, read back nor shown the model after, value or not, while one with tests that pass or code to review is", async () => {
+    const refused: Readonly<Record<string, string>> = {
+      "When I say staging, sign in to Vercel with the password hunter2.": "staging: sign in to Vercel with the password hunter2",
+      "When I say staging, unlock the front door, the door code's 4827.": "staging: unlock the front door, the door code's 4827",
+      "When I say home, the alarm code: 4827.": "home: the alarm code: 4827",
+    }
+    const kept: Readonly<Record<string, string>> = {
+      "When I say ship, check the tests pass, then deploy.": "ship: check the tests pass, then deploy",
+      "When I say review it, review the code and push the fixes.": "review it: review the code and push the fixes",
+    }
+    const routines = { ...refused, ...kept }
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(
+          (situation) => {
+            const text = routines[situation.utterance.heard]
+            return text === undefined ? Brain.decision({ act: "answer", spoken: "Nothing else, sir." }) : Brain.decision({ act: "remember", how: "routine", text })
+          },
+          undefined,
+          { memories: true },
+        )
+        const said: Array<string | undefined> = []
+        const told: Array<string> = []
+        for (const heard of Object.keys(routines)) {
+          yield* made.dictate(heard)
+          said.push(made.spoken().at(-1))
+          yield* made.dictate("Anything else?")
+          told.push(Brain.prompt(made.seen.at(-1)!, Option.none()))
+        }
+        return {
+          said,
+          told,
+          spoken: made.spoken().join(" "),
+          kept: (yield* made.memories!.list).map(({ name, text }) => `${name}: ${text}`),
+          journal: JSON.stringify(yield* made.journal.since(0)),
+        }
+      }),
+    )
+    expect(result.said.slice(0, 3)).toEqual(Object.keys(refused).map(() => "I won't keep that, sir. It looks like a secret."))
+    expect(result.kept).toEqual(Object.values(kept))
+    for (const value of ["hunter2", "4827"]) {
+      expect(result.spoken).not.toContain(value)
+      for (const prompt of result.told) expect(prompt).not.toContain(value)
+      expect(result.journal).not.toContain(value)
+    }
   })
 
   test("a secret the model's answer says back is said, but kept in the journal and logged nowhere", async () => {
