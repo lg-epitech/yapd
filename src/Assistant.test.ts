@@ -11188,6 +11188,27 @@ describe("Assistant turned off and on", () => {
     expect(result.after).toEqual(["Docs swept."])
   })
 
+  test("a clear said to the offer clears the catch-up, never reads it", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { back, answer, spoken, journal, flush, briefings } = yield* assistant(() => Brain.decision({ act: "catchup", how: "clear", pending: "answers" }), undefined, {
+          briefs: () => "Distribox migrated, sir.",
+        })
+        yield* journal.write({ at: now - 120 * 60_000, kind: "action", detail: { on: false } })
+        yield* kept(journal, 90, "Distribox migrated.")
+        yield* kept(journal, 60, "Distribox deployed.")
+        yield* kept(journal, 50, "Docs swept.", { priority: "done", muted: true })
+        yield* back
+        yield* flush
+        yield* answer("No, just clear them.")
+        return { spoken: spoken(), briefed: briefings.length, after: yield* unheard(journal) }
+      }),
+    )
+    expect(result.spoken).toEqual(["You missed two, sir. Want the rundown?", "Cleared, sir: two updates set aside."])
+    expect(result.briefed).toBe(0)
+    expect(result.after).toEqual(["Docs swept."])
+  })
+
   test("anything else said to the offer lets it go, nothing marked heard, and it isn't offered again; with nothing kept while off, none is offered", async () => {
     const result = await run(
       Effect.gen(function* () {

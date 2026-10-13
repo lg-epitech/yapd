@@ -369,7 +369,8 @@ const when = (how: string) => (how === "after" || how === "restart" ? how : "now
  * Whether a decision is what a yes or no question asked about, however it was
  * put: the same act on the same thread, and for a message the same words and
  * timing, or none given, which leaves them as asked. Anything else, like
- * another thread or other words, is something else he wants instead.
+ * another thread or other words, is something else he wants instead: to
+ * "Want the rundown?", "just clear them" sets the catch-up aside unheard.
  */
 export const agrees = (open: Pick<Assistant.Open, "decision" | "candidates">, decided: Decision, desk: Threads.Desk) => {
   const asked = open.decision
@@ -382,6 +383,7 @@ export const agrees = (open: Pick<Assistant.Open, "decision" | "candidates">, de
     case "send":
       return (decided.text.trim() === "" || words(decided.text) === words(asked.text)) && (decided.how.trim() === "" || when(decided.how) === when(asked.how))
     case "undo":
+    case "catchup":
       return decided.how.trim() === "" || decided.how === asked.how
     default:
       return true
