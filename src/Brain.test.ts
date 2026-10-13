@@ -1954,6 +1954,24 @@ describe("catching up", () => {
     expect(said.unbriefedRest).toBe("I couldn't sum up the rest just now, sir. Ask me again in a moment.")
     expect(said.more).toBe("There's more, sir. Ask me for more when you're ready.")
     expect(said.offer(5)).toEqual({ news: "You missed five, sir.", question: "Want the rundown?" })
+    expect(said.cleared(53)).toBe("Cleared, sir: fifty-three updates set aside.")
+    expect(said.cleared(1)).toBe("Cleared, sir: one update set aside.")
+  })
+
+  test("clearing the catch-up is all of it or nothing, only on his word, and scratch that right after takes it back", () => {
+    const over = (heard: string, voiced: number) => {
+      const given = situation(heard, { desk: on, missed })
+      return { ...given, utterance: { ...given.utterance, via: "reply" as const, voiced } }
+    }
+    const clear = Brain.decision({ act: "catchup", how: "clear" })
+    expect(Brain.check(clear, over("Clear the catch-up.", 2), lines)._tag).toBe("Do")
+    // Too little speech over something to be his: talk or noise nearby, never something to do.
+    const faint = Brain.check(clear, over("Clear the catch-up.", 0.2), lines)
+    expect(faint._tag === "Do" ? faint.plan.decision.act : faint).toBe("resume")
+    // Never only what he named of it, which clearing everything would lose.
+    expect(Brain.check({ ...clear, target: handle(tezos) }, over("Clear the Tezos catch-up.", 2), lines)).toEqual({ _tag: "Say", spoken: "I can only clear the whole catch-up, sir." })
+    const noted = Option.some<Brain.Noted>({ at: now - 30_000, kind: "cleared", id: 7, about: Option.none(), ids: [1, 2] })
+    expect(Brain.fast(situation("Scratch that.", { noted }), lines)).toMatchObject({ act: "undo", how: "catchup" })
   })
 })
 

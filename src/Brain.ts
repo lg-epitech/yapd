@@ -53,17 +53,19 @@ export const faintest = 0.35
 const writes: ReadonlySet<Act> = new Set<Act>(["send", "stop", "undo", "decide", "reply", "tidy"])
 
 /**
- * Acts that are only done on his word, which may not be his when it's faint
- * or said over yapd's own voice: whatever changes a thread, muting one, which
- * changes nothing there but what he hears of it, changing how yapd talks,
- * setting, offering or cancelling what he's to be told later, and what yapd
- * keeps in mind, which every prompt reads as his.
+ * What's only done on his word, which may not be his when it's faint or said
+ * over yapd's own voice: whatever changes a thread, muting one, which changes
+ * nothing there but what he hears of it, changing how yapd talks, setting,
+ * offering or cancelling what he's to be told later, what yapd keeps in mind,
+ * which every prompt reads as his, and clearing the catch-up, which sets
+ * aside what he hasn't heard.
  */
-const ownWord = (act: Act) => writes.has(act) || act === "mute" || act === "mode" || act === "remind" || act === "offer" || act === "forget" || act === "remember"
+const ownWord = ({ act, how }: Pick<Decision, "act" | "how">) =>
+  writes.has(act) || act === "mute" || act === "mode" || act === "remind" || act === "offer" || act === "forget" || act === "remember" || (act === "catchup" && how === "clear")
 
 /** Whether it's a write said over something with too little speech to be his: talk or noise nearby, never acted on, nor taken as an answer. */
-export const murmured = (decided: Pick<Decision, "act">, utterance: Pick<Assistant.Utterance, "via" | "voiced">) =>
-  utterance.via === "reply" && utterance.voiced < faintest && ownWord(decided.act)
+export const murmured = (decided: Pick<Decision, "act" | "how">, utterance: Pick<Assistant.Utterance, "via" | "voiced">) =>
+  utterance.via === "reply" && utterance.voiced < faintest && ownWord(decided)
 
 /** How sure the model is of the thread it picked. */
 export const Sure = Schema.Literal("high", "medium", "low")
@@ -84,7 +86,7 @@ export const Decision = Schema.Struct({
   /** With OPEN shown: "answers" if this answers it, "replaces" if it's something new. "" without OPEN. */
   pending: Schema.Literal("answers", "replaces", ""),
   /** send: now|after|restart · decide: accept|session|decline · again: same|more|instead|which · dismiss: later
-   *  · reply: skip · find: threads|journal · mute: mute|unmute|clear|undo · catchup: more|muted · undo: reminder|memory|message|carry
+   *  · reply: skip · find: threads|journal · mute: mute|unmute|clear|undo · catchup: more|muted|clear · undo: reminder|memory|catchup|message|carry
    *  mode: focus|quiet|normal|brief|full · remember: fact|routine · remind and offer: at|finished|asked
    *  tidy: archive|unarchive|rename|snooze|settle|pin · show: threads|thread|pr|usage|missed|said|hide|memories */
   how: Schema.String,
@@ -114,20 +116,31 @@ export const decision = (given: Partial<Decision> & Pick<Decision, "act">): Deci
   ...given,
 })
 
-/** A reminder he just set, or cancelled, or a memory he just had kept, or forgotten, kept in mind for "scratch that". */
+/**
+ * A reminder he just set, or cancelled, a memory he just had kept, or
+ * forgotten, or the catch-up he just cleared, or brought back, kept in mind
+ * for "scratch that".
+ */
 export interface Noted {
   readonly at: number
-  /** A reminder set, or cancelled; a memory kept, or forgotten. */
-  readonly kind: "reminder" | "forgot" | "memory" | "forgotten"
+  /** A reminder set, or cancelled; a memory kept, or forgotten; the catch-up cleared, or brought back. */
+  readonly kind: "reminder" | "forgot" | "memory" | "forgotten" | "cleared" | "restored"
+  /** The reminder's or the memory's; for the catch-up, its entry in the journal, or 0 when it couldn't be kept. */
   readonly id: number
   /** The thread it's about, if it's about one. */
   readonly about: Option.Option<Threads.Ref>
   /** For a routine kept in the place of one called the same, the one it took the place of, which taking it back brings back. */
   readonly replaced?: number
+  /** For the catch-up, the entries it set aside, or brought back, which taking it back brings back, or sets aside again. */
+  readonly ids?: ReadonlyArray<number>
 }
 
 /** Whether what was just changed is a memory, rather than a reminder. */
 export const memorial = (noted: Pick<Noted, "kind">) => noted.kind === "memory" || noted.kind === "forgotten"
+
+/** What a change he just made is of, as an undo names it: a reminder or offer, a memory, or the catch-up. */
+export const changeOf = (noted: Pick<Noted, "kind">): "reminder" | "memory" | "catchup" =>
+  noted.kind === "cleared" || noted.kind === "restored" ? "catchup" : memorial(noted) ? "memory" : "reminder"
 
 /** What he asked yapd to keep in mind: what's kept by voice, and the routines he wrote in his preferences. */
 export interface Memories {
@@ -1113,6 +1126,18 @@ export const modeLines = (lines: Lines, now: number) => {
 /** How many updates and notices there are, as it's said, like "four updates". */
 const updates = (n: number) => `${count(n)} ${n === 1 ? "update" : "updates"}`
 
+const units = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen"]
+const tens = ["", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety"]
+
+/** Any count below a thousand in words, the way it's said, like "fifty-three" or "a hundred and five"; past that, in figures. */
+export const inWords = (n: number): string => {
+  if (!Number.isInteger(n) || n < 0 || n >= 1000) return String(n)
+  if (n < 20) return units[n]!
+  if (n < 100) return `${tens[Math.floor(n / 10)]}${n % 10 === 0 ? "" : `-${units[n % 10]}`}`
+  const hundreds = `${n < 200 ? "a" : units[Math.floor(n / 100)]} hundred`
+  return n % 100 === 0 ? hundreds : `${hundreds} and ${inWords(n % 100)}`
+}
+
 /**
  * What's said of catching up without the model: nothing to tell, of
  * everything or of what he asked about, `named` as it's said, and a brief
@@ -1131,6 +1156,14 @@ export const catchupLines = (lines: Lines) => {
     more: `There's more${sir}. Ask me for more when you're ready.`,
     /** Turned on with `missed` kept while it was off: the news, then the question. */
     offer: (missed: number) => ({ news: `You missed ${count(missed)}${sir}.`, question: "Want the rundown?" }),
+    /** He cleared the catch-up: how many updates and notices it set aside, in words. */
+    cleared: (n: number) => `Cleared${sir}: ${inWords(n)} ${n === 1 ? "update" : "updates"} set aside.`,
+    /** He cleared the catch-up with nothing in it. */
+    nothingToClear: `There's nothing to catch up on${sir}.`,
+    /** He took back clearing it: what it set aside is his to hear again. */
+    back: (n: number) => `Brought ${n === 1 ? "it" : "them"} back${sir}.`,
+    /** He asked to clear only some of it, which can't be done. */
+    wholeOnly: `I can only clear the whole catch-up${sir}.`,
   }
 }
 
@@ -1572,7 +1605,7 @@ const asksHim = (situation: Pick<Situation, "subject" | "desk">) => {
 export const fast = (situation: Situation, lines: Lines): Decision | undefined => {
   const decided = glimpsed(situation, lines)
   // Begun while yapd's own voice could still get into the microphone, a yes or a name to act on may be its own words: the model weighs that.
-  return decided !== undefined && situation.utterance.echo !== undefined && ownWord(decided.act) ? undefined : decided
+  return decided !== undefined && situation.utterance.echo !== undefined && ownWord(decided) ? undefined : decided
 }
 
 /** Whisper repeats itself on noise, but "no, no, no" is still no. */
@@ -1638,11 +1671,11 @@ const glimpsed = (situation: Situation, lines: Lines): Decision | undefined => {
     return decision({ act: "stop", target: on.value.handle, pending: replacing })
   }
   // With a question open, "cancel that" is a no to it. Otherwise it takes back the newest change he made: a mute, a reminder he set or
-  // cancelled, a memory he had kept or forgotten, or whatever else yapd last did.
+  // cancelled, a memory he had kept or forgotten, the catch-up he cleared, or whatever else yapd last did.
   const latest = newest(situation)
   if (scratching.has(said) && Option.isNone(open) && latest === "mute") return decision({ act: "mute", how: "undo" })
   if (scratching.has(said) && Option.isNone(open) && latest === "noted") {
-    return decision({ act: "undo", how: Option.exists(situation.noted ?? Option.none(), memorial) ? "memory" : "reminder" })
+    return decision({ act: "undo", how: Option.match(situation.noted ?? Option.none(), { onNone: () => "reminder", onSome: changeOf }) })
   }
   if (scratching.has(said) && Option.isNone(open) && latest === "acted" && Option.isSome(situation.acted)) {
     const acted = situation.acted.value
@@ -1758,11 +1791,12 @@ export const newest = (situation: Pick<Situation, "acted" | "muteChange" | "note
 
 /**
  * What an undo takes back, as the model took him to mean it: the reminder or
- * offer, the memory, what was done to a thread, a message or a stop, or, for
- * no more than "scratch that", whatever was done last.
+ * offer, the memory, the catch-up he cleared, what was done to a thread, a
+ * message or a stop, or, for no more than "scratch that", whatever was done
+ * last.
  */
-export const undoes = (how: string): "reminder" | "memory" | "thread" | "last" =>
-  how === "reminder" ? "reminder" : how === "memory" ? "memory" : how === "message" || how === "carry" ? "thread" : "last"
+export const undoes = (how: string): "reminder" | "memory" | "catchup" | "thread" | "last" =>
+  how === "reminder" ? "reminder" : how === "memory" ? "memory" : how === "catchup" ? "catchup" : how === "message" || how === "carry" ? "thread" : "last"
 
 /** A time the model gave, as his clock reads it, or with an offset; NaN for anything else. */
 export const instant = Mutes.instant
@@ -2549,6 +2583,14 @@ const checking = (choice: Decision, situation: Situation, lines: Lines): Checked
   if (choice.act === "dismiss" || choice.act === "resume" || choice.act === "again" || choice.act === "start") {
     return doing({ decision: choice, target: Option.none() })
   }
+  // Clearing it sets aside all of what a catch-up of everything would tell him, never only what he named of it, and only on his word:
+  // said over something, too little speech is talk or noise nearby, never something to do.
+  if (choice.act === "catchup" && choice.how === "clear") {
+    if (murmured(choice, situation.utterance)) return doing({ decision: { ...choice, act: "resume" }, target: Option.none() })
+    const named = choice.target !== "" || choice.text.trim() !== "" || choice.machine.trim() !== "" || choice.when.trim() !== ""
+    if (named) return { _tag: "Say", spoken: catchupLines(lines).wholeOnly }
+    return doing({ decision: { ...choice, target: "" }, target: Option.none() })
+  }
   // Catching up only reads what yapd kept, which has a machine that's away too: a thread it names is one on the desk, one only in what
   // he missed, by its own handle, or one he muted that isn't on the desk, by its handle in MUTED.
   if (choice.act === "catchup") {
@@ -2800,10 +2842,12 @@ const writing = (
   // Said over something, too little speech is talk or noise nearby, never something to do.
   if (murmured(choice, utterance)) return { _tag: "Do", plan: { decision: { ...choice, act: "resume" }, target: Option.none() } }
   // Taking back what was just done needs no thread named: it's what was just done. Nor does whatever was done last, whatever thread
-  // the model filled in, nor a reminder just set of no thread, like one for a time, nor a memory, which is of none: a thread filled in
-  // for it can only be the one he was hearing about.
+  // the model filled in, nor a reminder just set of no thread, like one for a time, nor a memory or the catch-up, which are of none: a
+  // thread filled in for it can only be the one he was hearing about.
   const unthreaded =
-    undoes(choice.how) === "memory" || (undoes(choice.how) === "reminder" && !Option.exists(situation.noted ?? Option.none(), ({ about }) => Option.isSome(about)))
+    undoes(choice.how) === "memory" ||
+    undoes(choice.how) === "catchup" ||
+    (undoes(choice.how) === "reminder" && !Option.exists(situation.noted ?? Option.none(), ({ about }) => Option.isSome(about)))
   if (choice.act === "undo" && (Option.isNone(target) || undoes(choice.how) === "last" || unthreaded)) {
     return { _tag: "Do", plan: { decision: { ...choice, target: "" }, target: Option.none() } }
   }
@@ -2925,7 +2969,7 @@ const contract = `Reply with only a JSON object with the keys "act", "target", "
 
 "act", what he wants:
 - "answer": he asked something you can answer from THREADS, WAITING ON YOU, LATELY, UNHEARD, USAGE, REMINDERS and MEMORIES, or from what you know yourself. "spoken" is the answer. "target" is the thread it's about, if it's about one. Asked what a routine does, like "what's my ship routine?", say you can't read its steps out.
-- "catchup": he wants to hear what he hasn't heard or missed, or what came in while he was away or had you off, about everything or one thread, project or machine, however he puts it, even when UNHEARD could answer it. yapd gathers it from what it kept and briefs him; only yapd knows what he has heard. "target" is a handle from THREADS, UNHEARD or MUTED for one thread, a muted one too; "text" is a project as written in UNHEARD, for all of it; "machine" is one machine; "when" is the time for "since …", as his clock reads it, "YYYY-MM-DDTHH:mm"; leave them "" for everything, which leaves out the threads he muted. "how" is "more" when he wants more of the catch-up he just heard, "muted" for what his muted threads said. "spoken" is "". A question about it that isn't asking to be caught up, like whether a thread finished or how much he missed, is "answer" from UNHEARD. Catching up is only ever about what he hears: telling a thread something, even put as catching it up, bringing it up to speed or filling it in on a decision, is "send" to that thread.
+- "catchup": he wants to hear what he hasn't heard or missed, or what came in while he was away or had you off, about everything or one thread, project or machine, however he puts it, even when UNHEARD could answer it. yapd gathers it from what it kept and briefs him; only yapd knows what he has heard. "target" is a handle from THREADS, UNHEARD or MUTED for one thread, a muted one too; "text" is a project as written in UNHEARD, for all of it; "machine" is one machine; "when" is the time for "since …", as his clock reads it, "YYYY-MM-DDTHH:mm"; leave them "" for everything, which leaves out the threads he muted. "how" is "more" when he wants more of the catch-up he just heard, "muted" for what his muted threads said, or "clear" when he wants all of it set aside without hearing it, however he puts it, like "clear the catch-up", "skip the catch-up", "mark everything as heard" or "I don't need the catch-up", with "target", "text", "machine" and "when" "": yapd clears it all, and he can take that back. "spoken" is "". A question about it that isn't asking to be caught up, like whether a thread finished or how much he missed, is "answer" from UNHEARD. Catching up is only ever about what he hears: telling a thread something, even put as catching it up, bringing it up to speed or filling it in on a decision, is "send" to that thread.
 - "look": he asked what a thread is doing right now, or for detail none of the lines below give. "target" is the thread; "spoken" is empty. You'll be shown what it's doing and asked again.
 - "find": he named something specific that nothing in THREADS fits, or asked what was said or done a while ago. "text" is the words to search for, "how" is "threads" to search what was written in the threads, or "journal" for what you heard and said. You'll be shown what's found and asked again.
 - "again": he wants to hear what you said last again. "how" is "same"; "spoken" is that line.
@@ -2933,7 +2977,7 @@ const contract = `Reply with only a JSON object with the keys "act", "target", "
 - "start": new work: a change, a fix, an investigation, a review, a question that needs the web, the code or time. "text" is the request in his words. yapd works out where it goes and starts it.
 - "send": a message for a thread, like an instruction, a correction or an answer to what it asked. "target" is the thread, "text" the message as he'd type it. "how" is "now"; "after" when he says after, once it's done or when it finishes; "restart" when he says to drop what it's doing and do this instead. A message he wants sent at a later time, like "at five" or "in an hour", is "offer" at that time, never "send": yapd only asks him then. A routine's name from MEMORIES said as a request, like "land it", is "send", or "offer" when he wants it offered, with "text" its handle there, like p1, and "target" the thread it's for: FOCUS, unless he names another. You don't know its steps and never write them: yapd puts them in. Anything more he says with it that's a request of its own, like "and tell the Mina one to rebase", goes in "rest". Words that change what the routine asks, like "for typos" or "but only the fee code", make it a message of his own words, never the routine nor its steps rewritten.
 - "stop": stop a thread's run, when he says to stop the thread, the run or the work. "target" is the thread.
-- "undo": take back what you just did for him, as LATELY shows it: the message you just sent, the reminder or offer you just set or cancelled, or what you just remembered or forgot. "how" is which he means: "reminder" for the reminder or offer, "memory" for what you remembered or forgot, "message" for the message you sent a thread, "carry" when he wants a thread you stopped to carry on, and "" only when he says no more than "scratch that" or "undo that": whatever you did last. "target" is the thread only when he names one, never the one he's hearing about when he doesn't; "" when "how" is "".
+- "undo": take back what you just did for him, as LATELY shows it: the message you just sent, the reminder or offer you just set or cancelled, what you just remembered or forgot, or the catch-up you just cleared. "how" is which he means: "reminder" for the reminder or offer, "memory" for what you remembered or forgot, "catchup" for the catch-up you cleared, like "bring them back", "message" for the message you sent a thread, "carry" when he wants a thread you stopped to carry on, and "" only when he says no more than "scratch that" or "undo that": whatever you did last. "target" is the thread only when he names one, never the one he's hearing about when he doesn't; "" when "how" is "".
 - "decide": he allows, or turns down, what a thread waits for him to allow, in WAITING ON YOU or OPEN. "target" is the thread; "how" is "accept", "session" only when he says for the session or from now on, or "decline".
 - "reply": he answers a thread's question, in WAITING ON YOU or OPEN. "target" is the thread; "text" is his answer: the option he picked, as it's written, or his own words. A question in several parts is answered a part at a time: "text" answers only the part he's at, and yapd asks him the rest. "text" empty when he wants to hear a thread's question before answering: yapd reads it to him.
 - "dismiss": he wants you to stop talking, or it needs nothing: thanks, okay, an acknowledgement, or no to OPEN, unless OPEN asks a thread's question, which a no answers.
