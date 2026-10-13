@@ -1189,7 +1189,7 @@ export const make = (
         yield* journal.hold(remindRows, "off")
         return yield* hush(finished, entry, detail, keys, off, claimed === undefined ? undefined : Option.flatten(claimed))
       }
-      const lateHeld: Option.Option<Held> = yield* heldFor(priority, full, mutable, opening)
+      const lateHeld: Option.Option<Held> = reminded ? Option.none() : yield* heldFor(priority, full, mutable, opening)
       if (Option.isSome(lateHeld)) {
         yield* removeFile(audio)
         return yield* hush(finished, entry, detail, keys, { _tag: "Held", why: lateHeld.value }, claimed === undefined ? undefined : Option.flatten(claimed))
