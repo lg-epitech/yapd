@@ -297,29 +297,38 @@ const wouldRun = (items: ReadonlyArray<typeof Item.Type>, approval: typeof Item.
 }
 
 /**
- * What names something only he should type in, like a password, a key or a
- * token to sign in with, as words of its own, where "_" parts words as a
- * space does, as in "api_key".
+ * What names something only he should know, like a password, a PIN code, a
+ * recovery phrase, a login or an API key, as words of its own, where "_"
+ * parts words as a space does, as in "api_key". One list for a question that
+ * asks him to type one in and a fact never kept as a memory, so the two can't
+ * drift.
  */
-const credentials = new RegExp(
+const credentialNames = new RegExp(
   String.raw`(?<![a-z0-9])(?:${[
-    String.raw`pass(?:word|phrase|code)s?|passwd`,
+    String.raw`pass(?:word|phrase|code|key)s?|passwd|pass[ -]phrases?`,
     String.raw`(?:api|access|secret|private|ssh|signing|deploy|license|encryption|master)[ _-]?keys?`,
     String.raw`(?:api|access|auth|bearer|refresh|personal access|github|gitlab|npm|pypi|session|id)[ _-]?tokens?`,
-    String.raw`(?:one[ -]time|verification|auth(?:entication|orization)?|2fa|mfa|sms|security|recovery|backup|login|sign[ -]?in) (?:codes?|passwords?)`,
+    String.raw`(?:one[ -]time|verification|auth(?:entication|orization)?|2fa|mfa|two[ -]factor|sms|security|recovery|backup|login|sign[ -]?in) (?:codes?|passwords?)`,
     // A code he's sent, like "the code sent to your phone", or "the code we texted you".
     String.raw`codes?(?= (?:\w+ )?(?:sent|texted|emailed|messaged)\b)`,
     // What gives a wallet away: its phrase, or its words.
-    String.raw`(?:recovery|seed|wallet|backup) (?:phrases?|words)|(?:12|24|twelve|twenty[ -]four) words`,
+    String.raw`(?:recovery|seed|wallet|backup) (?:phrases?|words)|(?:12|24|twelve|twenty[ -]four)[ -]words?`,
+    String.raw`keychain (?:entry|entries|items?)`,
     String.raw`webhooks? urls?|auth(?:orization)? headers?`,
     String.raw`connection (?:strings?|ur[il]s?)|(?:database|db)[ _-]?ur[il]`,
-    String.raw`secrets?|credentials?|mnemonic|otp|jwt|dsn|\.env|bearer|logins?|service[ _-]?accounts?`,
+    String.raw`credentials?|mnemonics?|otps?|jwt|dsn|\.env|bearer|log-?ins?|service[ _-]?accounts?`,
   ].join("|")})(?![a-z0-9])`,
   "i",
 )
 
+/** What names one in a question, which a fact may only mention in passing, like "the secret sauce". */
+const credentials = new RegExp(String.raw`${credentialNames.source}|(?<![a-z0-9])secrets?(?![a-z0-9])`, "i")
+
 /** One named as it's written in code, in capitals, like OPENAI_API_KEY, HF_TOKEN or SENTRY_AUTH, or that's only ever one in capitals, like a PAT or a PIN. */
 const capitals = /\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*_(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|PASS|PWD|PAT|DSN|AUTH|CREDENTIALS?|URL|URI)S?\b|\b(?:PAT|PIN)s?\b/
+
+/** Whether what's said names a credential, however it's said: as code names it, or by a name that's only ever one. */
+export const namesCredential = (text: string) => capitals.test(text) || credentialNames.test(text)
 
 /** What names one only when he's asked to give it, or isn't asked to pick, since a token or a key is often something else, like a coin or a field. */
 const bare = /(?<![a-z0-9])(?:keys?|tokens?|pwd|cookies?|webhooks?|pin (?:code|number)s?)(?![a-z0-9])/i

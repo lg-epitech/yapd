@@ -2295,42 +2295,70 @@ export const answersTo = (phrase: string) => {
   )
 }
 
-/** What names something only he should know, like a password, a PIN, a key or a token, or a code or phrase that stands for one. */
-const credential = String.raw`(?:pass(?:word|code|phrase)|pin(?: code)?|secret|token|(?:api|access|private) key|key|recovery code|seed phrase|(?:2fa|two[ -]factor|backup) code)s?`
-
-/** A word of a value, as it starts: not where a sentence or a clause ends. */
-const valued = String.raw`[^\s.,;:!?…]`
+/**
+ * What names one in what he says, though an agent's question may well mean
+ * something else by it: a PIN, a PAT, in any case, or a lock's or a safe's
+ * combination.
+ */
+const alsoCredentials = new RegExp(
+  String.raw`(?<![a-z0-9])(?:pins?|pats?|(?:safe|lock|padlock|locker|vault)['’]?s? (?:combination|combo)s?|(?:combination|combo)s? (?:to|for|of|on) (?:\S+ ){0,3}?(?:safe|lock|padlock|locker|vault)s?)(?![a-z0-9])`,
+  "i",
+)
 
 /**
- * A credential given with its value, whatever's said between of whose or
- * what for it is: "my password for GitHub is hunter2", "the password I use
- * there is …", "the GitHub password: …", "my token's …", one word after a
- * comma or a dash at the end, "my GitHub password, hunter2", or the other way
- * round, "hunter2 is my GitHub password". Taken for one whenever it could be,
- * so "the key is to batch them" is too, but never "rig's key bindings are
- * vim-style", where what follows the word is what it's of.
+ * A word that's often one, and as often something else, with the word after
+ * it, which may say what else: a key, a token, a secret, a code or a
+ * combination. A code an app's name ends in, like T3 Code's, is never one.
  */
-const given = [
-  new RegExp(
-    String.raw`(?<![a-z0-9])${credential}(?:\s+(?:for|to|of|on|at|in|into|with|from|i|we|you|that|which)\s+[^\s:=]+?(?:\s+[^\s:=]+?){0,4}?)?(?:['’]s\s+|\s*[:=]\s*|\s+(?:is|was|are|were|equals)\s+)${valued}`,
-    "i",
-  ),
-  new RegExp(String.raw`(?<![a-z0-9])${credential}(?:\s*,\s*|\s+[—–-]\s+)${valued}+\s*[.!?…]?\s*$`, "i"),
-  new RegExp(
-    String.raw`${valued}+\s+(?:is|was|are|were)\s+(?:my|the|our|your|his|her|their)\s+(?:${valued}+\s+){0,3}?${credential}(?![a-z0-9])(?=\s*$|\s*[.,;:!?…)"'”’]|\s+(?:for|to|of|on|at|in|with|from)\s)`,
-    "i",
-  ),
-]
+const vague = /(?<![a-z0-9])((?:t3|claude|vs|studio) (?=code))?(key|token|secret|code|combination|combo)(s?)(?![a-z0-9])(?=(?:[ -]([a-z]+))?)/gi
+
+/**
+ * What a key, a token, a secret or a code is when the word after it says so,
+ * like "key bindings", "token budget", "secret sauce" or "code review". Kept
+ * short, since anything else is taken for one, even "key words", which a
+ * recovery phrase is too.
+ */
+const somethingElse: Readonly<Record<string, ReadonlySet<string>>> = {
+  key: new Set(["binding", "bindings", "binds", "shortcut", "shortcuts", "point", "points", "takeaway", "takeaways", "idea", "ideas", "insight", "insights", "feature", "features", "part", "parts", "step", "steps", "question", "questions"]),
+  token: new Set(["budget", "budgets", "limit", "limits", "count", "counts", "usage", "window", "windows"]),
+  secret: new Set(["sauce"]),
+  code: new Set(["base", "bases", "review", "reviews", "style", "path", "paths"]),
+}
+
+/** What could say what one is, before it: "hunter2 is my Vercel token". */
+const being = /(?<![a-z0-9])(?:is|are|was|were|equals)(?![a-z0-9])/i
+
+/** What could set one to its value, or say what it is, after it: "is", "was", "are", "'s", a colon, an equals sign, a comma or a dash. */
+const setting = /(?<![a-z0-9])(?:is|are|was|were|am|be|been|being|equals)(?![a-z0-9])|['’]s(?![a-z0-9])|[:=,;—–]|\s-|-\s/i
+
+/**
+ * Whether what's said may give one of those words' values: one that isn't
+ * an app's name or what the word after it says, with anything after it that
+ * could set or say what it is, a sentence away too, as in "my Vercel token.
+ * It's …", or "is" before it, as in "… is my Vercel token".
+ */
+const givesVague = (words: string) =>
+  [...words.matchAll(vague)].some(
+    ({ 0: found, 1: app, 2: name, 3: plural, 4: after, index }) =>
+      app === undefined &&
+      (plural !== "" || !somethingElse[name!.toLowerCase()]?.has(after?.toLowerCase() ?? "")) &&
+      (being.test(words.slice(0, index)) || setting.test(words.slice(index + found.length))),
+  )
 
 /**
  * Whether what he asked to be kept in mind may give a secret away, in all he
- * said or in what the model made of it: whatever looks like one, or a
- * credential given with its value. It's refused as a secret before anything
- * else would turn it down, since only that keeps his words out of the
- * journal.
+ * said or in what the model made of it: whatever looks like one; anything
+ * that names a password, a PIN, a recovery phrase, a login or similar, even
+ * one that isn't secret, like the name of his password manager; or a key, a
+ * token, a secret or a code with anything that could say what it is. Refused
+ * broadly, since a secret kept is in every prompt. It's refused as a secret
+ * before anything else would turn it down, since only that keeps his words
+ * out of the journal.
  */
 export const secretive = (choice: Pick<Decision, "text">, utterance: Pick<Assistant.Utterance, "heard" | "whole">) =>
-  [utterance.heard, utterance.whole ?? "", choice.text].some((words) => T3Actions.revealing(words) || given.some((pattern) => pattern.test(words)))
+  [utterance.heard, utterance.whole ?? "", choice.text].some(
+    (words) => T3Actions.revealing(words) || T3Actions.namesCredential(words) || alsoCredentials.test(words) || givesVague(words),
+  )
 
 /** What's said of what can't be kept in mind, or forgotten. */
 const rememberLines = (lines: Pick<Lines, "address">) => {

@@ -12328,14 +12328,31 @@ describe("Assistant memories", () => {
     expect(result.journal).not.toContain("4 8 2 7")
   })
 
-  test("a password, key or token given with its value isn't remembered, whatever's said between, while a fact that only names one is", async () => {
-    const facts = [
+  test("a fact that mentions a password, a PIN, a recovery phrase, a login or similar, or gives a key, a token, a secret or a code, isn't remembered, while one that only uses those words for something else is", async () => {
+    const refused = [
       "my password for GitHub is hunter2",
       "the GitHub password: hunter2",
       "my npm token's hunter2",
-      "the Tezos repo uses pnpm",
-      "rig's key bindings are vim-style",
+      "the staging DB password at work is fennel42",
+      "the token Vercel gave me is 8kq2zz",
+      "my PIN number is 4827",
+      "the recovery phrase for my Ledger is apple banana cherry",
+      "the alarm code at the office is 4827",
+      "the router login is admin, hunter2",
+      "the mnemonic for the test wallet is apple banana cherry",
+      "the twelve words for the test wallet are apple banana cherry",
+      "the safe combination is 12 34 56",
+      "the door code's 4827",
+      "my VPN credentials are laurent and hunter2",
+      "my GitHub PAT is hunter2",
+      "my password is... hunter2",
+      "my GitHub password. It's hunter2",
+      "as for my GitHub password, it's hunter2",
+      "hunter2 is my Vercel token",
+      "my Vercel token, hunter2",
     ]
+    const kept = ["the Tezos repo uses pnpm", "rig's key bindings are vim-style", "the token budget is tight", "the Mina repo needs Node 22"]
+    const facts = [...refused, ...kept]
     const result = await run(
       Effect.gen(function* () {
         const made = yield* assistant(
@@ -12354,10 +12371,9 @@ describe("Assistant memories", () => {
         return { said, kept: (yield* made.memories!.list).map(({ text }) => text), journal: JSON.stringify(yield* made.journal.since(0)) }
       }),
     )
-    const refused = "I won't keep that, sir. It looks like a secret."
-    expect(result.said.slice(0, 3)).toEqual([refused, refused, refused])
-    expect(result.kept).toEqual(["the Tezos repo uses pnpm", "rig's key bindings are vim-style"])
-    expect(result.journal).not.toContain("hunter2")
+    expect(result.said.slice(0, refused.length)).toEqual(refused.map(() => "I won't keep that, sir. It looks like a secret."))
+    expect(result.kept).toEqual(kept)
+    for (const value of ["hunter2", "fennel42", "8kq2zz", "4827", "apple banana", "12 34 56"]) expect(result.journal).not.toContain(value)
   })
 
   test("a secret the model's answer says back is said, but kept in the journal and logged nowhere", async () => {
