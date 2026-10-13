@@ -22,6 +22,8 @@ export class Transcriber extends Context.Tag("yapd/Transcriber")<
      * answering, it listens for those.
      */
     readonly transcribe: (audio: Float32Array, terms?: ReadonlyArray<string>) => Effect.Effect<string, TranscribeError>
+    /** Whether it can hear now, its model loaded, rather than only once that's done, which the first time can take a minute. */
+    readonly ready: Effect.Effect<boolean>
   }
 >() {}
 
@@ -229,7 +231,15 @@ export const WhisperTranscriber = Layer.scopedContext(
     const language = yield* Config.language
     const repo = yield* Config.whisper
     const dictationRepo = yield* Config.dictationWhisper
-    const model = yield* load(repo, "Can't understand interruptions")
+    /** Whether the model for interruptions has loaded, as it has once anything has had it. */
+    let loaded = false
+    const model = (yield* load(repo, "Can't understand interruptions")).pipe(
+      Effect.tap(() =>
+        Effect.sync(() => {
+          loaded = true
+        }),
+      ),
+    )
     const dictation = dictationRepo === repo ? model : yield* load(dictationRepo, "Can't hear dictation")
     if (yield* Config.listen) {
       yield* Effect.forkScoped(model.pipe(Effect.ignore))
@@ -244,6 +254,7 @@ export const WhisperTranscriber = Layer.scopedContext(
     const interruption = transcribe(model, language, "30 seconds")
     return Context.make(Transcriber, {
       transcribe: (audio, terms) => interruption(audio, terms).pipe(Effect.mapError(({ cause }) => new TranscribeError({ cause }))),
+      ready: Effect.sync(() => loaded),
     }).pipe(
       Context.add(DictationTranscriber, {
         // Long enough for the model to finish downloading, when they dictate as soon as yapd starts.

@@ -2,7 +2,7 @@ import { Context, Data, Effect, Layer, Option, Schema } from "effect"
 import type * as Assistant from "./Assistant.ts"
 import { aloud, inEnglish, styled } from "./Condenser.ts"
 import * as Config from "./Config.ts"
-import type { Kept } from "./Journal.ts"
+import { type Kept, routinesIn, unroutined } from "./Journal.ts"
 import * as Ledger from "./Ledger.ts"
 import type * as Memory from "./Memory.ts"
 import * as Missed from "./Missed.ts"
@@ -13,7 +13,7 @@ import { addressed, type Lines, unaddressed } from "./Persona.ts"
 import type * as Preferences from "./Preferences.ts"
 import * as Questions from "./Questions.ts"
 import * as Reminders from "./Reminders.ts"
-import { agreed, enough, gist, hallucinated, type Line, morePlease, noted } from "./Responder.ts"
+import { agreed, enough, gist, hallucinated, halts, type Line, morePlease, noted, padding, wakes } from "./Responder.ts"
 import * as T3Actions from "./T3Actions.ts"
 import * as Threads from "./Threads.ts"
 
@@ -53,17 +53,19 @@ export const faintest = 0.35
 const writes: ReadonlySet<Act> = new Set<Act>(["send", "stop", "undo", "decide", "reply", "tidy"])
 
 /**
- * Acts that are only done on his word, which may not be his when it's faint
- * or said over yapd's own voice: whatever changes a thread, muting one, which
- * changes nothing there but what he hears of it, changing how yapd talks,
- * setting, offering or cancelling what he's to be told later, and what yapd
- * keeps in mind, which every prompt reads as his.
+ * What's only done on his word, which may not be his when it's faint or said
+ * over yapd's own voice: whatever changes a thread, muting one, which changes
+ * nothing there but what he hears of it, changing how yapd talks, setting,
+ * offering or cancelling what he's to be told later, what yapd keeps in mind,
+ * which every prompt reads as his, and clearing the catch-up, which sets
+ * aside what he hasn't heard.
  */
-const ownWord = (act: Act) => writes.has(act) || act === "mute" || act === "mode" || act === "remind" || act === "offer" || act === "forget" || act === "remember"
+const ownWord = ({ act, how }: Pick<Decision, "act" | "how">) =>
+  writes.has(act) || act === "mute" || act === "mode" || act === "remind" || act === "offer" || act === "forget" || act === "remember" || (act === "catchup" && how === "clear")
 
 /** Whether it's a write said over something with too little speech to be his: talk or noise nearby, never acted on, nor taken as an answer. */
-export const murmured = (decided: Pick<Decision, "act">, utterance: Pick<Assistant.Utterance, "via" | "voiced">) =>
-  utterance.via === "reply" && utterance.voiced < faintest && ownWord(decided.act)
+export const murmured = (decided: Pick<Decision, "act" | "how">, utterance: Pick<Assistant.Utterance, "via" | "voiced">) =>
+  utterance.via === "reply" && utterance.voiced < faintest && ownWord(decided)
 
 /** How sure the model is of the thread it picked. */
 export const Sure = Schema.Literal("high", "medium", "low")
@@ -84,7 +86,8 @@ export const Decision = Schema.Struct({
   /** With OPEN shown: "answers" if this answers it, "replaces" if it's something new. "" without OPEN. */
   pending: Schema.Literal("answers", "replaces", ""),
   /** send: now|after|restart · decide: accept|session|decline · again: same|more|instead|which · dismiss: later
-   *  · reply: skip · find: threads|journal · mute: mute|unmute|clear|undo · catchup: more|muted · undo: reminder|memory|message|carry
+   *  · reply: skip · find: threads|journal · mute: mute|unmute|clear|undo|subagents|nosubagents · catchup: more|muted|subagents|clear
+   *  · undo: reminder|memory|catchup|message|carry
    *  mode: focus|quiet|normal|brief|full · remember: fact|routine · remind and offer: at|finished|asked
    *  tidy: archive|unarchive|rename|snooze|unsnooze|settle|unsettle|pin|unpin · show: threads|thread|pr|usage|missed|said|hide|memories */
   how: Schema.String,
@@ -114,20 +117,31 @@ export const decision = (given: Partial<Decision> & Pick<Decision, "act">): Deci
   ...given,
 })
 
-/** A reminder he just set, or cancelled, or a memory he just had kept, or forgotten, kept in mind for "scratch that". */
+/**
+ * A reminder he just set, or cancelled, a memory he just had kept, or
+ * forgotten, or the catch-up he just cleared, or brought back, kept in mind
+ * for "scratch that".
+ */
 export interface Noted {
   readonly at: number
-  /** A reminder set, or cancelled; a memory kept, or forgotten. */
-  readonly kind: "reminder" | "forgot" | "memory" | "forgotten"
+  /** A reminder set, or cancelled; a memory kept, or forgotten; the catch-up cleared, or brought back. */
+  readonly kind: "reminder" | "forgot" | "memory" | "forgotten" | "cleared" | "restored"
+  /** The reminder's or the memory's; for the catch-up, its entry in the journal, or 0 when it couldn't be kept. */
   readonly id: number
   /** The thread it's about, if it's about one. */
   readonly about: Option.Option<Threads.Ref>
   /** For a routine kept in the place of one called the same, the one it took the place of, which taking it back brings back. */
   readonly replaced?: number
+  /** For the catch-up, the entries it set aside, or brought back, which taking it back brings back, or sets aside again. */
+  readonly ids?: ReadonlyArray<number>
 }
 
 /** Whether what was just changed is a memory, rather than a reminder. */
 export const memorial = (noted: Pick<Noted, "kind">) => noted.kind === "memory" || noted.kind === "forgotten"
+
+/** What a change he just made is of, as an undo names it: a reminder or offer, a memory, or the catch-up. */
+export const changeOf = (noted: Pick<Noted, "kind">): "reminder" | "memory" | "catchup" =>
+  noted.kind === "cleared" || noted.kind === "restored" ? "catchup" : memorial(noted) ? "memory" : "reminder"
 
 /** A thread yapd archived for him, which unarchiving brings back: as it was called then, and when. */
 export interface Archived {
@@ -154,6 +168,12 @@ export interface Situation {
   /** The last few things heard, said or done, from the last three hours. */
   readonly lately: ReadonlyArray<Kept>
   /**
+   * What yapd sent the thread "it" or a second look is about that was one of
+   * his routines' steps, of the thread's last twenty sent, so the words it
+   * was asked are its name however long ago they went, past LATELY.
+   */
+  readonly sent?: ReadonlyArray<Kept>
+  /**
    * What he hasn't heard, a thread at a time, what needs him first: what was
    * never read out, held, kept quiet or kept while yapd was off, and what was
    * cut off since he last spoke, but not what's waiting to be read.
@@ -161,7 +181,9 @@ export interface Situation {
   readonly missed: Missed.Missed
   /** The threads he muted. */
   readonly mutes: ReadonlyArray<Mutes.Mute>
-  /** The last change he made to what's muted, in the last two minutes, which "scratch that" may mean. */
+  /** The threads whose subagents he has read to him. */
+  readonly reading?: ReadonlyArray<Mutes.Reading>
+  /** The last change he made to what's muted, or to whose subagents are read, in the last two minutes, which "scratch that" may mean. */
   readonly muteChange: Option.Option<Mutes.Change>
   readonly usage: Option.Option<Threads.Usage>
   /** On a second look: what a thread is doing, or what a search found. */
@@ -208,6 +230,14 @@ export interface Brief {
 export interface Plan {
   readonly decision: Decision
   readonly target: Option.Option<Threads.Listed>
+  /**
+   * The rest the model gave that isn't done, taken out of the decision's,
+   * which he's told was left: one beside all he asked to be kept in mind,
+   * which is no request of his.
+   */
+  readonly left?: string
+  /** For a message or an offer that's one of his routines' steps, as code put them in for its name, the routine's name. */
+  readonly routine?: string
 }
 
 /** What a decision comes to once checked: done, asked about, or answered with a reason. */
@@ -355,7 +385,8 @@ const when = (how: string) => (how === "after" || how === "restart" ? how : "now
  * Tezos fees", the same way, title and time, or none given. Fewer than were
  * asked about is the model's pick of those he kept, which only a sure one
  * stands for. Anything else, like another thread or other words, is
- * something else he wants instead.
+ * something else he wants instead: to "Want the rundown?", "just clear them"
+ * sets the catch-up aside unheard.
  */
 export const agrees = (open: Pick<Assistant.Open, "decision" | "candidates">, decided: Decision, situation: Pick<Situation, "desk" | "archived">) => {
   const asked = open.decision
@@ -384,6 +415,7 @@ export const agrees = (open: Pick<Assistant.Open, "decision" | "candidates">, de
     case "send":
       return (decided.text.trim() === "" || words(decided.text) === words(asked.text)) && (decided.how.trim() === "" || when(decided.how) === when(asked.how))
     case "undo":
+    case "catchup":
       return decided.how.trim() === "" || decided.how === asked.how
     default:
       return true
@@ -1118,6 +1150,15 @@ export const tidyTargets = (
     }),
   )
 
+/** What one of a thread's subagents goes by in FOCUS when he's on about its update, for the model to mute or unmute it alone: it's never on the desk. */
+export const subagentHandle = "s1"
+
+/** The update from one of a thread's subagents its handle in FOCUS stands for: none for any other handle, or with no such update in FOCUS. */
+export const subagentBy = (handle: string, situation: Pick<Situation, "subject">): Option.Option<Extract<Assistant.Subject, { readonly _tag: "Session" }>["update"]> => {
+  const { subject } = situation
+  return handle.trim() === subagentHandle && subject._tag === "Session" && subject.update.subagent !== undefined ? Option.some(subject.update) : Option.none()
+}
+
 /** What's said once a thread is muted or unmuted, or found as it was, by name or as "it", and once every thread is unmuted. */
 export const muteLines = (lines: Lines, name: string, now: number) => {
   const sir = addressed(lines)
@@ -1132,6 +1173,42 @@ export const muteLines = (lines: Lines, name: string, now: number) => {
     unchanged: `There's no mute to take back${sir}.`,
     elsewhere: `Ask me that with the shortcut${sir}. Over an update, I can only mute or unmute the one I'm reading.`,
   }
+}
+
+/**
+ * What's said once a thread's subagents are read to him or kept to yapd, or
+ * found as they were, by its name or as "it": a lasting setting, which reads
+ * nothing now, never one for a set time.
+ */
+export const subagentLines = (lines: Lines, name: string) => {
+  const sir = addressed(lines)
+  const theirs = name === "it" ? "its subagents" : `the subagents of ${name}`
+  return {
+    on: `From now on I'll read you ${theirs}${sir}.`,
+    /** After `on`, when some of what they said is kept. */
+    kept: "Ask me what they said for the ones so far.",
+    already: `I'm reading you ${theirs} already${sir}.`,
+    off: `I'll keep ${theirs} to myself${sir}.`,
+    notOn: `I'm not reading you ${theirs}${sir}.`,
+    again: (on: boolean) => (on ? `I'll read you ${theirs} again${sir}.` : `Back to keeping ${theirs} to myself${sir}.`),
+    untimed: (on: boolean) =>
+      on
+        ? `I can't read you ${theirs} for a set time${sir}, only until you tell me to stop.`
+        : `I can't keep ${theirs} to myself for a set time${sir}, only until you ask for them again.`,
+    /** For a session that isn't a T3 Code thread's, like one in a terminal. */
+    session: `I can only read a T3 Code thread's subagents${sir}.`,
+    elsewhere: `Ask me that with the shortcut${sir}. Over an update, say read its subagents, or stop reading them.`,
+  }
+}
+
+/** What's said once the last change to what's muted, or to whose subagents are read, is taken back, by what taking it back changed. */
+export const takenBack = (lines: Lines, undone: Option.Option<Mutes.Change>, now: number) => {
+  const told = muteLines(lines, "it", now)
+  if (Option.isNone(undone)) return told.unchanged
+  const { added, read = [], unread = [] } = undone.value
+  // Reading them again, or keeping them again, as nothing else is changed with it.
+  if (read.length > 0 || unread.length > 0) return subagentLines(lines, "it").again(read.length > 0)
+  return told.again(added.length > 0)
 }
 
 /** When a mode ends, as it's said after "until": "three" on the hour, and otherwise as a mute's end is. */
@@ -1168,6 +1245,18 @@ export const modeLines = (lines: Lines, now: number) => {
 /** How many updates and notices there are, as it's said, like "four updates". */
 const updates = (n: number) => `${count(n)} ${n === 1 ? "update" : "updates"}`
 
+const units = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen"]
+const tens = ["", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety"]
+
+/** Any count below a thousand in words, the way it's said, like "fifty-three" or "a hundred and five"; past that, in figures. */
+export const inWords = (n: number): string => {
+  if (!Number.isInteger(n) || n < 0 || n >= 1000) return String(n)
+  if (n < 20) return units[n]!
+  if (n < 100) return `${tens[Math.floor(n / 10)]}${n % 10 === 0 ? "" : `-${units[n % 10]}`}`
+  const hundreds = `${n < 200 ? "a" : units[Math.floor(n / 100)]} hundred`
+  return n % 100 === 0 ? hundreds : `${hundreds} and ${inWords(n % 100)}`
+}
+
 /**
  * What's said of catching up without the model: nothing to tell, of
  * everything or of what he asked about, `named` as it's said, and a brief
@@ -1186,6 +1275,14 @@ export const catchupLines = (lines: Lines) => {
     more: `There's more${sir}. Ask me for more when you're ready.`,
     /** Turned on with `missed` kept while it was off: the news, then the question. */
     offer: (missed: number) => ({ news: `You missed ${count(missed)}${sir}.`, question: "Want the rundown?" }),
+    /** He cleared the catch-up: how many updates and notices it set aside, in words. */
+    cleared: (n: number) => `Cleared${sir}: ${inWords(n)} ${n === 1 ? "update" : "updates"} set aside.`,
+    /** He cleared the catch-up with nothing in it. */
+    nothingToClear: `There's nothing to catch up on${sir}.`,
+    /** He took back clearing it: what it set aside is his to hear again. */
+    back: (n: number) => `Brought ${n === 1 ? "it" : "them"} back${sir}.`,
+    /** He asked to clear only some of it, which can't be done. */
+    wholeOnly: `I can only clear the whole catch-up${sir}.`,
   }
 }
 
@@ -1243,12 +1340,24 @@ export const modeCommand = (heard: string, asks = false): Option.Option<ModeChan
 /** The ways a mode can go, as the model names them, and the rundown alone, which a yes to yapd's offer of it gives. */
 const modes: ReadonlySet<string> = new Set(["focus", "quiet", "normal", "brief", "full", "rundown"])
 
-/** What's muted, in a line: each thread by name, with when its mute ends, if it does. */
-export const mutedList = (situation: Pick<Situation, "mutes" | "desk" | "now">, lines: Lines) => {
+/** What a thread whose subagents are read is called aloud: as the desk calls it, on its machine when that isn't this one, or else as it was called then. */
+export const readingName = (reading: Mutes.Reading, desk: Threads.Desk) => {
+  const listed = desk.threads.find(({ ref }) => Mutes.key.thread(ref) === reading.key)
+  if (listed !== undefined) return `${listed.called}${listed.here ? "" : ` on ${listed.ref.machine}`}`
+  return reading.called ?? "a thread"
+}
+
+/**
+ * What's muted, in a line: each thread by name, with when its mute ends, if
+ * it does, and after it whose subagents he has read to him, while any are.
+ */
+export const mutedList = (situation: Pick<Situation, "mutes" | "reading" | "desk" | "now">, lines: Lines) => {
   const { mutes, desk, now } = situation
-  if (mutes.length === 0) return `Nothing's muted${addressed(lines)}.`
+  const reading = situation.reading ?? []
+  const read = reading.length === 0 ? "" : ` I'm reading you the subagents of ${both(reading.map((one) => readingName(one, desk)))}.`
+  if (mutes.length === 0) return `Nothing's muted${addressed(lines)}.${read}`
   const named = mutes.map((mute) => `${mutedName(mute, desk)}${mute.ends === undefined ? "" : ` until ${until(mute.ends, now)}`}`)
-  return `You've muted ${both(named)}${addressed(lines)}.`
+  return `You've muted ${both(named)}${addressed(lines)}.${read}`
 }
 
 /**
@@ -1627,7 +1736,7 @@ const asksHim = (situation: Pick<Situation, "subject" | "desk">) => {
 export const fast = (situation: Situation, lines: Lines): Decision | undefined => {
   const decided = glimpsed(situation, lines)
   // Begun while yapd's own voice could still get into the microphone, a yes or a name to act on may be its own words: the model weighs that.
-  return decided !== undefined && situation.utterance.echo !== undefined && ownWord(decided.act) ? undefined : decided
+  return decided !== undefined && situation.utterance.echo !== undefined && ownWord(decided) ? undefined : decided
 }
 
 /** Whisper repeats itself on noise, but "no, no, no" is still no. */
@@ -1693,11 +1802,11 @@ const glimpsed = (situation: Situation, lines: Lines): Decision | undefined => {
     return decision({ act: "stop", target: on.value.handle, pending: replacing })
   }
   // With a question open, "cancel that" is a no to it. Otherwise it takes back the newest change he made: a mute, a reminder he set or
-  // cancelled, a memory he had kept or forgotten, or whatever else yapd last did.
+  // cancelled, a memory he had kept or forgotten, the catch-up he cleared, or whatever else yapd last did.
   const latest = newest(situation)
   if (scratching.has(said) && Option.isNone(open) && latest === "mute") return decision({ act: "mute", how: "undo" })
   if (scratching.has(said) && Option.isNone(open) && latest === "noted") {
-    return decision({ act: "undo", how: Option.exists(situation.noted ?? Option.none(), memorial) ? "memory" : "reminder" })
+    return decision({ act: "undo", how: Option.match(situation.noted ?? Option.none(), { onNone: () => "reminder", onSome: changeOf }) })
   }
   if (scratching.has(said) && Option.isNone(open) && latest === "acted" && Option.isSome(situation.acted)) {
     const acted = situation.acted.value
@@ -1713,6 +1822,7 @@ const glimpsed = (situation: Situation, lines: Lines): Decision | undefined => {
     return decision({ act: "mode", how, when: minutes === undefined ? "" : new Date(situation.now + minutes * 60_000).toISOString(), pending: replacing })
   }
   // Muting what he's on about: the thread, or a session's update off the desk, which the assistant mutes by its own keys. Nothing he's on about, it's the model's.
+  // Reading him its subagents, or no longer, as the thread's they are: a subagent's own update's are the thread's it's part of.
   const muting = Mutes.command(utterance.heard)
   if (Option.isSome(muting)) {
     const { how, minutes } = muting.value
@@ -1804,7 +1914,8 @@ const glimpsed = (situation: Situation, lines: Lines): Decision | undefined => {
  */
 export const newest = (situation: Pick<Situation, "acted" | "muteChange" | "noted">, on?: Threads.Ref): "mute" | "noted" | "acted" | undefined => {
   const of = (ref: Threads.Ref | undefined) => on === undefined || (ref !== undefined && Threads.same(ref, on))
-  const muted = (change: Mutes.Change) => on === undefined || [...change.added, ...change.removed].some(({ key }) => key === Mutes.key.thread(on))
+  const muted = (change: Mutes.Change) =>
+    on === undefined || [...change.added, ...change.removed, ...(change.read ?? []), ...(change.unread ?? [])].some(({ key }) => key === Mutes.key.thread(on))
   const changes = [
     ...Option.toArray(Option.map(Option.filter(situation.noted ?? Option.none(), ({ about }) => of(Option.getOrUndefined(about))), ({ at }) => ({ what: "noted" as const, at }))),
     ...Option.toArray(Option.map(Option.filter(situation.muteChange, muted), ({ at }) => ({ what: "mute" as const, at }))),
@@ -1815,11 +1926,12 @@ export const newest = (situation: Pick<Situation, "acted" | "muteChange" | "note
 
 /**
  * What an undo takes back, as the model took him to mean it: the reminder or
- * offer, the memory, what was done to a thread, a message, a stop or a tidy,
- * or, for no more than "scratch that", whatever was done last.
+ * offer, the memory, the catch-up he cleared, what was done to a thread, a
+ * message, a stop or a tidy, or, for no more than "scratch that", whatever
+ * was done last.
  */
-export const undoes = (how: string): "reminder" | "memory" | "thread" | "last" =>
-  how === "reminder" ? "reminder" : how === "memory" ? "memory" : how === "message" || how === "carry" || how === "tidy" ? "thread" : "last"
+export const undoes = (how: string): "reminder" | "memory" | "catchup" | "thread" | "last" =>
+  how === "reminder" ? "reminder" : how === "memory" ? "memory" : how === "catchup" ? "catchup" : how === "message" || how === "carry" || how === "tidy" ? "thread" : "last"
 
 /** A time the model gave, as his clock reads it, or with an offset; NaN for anything else. */
 export const instant = Mutes.instant
@@ -1923,11 +2035,11 @@ export interface Remembered {
  */
 export const remembered = (situation: Pick<Situation, "memories">): ReadonlyArray<Remembered> => {
   const { kept, written } = situation.memories ?? { kept: [], written: [] }
-  const theirs = new Set(written.map(({ name }) => name.toLowerCase()))
+  const theirs = new Set(written.map(({ name }) => calledAs(name)))
   const routines = [
     ...written.map(({ name, steps }) => ({ name, text: steps, kept: Option.none<Memory.Memory>() })),
     ...kept.flatMap((memory) =>
-      memory.kind === "routine" && memory.name !== undefined && !theirs.has(memory.name.toLowerCase()) ? [{ name: memory.name, text: memory.text, kept: Option.some(memory) }] : [],
+      memory.kind === "routine" && memory.name !== undefined && !theirs.has(calledAs(memory.name)) ? [{ name: memory.name, text: memory.text, kept: Option.some(memory) }] : [],
     ),
   ]
   return [
@@ -1939,30 +2051,136 @@ export const remembered = (situation: Pick<Situation, "memories">): ReadonlyArra
 /** The memory a handle in MEMORIES stands for. */
 export const rememberedBy = (handle: string, situation: Pick<Situation, "memories">) => Option.fromNullable(remembered(situation).find((one) => one.handle === handle.trim()))
 
-/** Whether the model's words are a routine's handle, like p1, which stands for its steps. */
-const routineHandle = (text: string) => /^p\d+$/.test(text.trim())
+/** What the model is shown with a handle: MEMORIES, REMINDERS, MUTED, ARCHIVED, THREADS, UNHEARD and FOCUS. */
+type Handled = Pick<Situation, "memories" | "reminders" | "mutes" | "archived" | "desk" | "missed" | "subject">
+
+/** Every handle the model is shown this turn, in MEMORIES, REMINDERS, MUTED, ARCHIVED, THREADS, UNHEARD and FOCUS, as `prompt` lists them. */
+const handlesShown = (situation: Handled) =>
+  new Set([
+    ...remembered(situation).map(({ handle }) => handle),
+    ...(situation.reminders ?? []).slice(0, remindersShown).map((_, index) => remindedHandle(index)),
+    ...situation.mutes.flatMap((mute, index) => (mutedListed(mute, situation.desk) === undefined ? [mutedHandle(index)] : [])),
+    ...(situation.archived ?? []).slice(0, archivedShown).map((_, index) => archivedHandle(index)),
+    ...(Option.isSome(subagentBy(subagentHandle, situation)) ? [subagentHandle] : []),
+    ...situation.desk.threads.map(({ handle }) => handle),
+    ...situation.missed.groups.slice(0, missedShown).map(({ handle }) => handle),
+  ])
+
+/**
+ * Whether the model's words are only one of the handles it was shown, as
+ * words compare, whatever their case or punctuation, like "p1", "P1." or
+ * "t2", which a thread could make nothing of: a routine's stands for its
+ * steps, which only code puts in. Never words that only look like one, like
+ * his answer "r2" with no r2 shown.
+ */
+export const bareHandle = (text: string, situation: Handled) => handlesShown(situation).has(Ledger.digest(text))
+
+/**
+ * Whether he said a routine's whole name, as names compare, symbols and all,
+ * in all he said, and for the rest of a request, in that part of it too:
+ * whichever handle the model gave, the steps go only then, so one called
+ * "ship deploy" never goes for his "ship", whether said or in his
+ * preferences, nor one called "C" for his "C++", nor one called "ship" for the
+ * rest of "tell the Tezos one to ship, and the Mina one to rebase".
+ */
+const nameSaid = (name: string, utterance: Pick<Assistant.Utterance, "heard" | "whole">) => {
+  const wanted = calledAs(name)
+  const says = (said: string) => wanted !== "" && ` ${calledAs(said)} `.includes(` ${wanted} `)
+  return says(utterance.whole ?? utterance.heard) && (utterance.whole === undefined || says(utterance.heard))
+}
 
 /**
  * A message, or an offer, whose words the model gave as a routine's handle,
- * with the routine's steps in their place, exactly as they're kept, never as
- * the model would write them; none for a handle that's no routine. Anything
- * else is as it was.
+ * just as it was shown, with the routine's steps in their place, exactly as
+ * they're kept: the model never sees them, so only code puts them in. None
+ * for any other handle it was shown, in any case or punctuation, nor one
+ * that's no routine, nor one whose name he didn't say, nor an answer to a
+ * thread's question by a handle, which is only ever his own words or the
+ * option he picked: a handle never reaches a thread as it is. Anything else is
+ * as it was, whatever its words.
  */
-const routining = (choice: Decision, situation: Pick<Situation, "memories">): Option.Option<Decision> =>
-  (choice.act !== "send" && choice.act !== "offer") || !routineHandle(choice.text)
-    ? Option.some(choice)
-    : Option.map(
-        Option.filter(rememberedBy(choice.text, situation), ({ kind }) => kind === "routine"),
-        ({ text }) => ({ ...choice, text }),
-      )
+const routining = (choice: Decision, situation: Handled & Pick<Situation, "utterance">): Option.Option<{ readonly decision: Decision; readonly routine?: string }> => {
+  if (choice.act !== "send" && choice.act !== "offer" && choice.act !== "reply") return Option.some({ decision: choice })
+  if (!bareHandle(choice.text, situation)) return Option.some({ decision: choice })
+  if (choice.act === "reply") return Option.none()
+  return Option.flatMap(
+    Option.filter(rememberedBy(choice.text, situation), ({ kind }) => kind === "routine"),
+    ({ text, name }) => (name !== undefined && nameSaid(name, situation.utterance) ? Option.some({ decision: { ...choice, text }, routine: name }) : Option.none()),
+  )
+}
 
 /**
  * A decision with a routine's handle as its words read as the steps it stands
  * for, so it's compared as what it sends, like his saying a routine's name
- * again to "Again?" about those steps; one that's no routine is as it was,
- * which checking it turns down.
+ * again to "Again?" about those steps; one that's no routine, or whose name he
+ * didn't say, is as it was, which checking it turns down.
  */
-export const resolved = (choice: Decision, situation: Pick<Situation, "memories">): Decision => Option.getOrElse(routining(choice, situation), () => choice)
+export const resolved = (choice: Decision, situation: Handled & Pick<Situation, "utterance">): Decision =>
+  Option.match(routining(choice, situation), { onNone: () => choice, onSome: ({ decision }) => decision })
+
+/** The routine whose handle the model gave as a message's words, by its name, when that sends its steps: none otherwise. */
+export const routinedBy = (choice: Decision, situation: Handled & Pick<Situation, "utterance">) =>
+  Option.getOrUndefined(Option.flatMap(routining(choice, situation), ({ routine }) => Option.fromNullable(routine)))
+
+/**
+ * What's checked, as one of his routines, `routine`, by its name, when what
+ * it sends or asks about sending is that routine's steps: so wherever it's
+ * noted, offered or asked about, a model is only ever told of it by that name.
+ */
+export const routined = (checked: Checked, routine: string | undefined): Checked =>
+  routine === undefined
+    ? checked
+    : checked._tag === "Do"
+      ? { ...checked, plan: { ...checked.plan, routine } }
+      : checked._tag === "Ask"
+        ? { ...checked, open: { ...checked.open, routine } }
+        : checked
+
+/** The most words a routine kept by voice is called. */
+const namedIn = 3
+
+/** How many words a name is, as he'd say them: what's between spaces, but for punctuation on its own, so "let's ship it" is three. */
+const wordsIn = (name: string) => name.split(/\s+/u).filter((word) => /[\p{L}\p{N}]/u.test(word)).length
+
+/** "When", "whenever" or "if I say", as he says a routine's name, whatever the punctuation. */
+const calling = /(?<![\p{L}\p{N}])(?:when|whenever|if)[^\p{L}\p{N}]+i[^\p{L}\p{N}]+say(?![\p{L}\p{N}])/iu
+
+/** Quotes or backticks around his words, which are never part of them. */
+const quotes = "[\"'`\u2018\u2019\u201c\u201d]"
+
+/**
+ * A routine's name as he said it, and what he said from where he paused after
+ * it: his words right after "when", "whenever" or "if I say", without the
+ * spaces, marks or quotes before them, up to where he paused after them, a
+ * comma, a full stop or the like as speech recognition writes it, never a
+ * symbol like the "." of ".NET", or to the end, as when he said its name after
+ * its steps, without quotes around it. None when he said no such thing. Where
+ * it ends is his to say, never the model's, so an "if" after it is in the
+ * steps, and its words are his, symbols and all, so his "C++" is never "C".
+ */
+const spokenCall = (said: string) => {
+  const found = calling.exec(said)
+  if (found === null) return undefined
+  const from = said.slice(found.index + found[0].length).replace(new RegExp(`^(?:${gap}|${quotes})+`, "u"), "")
+  const paused = from.search(new RegExp(pause, "u"))
+  const name = (paused < 0 ? from : from.slice(0, paused)).replace(new RegExp(`(?:\\s|${quotes})+$`, "u"), "")
+  return name === "" ? undefined : { name, after: paused < 0 ? undefined : from.slice(paused) }
+}
+
+/** A routine's name as he said it, as `spokenCall` reads it. */
+const spokenName = (said: string) => spokenCall(said)?.name
+
+/**
+ * A routine's name as names compare: in any case, spacing or quotes, but
+ * symbols and all, so "C" is never "C++", nor ".NET" "NET". Two routines are
+ * the same only when their names are, kept by voice or in his preferences.
+ */
+export const calledAs = (name: string) =>
+  worded(name)
+    .split(" ")
+    .map(outOfQuotes)
+    .filter((word) => word !== "")
+    .join(" ")
 
 /** A routine as the model gives it to be kept, "name: steps": none without both. */
 export const routineOf = (text: string) => {
@@ -1983,25 +2201,252 @@ export const asSaid = (words: string, said: string) => {
 }
 
 /**
+ * Words to yapd that may come around what he asks, never part of it when
+ * said before he asks it, or when a pause sets them off from his other
+ * words, like the "thanks" of ", thanks.": never the "Jarvis" of "ask
+ * Jarvis", nor the "please" of "the magic word is please".
+ */
+const asides = ["please", "thanks", "thank you", "sir", "jarvis", "okay", "ok"]
+
+/** What asks yapd to keep a fact in mind, like "remember that". */
+const keeping = ["remember that", "remember", "note that", "keep in mind that", "keep in mind"]
+
+/**
+ * Everyday ways to start asking, before "remember that" or "when I say", and
+ * no part of what he asks: words to yapd, a pause filled, like "uh", or
+ * "hey Jarvis", "so" or "can you".
+ */
+const openers = [...asides, ...padding, "hey jarvis", "so", "can you", "could you", "would you", "i want you to"]
+
+/** What joins one request on to another, like the "and" of "remember that rig runs the nightly, and tell the Mina one to rebase". */
+const joiners = ["and", "then", "also"]
+
+/**
+ * Words as they compare once what they say is all that counts: in any case,
+ * spacing and quotes, but without a mark that only ends a word, like a comma
+ * or a full stop; a symbol is never left out, so "C++" is never "C", nor
+ * ".NET" "NET".
+ */
+export const worded = (text: string) =>
+  text
+    .toLowerCase()
+    .replace(/[\u2018\u2019\u201b]/gu, "'")
+    .replace(/[\u201c\u201d\u201e]/gu, '"')
+    .replace(/[,;:!?.\u2026]+(?=\s|$)/gu, "")
+    .replace(/\s+/gu, " ")
+    .trim()
+
+/** A mark that ends a word, as speech recognition writes his pause, like a comma or a full stop, never a symbol like the "." of ".NET". */
+const pause = String.raw`[,;:!?\u2026]|\.(?![\p{L}\p{N}])`
+
+/** What's between words as speech recognition writes them and no part of any: a space, or a mark that ends one. */
+const gap = String.raw`\s|${pause}`
+
+/** Any of `phrases` in words as they're written, as whole words, whatever marks are between them. */
+const phrased = (phrases: ReadonlyArray<string>) =>
+  String.raw`(?<![\p{L}\p{N}])(?:${phrases.map((phrase) => phrase.split(" ").join(String.raw`[^\p{L}\p{N}]+`)).join("|")})(?![\p{L}\p{N}])`
+
+/** All of some words as they're written that are only `phrases`, and the spaces and marks between them. */
+const only = (phrases: ReadonlyArray<string>) => new RegExp(`^(?:${gap}|${phrased(phrases)})*$`, "iu")
+
+/**
+ * All that may come before his words in what he said, as it's written: what
+ * `free` matches, then words to yapd only when a pause sets them off from
+ * his, like "Jarvis," but never the "Jarvis" of "Jarvis runs on Rosie".
+ */
+const ahead = (free: string) => new RegExp(`^(?:${free})(?:(?:${gap}|${phrased(asides)})*(?:${pause}))?\\s*$`, "iu")
+
+/**
+ * All that may come after his words: marks, and words to yapd or `more`
+ * only when a pause sets them off from his, like ", thanks." but never the
+ * "please" of "the magic word is please", then `free` words.
+ */
+const behind = (more: ReadonlyArray<string>, free: ReadonlyArray<string> = []) =>
+  new RegExp(`^\\s*(?:(?:${pause})(?:${gap}|${phrased([...asides, ...more])})*)?(?:${[gap, ...free.map((word) => phrased([word]))].join("|")})*$`, "iu")
+
+/** Where each of his words starts and ends, as they're written, without a mark that only ends one, like a comma, which alone is no word. */
+const edges = (said: string) => {
+  const [opening, closing] = [new RegExp(`^(?:${gap})+`, "u"), new RegExp(`(?:${gap})+$`, "u")]
+  const words = Array.from(said.matchAll(/\S+/gu), (word) => ({ word: word[0], at: word.index })).filter(({ word }) => word.replace(opening, "") !== "")
+  return {
+    starts: words.map(({ word, at }) => at + word.length - word.replace(opening, "").length),
+    ends: words.map(({ word, at }) => at + word.replace(closing, "").length),
+  }
+}
+
+/**
+ * His words in `said` that the model's `words` say the same as, symbols and
+ * all, as speech recognition wrote them: all of `said` but for what's
+ * `before` and `after` it, never any other, nor the marks around it. None
+ * when no such part of it says the same. Where his words start and end is
+ * code's to say, never the model's.
+ */
+const inHisWords = (said: string, words: string, before: RegExp, after: RegExp) => {
+  const wanted = worded(words)
+  const { starts, ends } = edges(said)
+  for (const start of starts.filter((at) => before.test(said.slice(0, at)))) {
+    for (const end of ends.filter((at) => after.test(said.slice(at)))) {
+      if (end > start && worded(said.slice(start, end)) === wanted) return said.slice(start, end)
+    }
+  }
+  return undefined
+}
+
+/** A fact said: what may come before it, "remember that" and an everyday way of asking before that, and after it, words to yapd a pause sets off. */
+const aroundFact = {
+  ahead: ahead(`(?:(?:${gap}|${phrased(openers)})*${phrased(keeping)})?(?:${gap})*`),
+  behind: behind(keeping),
+}
+
+/**
+ * A fact as he said it, which the model's `fact` says the same as: all he
+ * said after a "remember that" and an everyday way of asking before it, like
+ * "hey Jarvis, can you", but for words to yapd a pause sets off from it,
+ * marks and symbols kept. So what's kept is all he asked to be, never less
+ * of it, like his "we never use C++" without its "never", or "the magic word
+ * is please" without its "please", nor more.
+ */
+const spokenFact = (said: string, fact: string) => inHisWords(said, fact, aroundFact.ahead, aroundFact.behind)
+
+/**
+ * What joins another request on after a fact: "and", "then" or "also", with
+ * only spaces and marks around it, like the comma of ", and". Never a comma,
+ * a semicolon or a full stop alone, which may only be his pause within the
+ * fact, like the comma of "the deploy script is safe, unless it's Friday".
+ */
+const joinedOn = {
+  only: new RegExp(`^(?:${gap}|${phrased(joiners)})*$`, "iu"),
+  any: new RegExp(phrased(joiners), "iu"),
+  first: new RegExp(`^\\s*${phrased(joiners)}`, "iu"),
+  // After the other request, as after a routine's steps: words to yapd a pause sets off.
+  after: behind([]),
+}
+
+/**
+ * A fact he said with another request after it, as he said it: when the
+ * model's `rest` is all he said after an "and", "then" or "also", word for
+ * word, and its `fact` all he said between "remember that" and there, as
+ * `spokenFact` takes it, so where the fact ends is what he said, never the
+ * model's say. None otherwise, as at a comma, a semicolon or a full stop
+ * alone, so the fact kept is never less than he said of it, nor is the rest
+ * more than he asked after it. The only way a rest goes on after a fact.
+ */
+const spokenFactThen = (said: string, fact: string, rest: string) => {
+  const wanted = worded(rest)
+  if (wanted === "") return undefined
+  const { starts, ends } = edges(said)
+  // The rest's own "and", as the model may keep it, joins it on as one before it does.
+  const joined = joinedOn.first.test(rest)
+  const restStarts = starts.filter((start) => ends.some((end) => end > start && joinedOn.after.test(said.slice(end)) && worded(said.slice(start, end)) === wanted))
+  for (const start of restStarts) {
+    for (const end of ends.filter((at) => at <= start)) {
+      const between = said.slice(end, start)
+      const his = joinedOn.only.test(between) && (joined || joinedOn.any.test(between)) ? spokenFact(said.slice(0, end), fact) : undefined
+      if (his !== undefined) return his
+    }
+  }
+  return undefined
+}
+
+/** A routine's steps said after its name, or before it: what may come before and after them, as for a fact, "then" and "so" too as they were. */
+const aroundSteps = {
+  after: { ahead: ahead(`(?:${gap}|${phrased(["then"])})*`), behind: behind([]) },
+  before: { ahead: ahead(`(?:${gap}|${phrased(["so"])})*`), behind: behind([], ["then"]) },
+}
+
+/**
+ * A routine's steps as he said them, which the model's `steps` say the same
+ * as: all he said after where he paused after its name, or before "when I
+ * say" when he said its name last, but for words to yapd a pause sets off
+ * from them, marks and symbols kept. None when he said no name, or nothing
+ * after it.
+ */
+const spokenSteps = (said: string, steps: string) => {
+  const found = calling.exec(said)
+  if (found === null) return undefined
+  const before = said.slice(0, found.index)
+  if (!only([...openers, ...keeping]).test(before)) return inHisWords(before, steps, aroundSteps.before.ahead, aroundSteps.before.behind)
+  // From his pause after its name, as `spokenCall` reads it.
+  const after = spokenCall(said)?.after
+  return after === undefined ? undefined : inHisWords(after, steps, aroundSteps.after.ahead, aroundSteps.after.behind)
+}
+
+/**
+ * Whether the model's fact, all his words, is all of what he said as a fact
+ * but for more of his outside it: right after "remember that", or at the
+ * start, and to the end, or, with a `rest` the model took for another
+ * request, to a pause or an "and". So he's told to say it as one request
+ * only when what the model left out is all outside it, like a request before
+ * "remember that", never words of his within it, like the "never" of "we
+ * never use C++", which he's told it couldn't keep as he said it.
+ */
+const standsApart = (said: string, fact: string, rest: string) => {
+  const wanted = worded(fact)
+  const { starts, ends } = edges(said)
+  const end = rest.trim() === "" ? aroundFact.behind : apart.end
+  return starts.some(
+    (start) => apart.start.test(said.slice(0, start)) && ends.some((at) => at > start && end.test(said.slice(at)) && worded(said.slice(start, at)) === wanted),
+  )
+}
+
+/** Where a fact may start apart from more of his before it, after "remember that", and end apart from another request after it. */
+const apart = {
+  start: new RegExp(`(?:^|${phrased(keeping)})(?:${gap})*(?:(?:${gap}|${phrased(asides)})*(?:${pause}))?\\s*$`, "iu"),
+  end: new RegExp(`^\\s*(?:$|${pause}|${phrased(joiners)})`, "iu"),
+}
+
+/**
+ * Whether a routine is all he asked for, word for word: as words compare,
+ * what he said is "when", "whenever" or "if I say" and its name as the model
+ * gave it, then its steps, or its steps, then that, with nothing else but
+ * words to yapd around it, like "hey Jarvis, can you remember that" before it
+ * or "thanks" after it, or between its name and its steps, like "then". So a
+ * "don't" or an "if the checks are green" that the steps leave out, or
+ * another request in the same breath, keeps nothing, never the part of it
+ * that's the steps; nor does a "so" or a "then" he trailed off on. A check
+ * that turns down, never one that keeps anything; where the steps start and
+ * end is `spokenSteps`'s to say.
+ */
+export const wholeRoutine = (routine: { readonly name: string; readonly steps: string }, said: string) => {
+  const name = Ledger.digest(routine.name)
+  const steps = Ledger.digest(routine.steps)
+  if (name === "" || steps === "") return false
+  // Words as they compare are letters, digits and single spaces, which go into a pattern as they are.
+  const called = `(?:when|whenever|if) i say ${name}`
+  const aside = `(?:${[...asides, ...keeping].join("|")})`
+  const between = `(?: (?:${aside}|then))*`
+  return new RegExp(`^(?:(?:${[...openers, ...keeping].join("|")}) )*(?:${called}${between} ${steps}|${steps}${between} ${called})(?: ${aside})*$`, "u").test(Ledger.digest(said))
+}
+
+/**
  * The model's words that are nowhere in what he said, as it wrote them, in
  * its order, so he's told which weren't his, like a name it put right that
  * speech recognition got wrong: none when there are more than a few, as for
  * words of its own throughout, or when every one is his, only not in his
- * order. Only to tell him, never to keep anything.
+ * order. Only to tell him, never to keep anything, so a word in quotes or
+ * backticks on either side is his all the same, never one he didn't say.
  */
 export const unheard = (words: string, said: string) => {
-  const his = new Set(Ledger.digest(said).split(" "))
-  const theirs = words.split(/[^\p{L}\p{N}]+/u).filter((word) => word !== "" && !his.has(word.toLowerCase()))
+  // Symbols and all, so his "C++" never stands for the model's "C".
+  const his = new Set(worded(said).split(" ").map(outOfQuotes))
+  const theirs = words
+    .split(/\s+/u)
+    .map((word) => word.replace(/^["'`\u2018\u201c]+|["'`\u2019\u201d,;:!?.\u2026]+$/gu, ""))
+    .filter((word) => outOfQuotes(word) !== "" && !his.has(outOfQuotes(word)))
   const missing = theirs.filter((word, index) => theirs.findIndex((other) => other.toLowerCase() === word.toLowerCase()) === index)
   return missing.length === 0 || missing.length > 3 ? undefined : missing.join(" ")
 }
+
+/** A word as words compare, without the quotes or backticks around it, as only for telling him which weren't his. */
+const outOfQuotes = (word: string) => worded(worded(word).replace(/^["'`]+|["'`]+$/gu, ""))
 
 /**
  * Whether yapd answers to a phrase said on its own without the model, like
  * "say that again", "scratch that", "yes", "focus" or "mute it", which a
  * routine called the same would never be heard for, or would take the place
- * of: with a question open, "ship it" is a yes to it. So no routine is ever
- * called that, said or written.
+ * of: with a question open, "ship it" is a yes to it; nor "Mute." or "turn
+ * on", which turn yapd off or on. So no routine is ever called that, said or
+ * written.
  */
 export const answersTo = (phrase: string) => {
   const said = gist(phrase)
@@ -2011,6 +2456,8 @@ export const answersTo = (phrase: string) => {
   ]
   return (
     said === "" ||
+    halts(phrase) ||
+    wakes(phrase) ||
     closed.some((set) => set.has(said)) ||
     shows.has(said) ||
     ordinals.some(([pattern]) => pattern.test(said)) ||
@@ -2019,14 +2466,210 @@ export const answersTo = (phrase: string) => {
   )
 }
 
+/** What ends a noun: the end, a stop or a comma, or a word like "is" or "for", rather than another noun, as in "the auth flow". */
+const ended = String.raw`(?=\s*$|\s*[^\w\s-]| (?:is|are|was|were|for|to|on|at|in|of|from|and|equals)(?![a-z0-9]))`
+
+/** A word as a noun, after "the", "my" or similar and a name or two at most, as in "the Sentry auth is …" or "my seed.". */
+const asNoun = (word: string) => String.raw`(?<=(?<![a-z0-9])(?:the|my|your|our|its) (?:[\w.'’-]+ ){0,2})${word}${ended}`
+
+/** A word of a value, as it starts: not where a sentence or a clause ends. */
+const valued = String.raw`[^\s.,;:!?…]`
+
+/**
+ * The word "pass" or "passes", however it's meant, as in "hunter2 is my
+ * Windows pass", "my Teams pass is …" or "the nightly build passes", since
+ * nothing short of a guess tells one named from tests that pass: he says "the
+ * tests work on Node 22" instead. Never a pass rate or a pass count.
+ */
+const pass = String.raw`pass(?:es)?(?![ -](?:rate|count)s?(?![a-z0-9]))`
+
+/**
+ * What names one in a fact he'd have kept, though an agent's question may
+ * well mean something else by it: a PIN or a PAT, in any case; a lock's or a
+ * safe's combination; or one as it's said out loud, or as Whisper writes it
+ * down, like "P I N", "creds", any pass, as in "the Wi-Fi pass is …" or "the
+ * tests pass", a pwd or a pword, "my seed", "sign in", "the phrase for …", a
+ * card's CVV, or a name given a value of 8 characters or more, as in
+ * "sessionid=5f6ca267…" or "API_KEY=…".
+ * Never what tells a question that asks him to type one in, so "Which phrase
+ * for the title?" is still his to answer by voice.
+ */
+const alsoCredentials = new RegExp(
+  String.raw`(?<![a-z0-9])(?:${[
+    String.raw`pins?|pats?|(?:safe|lock|padlock|locker|vault)['’]?s? (?:combination|combo)s?|(?:combination|combo)s? (?:to|for|of|on) (?:\S+ ){0,3}?(?:safe|lock|padlock|locker|vault)s?`,
+    pass,
+    String.raw`pws?|pwds?|pwords?|passwds?|p(?:\. ?| )i(?:\. ?| )n\.?|creds|psks?|${asNoun("auth")}|(?<!random )${asNoun("seed")}`,
+    String.raw`sign[ -]?in(?:s|to)?|log[ -]?in(?= (?:to|into)(?![a-z0-9]))|log into`,
+    String.raw`bip[ -]?39|phrases?(?= for(?![a-z0-9]))|words(?= for my [a-z0-9])`,
+    String.raw`security (?:questions?|answers?)|cv[vc]2?s?|card numbers?`,
+    // A URL with its user and password in it, by the user's name, as in "postgres://admin:…@rig".
+    String.raw`[a-z][a-z0-9+.-]*:\/\/[^\s/:@]+(?=:[^\s/@]+@)`,
+    // A name given a value as long as a secret's, as in "sessionid=5f6ca267…".
+    String.raw`[\w.-]+=\S{8,}`,
+  ].join("|")})(?![a-z0-9])`,
+  "i",
+)
+
+/**
+ * A word that's often one, and as often something else, with the word after
+ * it, which may say what else: a key, a token, a secret, a code, a
+ * combination or a cookie. A code an app's name ends in, like T3 Code's, is
+ * never one.
+ */
+const vague = new RegExp(
+  String.raw`(?<![a-z0-9])((?:${T3Actions.codeApps}) (?=code))?(key|token|secret|code|combination|combo|cookie)(s?)(?![a-z0-9])(?=(?:[ -]([a-z]+))?)`,
+  "gi",
+)
+
+/**
+ * What a key, a token, a secret, a code or a cookie is when the word after it
+ * says so, like "key bindings", "token budget", "secret sauce", "code review"
+ * or "cookie banner". Kept short, since anything else is taken for one, even "key words", which a
+ * recovery phrase is too.
+ */
+const somethingElse: Readonly<Record<string, ReadonlySet<string>>> = {
+  key: new Set(["binding", "bindings", "binds", "shortcut", "shortcuts", "point", "points", "takeaway", "takeaways", "idea", "ideas", "insight", "insights", "feature", "features", "part", "parts", "step", "steps", "question", "questions"]),
+  token: new Set(["budget", "budgets", "limit", "limits", "count", "counts", "usage", "window", "windows"]),
+  secret: new Set(["sauce"]),
+  code: new Set(["base", "bases", "review", "reviews", "style", "path", "paths"]),
+  cookie: new Set(["banner", "banners", "consent", "policy"]),
+}
+
+/**
+ * Whether what's said mentions one of those words that isn't an app's name or
+ * what the word after it says, however it's put, since its value can come
+ * anywhere, as in "my Vercel token hunter2" or "hunter2 is my Vercel token".
+ */
+const mentionsVague = (words: string) =>
+  [...words.matchAll(vague)].some(
+    ({ 1: app, 2: name, 3: plural, 4: after }) =>
+      app === undefined && (plural !== "" || !somethingElse[name!.toLowerCase()]?.has(after?.toLowerCase() ?? "")),
+  )
+
+/**
+ * What names something only he should know, like a password, a PIN, a key or
+ * a token, or a code or phrase that stands for one, and a password as it's
+ * said out loud, or as Whisper writes it down: a pass, a pw, a pwd, a pword
+ * or a passwd.
+ */
+const credential = String.raw`(?:pass(?:word|code|phrase|wd)?|pw(?:d|ord)?|pin(?: code)?|secret|token|(?:api|access|private) key|key|recovery code|seed phrase|(?:2fa|two[ -]factor|backup) code)s?`
+
+/**
+ * A credential given with its value, whatever's said between of whose or
+ * what for it is: "my password for GitHub is hunter2", "the password I use
+ * there is …", "the GitHub password: …", "my token's …", "the Wi-Fi pass,
+ * it's …", one word after a comma or a dash at the end, "my GitHub password,
+ * hunter2", or the other way round, "hunter2 is my GitHub password". Taken
+ * for one whenever it could be, so "the key is to batch them" is too, but
+ * never "rig's key bindings are vim-style", where what follows the word is
+ * what it's of, nor "check the tests pass, then deploy".
+ */
+const given = [
+  new RegExp(
+    String.raw`(?<![a-z0-9])${credential}(?:\s+(?:for|to|of|on|at|in|into|with|from|i|we|you|that|which)\s+[^\s:=]+?(?:\s+[^\s:=]+?){0,4}?)?(?:['’]s\s+|\s*[:=]\s*|\s+(?:is|was|are|were|equals)\s+|\s*[,.;—–-]?\s+it(?:['’]s|\s+(?:is|was))\s+)${valued}`,
+    "i",
+  ),
+  new RegExp(String.raw`(?<![a-z0-9])${credential}(?:\s*,\s*|\s+[—–-]\s+)${valued}+\s*[.!?…]?\s*$`, "i"),
+  new RegExp(
+    String.raw`${valued}+\s+(?:is|was|are|were)\s+(?:my|the|our|your|his|her|their)\s+(?:${valued}+\s+){0,3}?${credential}(?![a-z0-9])(?=\s*$|\s*[.,;:!?…)"'”’]|\s+(?:for|to|of|on|at|in|with|from)\s)`,
+    "i",
+  ),
+]
+
+/** Whether what's said gives a secret's value: whatever looks like one, or a credential given with its value. */
+const givesValue = (words: string) => T3Actions.revealing(words) || given.some((pattern) => pattern.test(words))
+
+/**
+ * Whether what's said mentions a credential, however it's said: a password,
+ * a PIN, a recovery phrase, a login, a key, a token, a secret, a code or
+ * similar, even one that isn't secret, like the name of his password manager.
+ */
+const mentionsCredential = (words: string) =>
+  T3Actions.namesCredential(words) || alsoCredentials.test(words) || mentionsVague(words)
+
+/**
+ * What says the tests pass rather than names a pass: a word before it that's
+ * a plural, as in "the tests pass", or one like "should", "all" or "to", as
+ * in "the build should pass" or "wait for the build to pass"; or what's a
+ * look over something, as in "the final pass".
+ */
+const passing = String.raw`[\w.'’-]*[^\Ws]s|all|both|still|always|never|now|also|just|really|then|finally|actually|even|each|to|not|that|which|who|they|we|you|it|should|must|will|would|can|could|might|may|shall|do|did|don['’]t|didn['’]t|won['’]t|can['’]t|wouldn['’]t|shouldn['’]t|couldn['’]t|first|second|third|last|final|next|another|quick|full|review|cleanup|lint`
+
+/**
+ * What names only ever something only he should know, which a routine's steps
+ * have no use for: a password, as it's said out loud, or as Whisper writes it
+ * down, like a pw, a pwd, a pword, a passwd, a passcode or a passphrase, or a
+ * pass after "the" or "my" and a name or two, as in "the Wi-Fi pass" or "my
+ * AWS pass", never "the tests pass"; a PIN; credentials or creds; a login,
+ * as in "my login" or "the router login is …", never "log in" nor "the login
+ * page"; or a door, alarm, gate, access, lock, safe or garage code, never
+ * thread-safe code. A key, a token, a secret or a plain code is everyday in
+ * steps to an agent, so it isn't one.
+ */
+const strongCredentials = [
+  new RegExp(
+    String.raw`(?<![a-z0-9])(?:${[
+      String.raw`pass(?:words?|wds?|codes?|phrases?)|pass[ -]phrases?|pwords?|pwds?|pws?`,
+      String.raw`p(?:\. ?| )i(?:\. ?| )n\.?|pin (?:codes?|numbers?)|${asNoun("pins?")}`,
+      String.raw`credentials?|creds|${asNoun("log-?ins?")}|log-?in (?:details|info|information)`,
+      String.raw`(?:door|alarm|gate|access|lock|(?<!-)safe|garage)['’]?s? codes?`,
+    ].join("|")})(?![a-z0-9])`,
+    "i",
+  ),
+  /\bPINs?\b/,
+  // As it's written, never in other words' case, so a plural like "tests" is told from a name like "AWS".
+  new RegExp(
+    String.raw`(?<![A-Za-z0-9])(?:[Tt]he|[Mm]y|[Yy]our|[Oo]ur|[Hh]is|[Hh]er|[Tt]heir|[Ii]ts) (?:(?!(?:${passing})(?![\w'’-]))[\w.'’-]+ ){0,2}[Pp]ass(?![\w'’-]| (?:rate|count)s?(?![\w'’-]))`,
+  ),
+]
+
+/** Whether what's said names something only he should know, as `strongCredentials` has it, however little else it says of it. */
+const namesStrongly = (words: string) => strongCredentials.some((pattern) => pattern.test(words))
+
+/**
+ * Any word that names one, or may well, in any case: a password, as it's
+ * said or as Whisper writes it down, a pass, a PIN, a login, creds, a key, a
+ * token, a secret, a code or a cookie, never the code an app's name ends in,
+ * like T3 Code's; and the rest of its word and the three words after it.
+ */
+const nearCredential = new RegExp(
+  String.raw`(?<![a-z0-9])(?:${[
+    String.raw`pass(?:words?|wds?|codes?|phrases?|es)?|pass[ -]phrases?|pwords?|pwds?|pws?`,
+    String.raw`p(?:\. ?| )i(?:\. ?| )n\.?|pins?|log-?ins?|credentials?|creds`,
+    String.raw`keys?|tokens?|secrets?|(?<!\b(?:${T3Actions.codeApps}) )codes?|cookies?`,
+  ].join("|")})(?![a-z0-9])(?=(\S*(?:\s+\S+){0,3}))`,
+  "gi",
+)
+
+/**
+ * Whether what's said has a word that names one with a value close after it,
+ * as a word with a digit in it within three words, like "the pin 4827", "the
+ * login hunter2" or "set the token to hunter2": taken for one whenever it
+ * could be, so "rotate the deploy key for Node 22" is too. A value as
+ * `givesValue` has it is one anywhere.
+ */
+const nearValue = (words: string) => [...words.matchAll(nearCredential)].some(({ 1: after }) => /\d/.test(after!))
+
 /**
  * Whether what he asked to be kept in mind may give a secret away, in all he
- * said or in what the model made of it. It's refused as a secret before
- * anything else would turn it down, since only that keeps his words out of
- * the journal.
+ * said or in what the model made of it. A fact is refused broadly, since a
+ * secret kept is in every prompt: one that gives a value or mentions a
+ * credential at all. That's still only a best effort: one said without any
+ * word that names it, like "the garage opens with 4827", gets through. A
+ * routine's steps are words to an agent, where a code, a key or a token is
+ * everyday, as in "when I say ship, push the code", so a routine is refused
+ * for what gives a value, for naming what only ever is one, like a password,
+ * a PIN or a door code, value or not, or for any word that names one with a
+ * digit close after it, like "the API key abc123". It's refused as a secret
+ * before anything else would turn it down, since only that keeps his words
+ * out of the journal.
  */
-export const secretive = (choice: Pick<Decision, "text">, utterance: Pick<Assistant.Utterance, "heard" | "whole">) =>
-  [utterance.heard, utterance.whole ?? "", choice.text].some((words) => T3Actions.revealing(words))
+export const secretive = (choice: Pick<Decision, "how" | "text">, utterance: Pick<Assistant.Utterance, "heard" | "whole">) => {
+  const routine = choice.how === "routine" && routineOf(choice.text) !== undefined
+  return [utterance.heard, utterance.whole ?? "", choice.text].some(
+    (words) => givesValue(words) || (routine ? namesStrongly(words) || nearValue(words) : mentionsCredential(words)),
+  )
+}
 
 /** What's said of what can't be kept in mind, or forgotten. */
 const rememberLines = (lines: Pick<Lines, "address">) => {
@@ -2035,7 +2678,13 @@ const rememberLines = (lines: Pick<Lines, "address">) => {
   const which = (missing: string | undefined) => (missing === undefined ? "," : `: I didn't hear '${missing}' from you,`)
   return {
     words: (missing?: string) => `I couldn't keep that in your own words${sir}${which(missing)} so I didn't save it.`,
+    // His words, but with more than what the model would keep, it's how to say it so they're all of it.
+    alone: `I couldn't keep that in your own words${sir}. Say it as one request: remember that, then the fact.`,
     steps: (missing?: string) => `I couldn't keep the steps in your own words${sir}${which(missing)} so I didn't save it.`,
+    // His words, but with more than the steps, it's how to say it so they're all of it, by its name as he said it.
+    whole: (name?: string) => `I couldn't keep the steps in your own words${sir}. Say it as one request: when I say ${name ?? "its name"}, then the steps.`,
+    short: `Keep the name short${sir}: when I say ship, then the steps.`,
+    pause: `Pause after its name${sir}: when I say ship, then the steps.`,
     written: `That one's in your preferences${sir}.`,
     answered: `That's something I already answer to${sir}.`,
   }
@@ -2049,24 +2698,50 @@ const handles = (text: string) => text.split(/[\s,]+/).filter((handle) => /^t\d+
  * names exist, are on the machine he named, and what it means to do can be
  * done. Its choice of thread is never second-guessed. Where it wasn't sure,
  * the confidence policy decides between going ahead and asking, and a
- * question always names what it could be.
+ * question always names what it could be. A routine's name, as the model
+ * gives it, is its steps, exactly as kept, sent or offered as any message he
+ * says is, with the routine it came from noted beside it; any other bare
+ * handle for a thread is nothing he said.
  */
 export const check = (given: Decision, situation: Situation, lines: Lines): Checked => {
-  const { desk } = situation
   if (!enabled.has(given.act)) return { _tag: "Say", spoken: notYet(lines) }
-  // A routine's name, as the model gives it, is its steps, exactly as kept, sent or offered as any message he says is.
-  const routined = routining(given, situation)
-  if (Option.isNone(routined)) return { _tag: "Say", spoken: lines.cantTell }
-  const choice = routined.value
+  return Option.match(routining(given, situation), {
+    onNone: () => ({ _tag: "Say", spoken: lines.cantTell }),
+    onSome: ({ decision, routine }) => routined(checking(decision, situation, lines), routine),
+  })
+}
+
+/** Checks a decision, as `check` does, once a routine's name is its steps. */
+const checking = (choice: Decision, situation: Situation, lines: Lines): Checked => {
+  const { desk } = situation
   const find = (handle: string) => desk.threads.find((listed) => listed.handle === handle)
   const target = Option.fromNullable(choice.target === "" ? undefined : find(choice.target))
   const doing = (plan: Plan): Checked => ({ _tag: "Do", plan })
   if (choice.act === "dismiss" || choice.act === "resume" || choice.act === "again" || choice.act === "start") {
     return doing({ decision: choice, target: Option.none() })
   }
+  // Clearing it sets aside all of what a catch-up of everything would tell him, never only what he named of it, and only on his word:
+  // said over something, too little speech is talk or noise nearby, never something to do.
+  if (choice.act === "catchup" && choice.how === "clear") {
+    if (murmured(choice, situation.utterance)) return doing({ decision: { ...choice, act: "resume" }, target: Option.none() })
+    const named = choice.target !== "" || choice.text.trim() !== "" || choice.machine.trim() !== "" || choice.when.trim() !== ""
+    if (named) return { _tag: "Say", spoken: catchupLines(lines).wholeOnly }
+    return doing({ decision: { ...choice, target: "" }, target: Option.none() })
+  }
   // Catching up only reads what yapd kept, which has a machine that's away too: a thread it names is one on the desk, one only in what
   // he missed, by its own handle, or one he muted that isn't on the desk, by its handle in MUTED.
   if (choice.act === "catchup") {
+    // "Read me the Tezos migration's subagents", in his own words and nothing more, is having them read to him from now on, never only
+    // what they said; anything else, or a catch-up of them since when, or of a project, is the model's.
+    if (
+      choice.how === "subagents" &&
+      choice.when === "" &&
+      choice.text === "" &&
+      situation.utterance.echo === undefined &&
+      Mutes.readsSubagents(situation.utterance.heard)
+    ) {
+      return checking({ ...choice, act: "mute", when: "" }, situation, lines)
+    }
     if (choice.target === "") return doing({ decision: choice, target: Option.none() })
     if (Option.isSome(target)) return doing({ decision: choice, target })
     return situation.missed.groups.some(({ handle }) => handle === choice.target) || Option.isSome(mutedBy(choice.target, situation))
@@ -2163,9 +2838,22 @@ export const check = (given: Decision, situation: Situation, lines: Lines): Chec
       // Said over something, too little speech is talk or noise nearby, never something to do.
       if (murmured(choice, situation.utterance)) return doing({ decision: { ...choice, act: "resume" }, target: Option.none() })
       if (choice.how === "clear" || choice.how === "undo") return doing({ decision: { ...choice, target: "" }, target: Option.none() })
+      if (choice.how === "subagents" || choice.how === "nosubagents") {
+        // A lasting setting, never one for a set time, which he's told rather than have it taken for another.
+        if (choice.when.trim() !== "") {
+          const name = Option.match(target, { onNone: () => "it", onSome: (listed) => `${listed.called}${listed.here ? "" : ` on ${listed.ref.machine}`}` })
+          return { _tag: "Say", spoken: subagentLines(lines, name).untimed(choice.how === "subagents") }
+        }
+        if (Option.isSome(target)) return choice.sure === "low" && candidates.length >= 2 ? ask(candidates) : doing({ decision: choice, target })
+        // With nothing named, it's what he's on about, which only "read its subagents" said in so many words can mean.
+        return candidates.length >= 2 ? ask(candidates) : doing({ decision: choice, target })
+      }
       if (choice.how !== "mute" && choice.how !== "unmute") return { _tag: "Say", spoken: lines.cantTell }
-      // One of MUTED by its own handle, like a session in a terminal, which isn't a thread on the desk.
-      if (Option.isNone(target) && Option.isSome(mutedBy(choice.target, situation))) return doing({ decision: choice, target })
+      // One of MUTED by its own handle, like a session in a terminal, or the subagent FOCUS is an update from, by its handle there,
+      // neither of which is a thread on the desk.
+      if (Option.isNone(target) && (Option.isSome(mutedBy(choice.target, situation)) || Option.isSome(subagentBy(choice.target, situation)))) {
+        return doing({ decision: choice, target })
+      }
       if (Option.isSome(target)) return choice.sure === "low" && candidates.length >= 2 ? ask(candidates) : doing({ decision: choice, target })
       // With nothing named, it's what he's on about, which only "mute it" said in so many words can mean.
       return candidates.length >= 2 ? ask(candidates) : doing({ decision: choice, target })
@@ -2224,21 +2912,54 @@ export const check = (given: Decision, situation: Situation, lines: Lines): Chec
       const routine = choice.how === "routine" ? routineOf(choice.text) : undefined
       const text = choice.how === "routine" ? (routine?.steps ?? "") : choice.text.trim()
       if (text === "") return { _tag: "Say", spoken: lines.cantTell }
+      // A short name, as he'd say it, so "let's ship it" is three words: a longer one is refused, whatever else is right with it.
+      if (routine !== undefined && wordsIn(routine.name) > namedIn) return { _tag: "Say", spoken: said.short }
       // His words, never the model's: what's kept is in all he said, as heard, word for word. What may have been yapd's own voice is
       // never kept, which he's told as it's done.
       const { utterance } = situation
       const heard = utterance.whole ?? utterance.heard
-      if (utterance.echo === undefined && heard !== "" && !asSaid(text, heard)) {
-        const missing = unheard(text, heard)
-        return { _tag: "Say", spoken: routine === undefined ? said.words(missing) : said.steps(missing) }
+      if (utterance.echo === undefined && heard !== "" && routine === undefined && !asSaid(text, heard)) return { _tag: "Say", spoken: said.words(unheard(text, heard)) }
+      // A routine only as all he asked for, since its name sends its steps to an agent: steps that leave out a "don't" before them or an "if"
+      // between, or what else he asked for with them, are kept as nothing at all. He's told which words weren't his, or to say it on its own.
+      if (utterance.echo === undefined && heard !== "" && routine !== undefined && !wholeRoutine(routine, heard)) {
+        return { _tag: "Say", spoken: asSaid(text, heard) ? said.whole(asSaid(routine.name, heard) ? routine.name : undefined) : said.steps(unheard(text, heard)) }
       }
+      // Where its name ends is his to say, never the model's: as far as he went after "when I say" before he paused, so a name the model
+      // ran on into what he asked of the steps, like "ship, if green", which his saying "ship" would leave out, is refused, as is any he
+      // ran on into the steps without a pause. Its words are his too, symbols and all, so the model's "C" for his "C++" keeps nothing.
+      const spoken = utterance.echo === undefined && heard !== "" && routine !== undefined ? (spokenName(heard) ?? "") : undefined
+      if (spoken !== undefined && routine !== undefined && Ledger.digest(spoken) !== Ledger.digest(routine.name)) return { _tag: "Say", spoken: said.pause }
+      if (spoken !== undefined && routine !== undefined && calledAs(spoken) !== calledAs(routine.name)) return { _tag: "Say", spoken: said.words(unheard(routine.name, spoken)) }
       if (routine !== undefined) {
         // The one in his preferences is the one, and a name yapd answers to already would never be heard as the routine's.
-        if ((situation.memories?.written ?? []).some(({ name }) => name.toLowerCase() === routine.name.toLowerCase())) return { _tag: "Say", spoken: said.written }
+        if ((situation.memories?.written ?? []).some(({ name }) => calledAs(name) === calledAs(routine.name))) return { _tag: "Say", spoken: said.written }
         if (answersTo(routine.name)) return { _tag: "Say", spoken: said.answered }
       }
-      // About him, never a thread.
-      return doing({ decision: { ...choice, target: "" }, target: Option.none() })
+      // About him, never a thread. What's kept is his words, never the model's: a routine's steps as he said them after its name's pause,
+      // or before "when I say", and a fact as all he said after a "remember that" and an everyday way of asking before it, but for words
+      // to yapd a pause sets off, every mark and symbol kept. The model's words only have to say the same, symbols and all, so its "C" for
+      // his "C++" keeps nothing, as does a fact said with more than it, like a "never" it leaves out, or another request in the same
+      // breath, unless that's all the rest the model gave, his words after an "and", "then" or "also", and the fact all he said before it.
+      // That split is the only way a rest goes on: beside all he asked to be kept, or over what may have been yapd's own voice, the model's
+      // rest is taken out before anything's done, and he's told it was left.
+      const alone = (kept: string): Checked => ({
+        _tag: "Do",
+        plan: { decision: { ...choice, target: "", text: kept, rest: "" }, target: Option.none(), ...(choice.rest.trim() === "" ? {} : { left: choice.rest }) },
+      })
+      if (utterance.echo !== undefined || heard === "") return alone(choice.text)
+      if (routine !== undefined) {
+        // Its name as he said it, up to his pause, which the model's only says the same as.
+        const steps = spokenSteps(heard, text)
+        return steps === undefined ? { _tag: "Say", spoken: said.steps(unheard(text, heard)) } : alone(`${spoken ?? routine.name}: ${steps}`)
+      }
+      const fact = spokenFact(heard, text)
+      if (fact !== undefined) return alone(fact)
+      const split = spokenFactThen(heard, text, choice.rest)
+      if (split !== undefined) return doing({ decision: { ...choice, target: "", text: split }, target: Option.none() })
+      // All of it his, symbols and all, but with more of his around it, which saying it on its own keeps; not all he said within it,
+      // like a "never", which he's told isn't kept as he said it.
+      const missing = unheard(text, heard)
+      return { _tag: "Say", spoken: missing === undefined && standsApart(heard, text, choice.rest) ? said.alone : said.words(missing) }
     }
     case "tidy":
       return tidying(choice, target, candidates, situation, lines, ask)
@@ -2284,10 +3005,12 @@ const writing = (
   // Said over something, too little speech is talk or noise nearby, never something to do.
   if (murmured(choice, utterance)) return { _tag: "Do", plan: { decision: { ...choice, act: "resume" }, target: Option.none() } }
   // Taking back what was just done needs no thread named: it's what was just done. Nor does whatever was done last, whatever thread
-  // the model filled in, nor a reminder just set of no thread, like one for a time, nor a memory, which is of none: a thread filled in
-  // for it can only be the one he was hearing about.
+  // the model filled in, nor a reminder just set of no thread, like one for a time, nor a memory or the catch-up, which are of none: a
+  // thread filled in for it can only be the one he was hearing about.
   const unthreaded =
-    undoes(choice.how) === "memory" || (undoes(choice.how) === "reminder" && !Option.exists(situation.noted ?? Option.none(), ({ about }) => Option.isSome(about)))
+    undoes(choice.how) === "memory" ||
+    undoes(choice.how) === "catchup" ||
+    (undoes(choice.how) === "reminder" && !Option.exists(situation.noted ?? Option.none(), ({ about }) => Option.isSome(about)))
   if (choice.act === "undo" && (undoes(choice.how) === "last" || unthreaded || (Option.isNone(target) && (choice.target.trim() === "" || undoes(choice.how) !== "thread")))) {
     return { _tag: "Do", plan: { decision: { ...choice, target: "" }, target: Option.none() } }
   }
@@ -2615,33 +3338,33 @@ export const readable = (text: string) => unreadable.every(([pattern]) => text.s
 const contract = `Reply with only a JSON object with the keys "act", "target", "sure", "spoken", "others", "machine", "pending", "how", "when", "text" and "rest", in that order. Every key is always there: "" where it doesn't apply.
 
 "act", what he wants:
-- "answer": he asked something you can answer from THREADS, WAITING ON YOU, LATELY, UNHEARD, USAGE, REMINDERS and MEMORIES, or from what you know yourself. "spoken" is the answer. "target" is the thread it's about, if it's about one.
-- "catchup": he wants to hear what he hasn't heard or missed, or what came in while he was away or had you off, about everything or one thread, project or machine, however he puts it, even when UNHEARD could answer it. yapd gathers it from what it kept and briefs him; only yapd knows what he has heard. "target" is a handle from THREADS, UNHEARD or MUTED for one thread, a muted one too; "text" is a project as written in UNHEARD, for all of it; "machine" is one machine; "when" is the time for "since …", as his clock reads it, "YYYY-MM-DDTHH:mm"; leave them "" for everything, which leaves out the threads he muted. "how" is "more" when he wants more of the catch-up he just heard, "muted" for what his muted threads said. "spoken" is "". A question about it that isn't asking to be caught up, like whether a thread finished or how much he missed, is "answer" from UNHEARD. Catching up is only ever about what he hears: telling a thread something, even put as catching it up, bringing it up to speed or filling it in on a decision, is "send" to that thread.
+- "answer": he asked something you can answer from THREADS, WAITING ON YOU, LATELY, UNHEARD, USAGE, REMINDERS and MEMORIES, or from what you know yourself. "spoken" is the answer. "target" is the thread it's about, if it's about one. Asked what a routine does, like "what's my ship routine?", say you can't read its steps out.
+- "catchup": he wants to hear what he hasn't heard or missed, or what came in while he was away or had you off, about everything or one thread, project or machine, however he puts it, even when UNHEARD could answer it. yapd gathers it from what it kept and briefs him; only yapd knows what he has heard. "target" is a handle from THREADS, UNHEARD or MUTED for one thread, a muted one too; "text" is a project as written in UNHEARD, for all of it; "machine" is one machine; "when" is the time for "since …", as his clock reads it, "YYYY-MM-DDTHH:mm"; leave them "" for everything, which leaves out the threads he muted. "how" is "more" when he wants more of the catch-up he just heard, "muted" for what his muted threads said, "subagents" for what a thread's subagents said, which you keep to yourself unless he has them read, only when he asks what they said, like "what did its subagents say?" or "catch me up on the Tezos migration's subagents", with "target" that thread in THREADS: "read me its subagents" is "mute"; or "clear" when he wants all of it set aside without hearing it, however he puts it, like "clear the catch-up", "skip the catch-up", "mark everything as heard" or "I don't need the catch-up", with "target", "text", "machine" and "when" "": yapd clears it all, and he can take that back. "spoken" is "". A question about it that isn't asking to be caught up, like whether a thread finished or how much he missed, is "answer" from UNHEARD. Catching up is only ever about what he hears: telling a thread something, even put as catching it up, bringing it up to speed or filling it in on a decision, is "send" to that thread.
 - "look": he asked what a thread is doing right now, or for detail none of the lines below give. "target" is the thread; "spoken" is empty. You'll be shown what it's doing and asked again.
 - "find": he named something specific that nothing in THREADS fits, or asked what was said or done a while ago. "text" is the words to search for, "how" is "threads" to search what was written in the threads, or "journal" for what you heard and said. You'll be shown what's found and asked again.
 - "again": he wants to hear what you said last again. "how" is "same"; "spoken" is that line.
 - "clarify": it's about one thread but you'd be guessing between two or three: "target" is the likeliest and "others" the rest. yapd asks him which.
 - "start": new work: a change, a fix, an investigation, a review, a question that needs the web, the code or time. "text" is the request in his words. yapd works out where it goes and starts it.
-- "send": a message for a thread, like an instruction, a correction or an answer to what it asked. "target" is the thread, "text" the message as he'd type it. "how" is "now"; "after" when he says after, once it's done or when it finishes; "restart" when he says to drop what it's doing and do this instead. A message he wants sent at a later time, like "at five" or "in an hour", is "offer" at that time, never "send": yapd only asks him then. A routine's name from MEMORIES said as a request, like "land it", is "send" with "text" its handle there, like p1, never its steps written out, and "target" the thread it's for: FOCUS, unless he names another. Anything more he says with it that's a request of its own, like "and tell the Mina one to rebase", goes in "rest". Words that change what the routine asks, like "for typos" or "but only the fee code", make it a message of his own words, never the routine nor its steps rewritten.
+- "send": a message for a thread, like an instruction, a correction or an answer to what it asked. "target" is the thread, "text" the message as he'd type it. "how" is "now"; "after" when he says after, once it's done or when it finishes; "restart" when he says to drop what it's doing and do this instead. A message he wants sent at a later time, like "at five" or "in an hour", is "offer" at that time, never "send": yapd only asks him then. A routine's name from MEMORIES said as a request, like "land it", is "send", or "offer" when he wants it offered, with "text" its handle there, like p1, and "target" the thread it's for: FOCUS, unless he names another. You don't know its steps and never write them: yapd puts them in. Anything more he says with it that's a request of its own, like "and tell the Mina one to rebase", goes in "rest". Words that change what the routine asks, like "for typos" or "but only the fee code", make it a message of his own words, never the routine nor its steps rewritten.
 - "stop": stop a thread's run, when he says to stop the thread, the run or the work. "target" is the thread.
-- "undo": take back what you just did for him, as LATELY shows it: the message you just sent, the reminder or offer you just set or cancelled, what you just remembered or forgot, or the threads you just archived, renamed, snoozed, settled or pinned. "how" is which he means: "reminder" for the reminder or offer, "memory" for what you remembered or forgot, "message" for the message you sent a thread, "tidy" for what you just did to threads by tidying them, "carry" when he wants a thread you stopped to carry on, and "" only when he says no more than "scratch that" or "undo that": whatever you did last. "target" is the thread only when he names one, never the one he's hearing about when he doesn't; "" when "how" is "".
+- "undo": take back what you just did for him, as LATELY shows it: the message you just sent, the reminder or offer you just set or cancelled, what you just remembered or forgot, the catch-up you just cleared, or the threads you just archived, renamed, snoozed, settled or pinned. "how" is which he means: "reminder" for the reminder or offer, "memory" for what you remembered or forgot, "catchup" for the catch-up you cleared, like "bring them back", "message" for the message you sent a thread, "tidy" for what you just did to threads by tidying them, "carry" when he wants a thread you stopped to carry on, and "" only when he says no more than "scratch that" or "undo that": whatever you did last. "target" is the thread only when he names one, never the one he's hearing about when he doesn't; "" when "how" is "".
 - "decide": he allows, or turns down, what a thread waits for him to allow, in WAITING ON YOU or OPEN. "target" is the thread; "how" is "accept", "session" only when he says for the session or from now on, or "decline".
 - "reply": he answers a thread's question, in WAITING ON YOU or OPEN. "target" is the thread; "text" is his answer: the option he picked, as it's written, or his own words. A question in several parts is answered a part at a time: "text" answers only the part he's at, and yapd asks him the rest. "text" empty when he wants to hear a thread's question before answering: yapd reads it to him.
 - "dismiss": he wants you to stop talking, or it needs nothing: thanks, okay, an acknowledgement, or no to OPEN, unless OPEN asks a thread's question, which a no answers.
 - "resume": it wasn't meant for you: talk with someone else, noise, or words that make no sense.
-- "mute": he wants you to stop reading a thread's progress and finished work aloud, or start again. "how" "mute" or "unmute"; "target" the thread, or the handle of one in MUTED that has one, like m1, which isn't in THREADS; "when" the time it ends, if he says, worked out from NOW as his clock reads it, "YYYY-MM-DDTHH:mm", like an hour from now for "for an hour". What needs him still comes through. Not "mode", which is how you talk, nor "tidy", which snoozes it in T3 Code. "how" "clear" unmutes every thread.
+- "mute": he wants you to stop reading a thread's progress and finished work aloud, or start again. "how" "mute" or "unmute"; "target" the thread, the handle of one in MUTED that has one, like m1, which isn't in THREADS, or s1, the subagent FOCUS is an update from: over it, "mute it", "mute this one", "mute this subagent" or it by what it's called is s1 alone, with any end he gives, and its thread only when he names that thread; "when" the time it ends, if he says, worked out from NOW as his clock reads it, "YYYY-MM-DDTHH:mm", like an hour from now for "for an hour". What needs him still comes through. Not "mode", which is how you talk, nor "tidy", which snoozes it in T3 Code. "how" "clear" unmutes every thread. "how" "subagents" when he wants a thread's subagents read to him from now on, like "read me the Tezos migration's subagents" or "read me its subagents", which is never "catchup", and "nosubagents" to stop reading them all, like "keep its subagents to yourself", never for one subagent: "target" the thread in THREADS they're part of, never a subagent; "when" always "", as it lasts until he says otherwise. Every thread's are kept to yourself until he asks. Asking a thread to use subagents, like "have a subagent review it", is "send" to it.
 - "show": he wants to see something on his screen, or to stop seeing it. "how" is "threads" for what's going on across his threads, "thread" for one thread, "pr" for a thread's pull request, which opens it in his browser too, "usage" for his limits, "missed" for what he hasn't heard, "said" for what you said last, or "hide" to take down what's on his screen. "target" is the thread for "thread" and "pr". yapd says what's on it.
 - "mode": he wants you to change how and when you talk. "how" is "focus" to say only what needs him for a while, "quiet" for the night, like "goodnight", "I'm off to bed" or "turn yourself off", which also says only what needs him, "normal" when he's back, like "I'm back" or "you can talk normally again", which gives him the catch-up, "brief" to say only headlines again, like "talk shorter", or "full" to say every update in full, like "give me everything" or "stop giving me the short version". "when" is when focus or quiet ends, if he says, worked out from NOW as his clock reads it, "YYYY-MM-DDTHH:mm", like three o'clock today for "till three". It's about you, never a message for a thread, and never "mute", which is one thread. "stop", "quiet" or "be quiet" on their own only mean stop talking: "dismiss".
 - "remind": he wants to be told something later. At a time: "how" is "at", and "when" the time worked out from NOW, as his clock reads it, "YYYY-MM-DDTHH:mm" with no offset, like "2026-10-12T15:00" for three this afternoon. Or once a thread finishes its turn, "how" "finished", or asks him something, "how" "asked", with "target" that thread. "text" is what to tell him then, in a few words, like "call the bank", or "" when it's only that the thread finished or asks. "rest" keeps its meaning: what he wants done now, in the same breath, like "and tell the Mina one to rebase". Not "send" with "after", which tells the thread itself once it's done; something he wants offered to a thread then is "offer". You don't watch pull requests: told to say when one's checks pass or it's merged, "answer" that you don't.
 - "offer": he wants you to offer, at a time or when a thread finishes or asks him something, to send a thread a message. "how" and "when" as for "remind"; "target" is the thread told, and the one watched; "text" is the message as "send" writes it. yapd asks him then, and only his yes sends it. One that watches one thread and tells another, you can't: "answer" so.
-- "remember": he wants you to keep something in mind from now on. "how" is "fact" for something that's so about him or his work, like "remember that rig's T3 Code runs the nightly", with "text" the fact copied from what he said word for word, mistakes and all, like "rig's T3 Code runs the nightly". Or "routine" for steps to send a thread whenever he says a name, like "when I say review it, have Sol review it until it's clean", with "text" "name: steps", each copied from what he said word for word, like "review it: have Sol review it until it's clean". Either is copied as it came through, names too: what "hearing" says of misheard names never applies to it, and a word you put right isn't his, so nothing is kept. A routine's steps go to an agent as they're kept, so when a name in them came through as another word, like "Saul" for Sol, keep nothing: "answer" that the name didn't come through as he said it, and that a routine typed in his preferences keeps it as he writes it. Said again with other steps, it's the same name: yapd changes it. "target" is "". Being told something at a time, or once a thread does something, is "remind".
-- "forget": he wants one of REMINDERS cancelled, or one of MEMORIES forgotten. "target" is its handle there, like r2, k1 or p3. "sure" is "high" when his words point at one of them; when another fits nearly as well, it's lower, with the rest in "others": yapd asks him which reminder, like between two that say the same, and of memories, none of which say the same, tells him it couldn't tell which. "Forget it" or "never mind" on its own is "dismiss".
+- "remember": he wants you to keep something in mind from now on. "how" is "fact" for something that's so about him or his work, like "remember that rig's T3 Code runs the nightly", with "text" the fact copied from what he said word for word, mistakes and symbols and all, like "rig's T3 Code runs the nightly". Or "routine" for steps to send a thread whenever he says a name, like "when I say review it, have Sol review it until it's clean", with "text" "name: steps", each copied from what he said word for word, like "review it: have Sol review it until it's clean". The name is only what he'll say for it, three words at most, and all else he asked of the steps is in them. The name ends where he paused, at the first comma, colon or full stop after "when I say" in his words. Either is copied as it came through, names too: what "hearing" says of misheard names never applies to it, and a word you put right isn't his, so nothing is kept. A routine's steps go to an agent as they're kept, so when a name in them came through as another word, like "Saul" for Sol, keep nothing: "answer" that the name didn't come through as he said it, and that a routine typed in his preferences keeps it as he writes it. Said again with other steps, it's the same name: yapd changes it. "target" is "". Being told something at a time, or once a thread does something, is "remind".
+- "forget": he wants one of REMINDERS cancelled, or one of MEMORIES forgotten. "target" is its handle there, like r2, k1 or p3. "sure" is "high" when his words point at one of them; when another fits nearly as well, it's lower, with the rest in "others". Of REMINDERS, yapd asks him which, like between two that say the same. Of MEMORIES, one is forgotten only when his words point at it: otherwise yapd tells him it couldn't tell which, and asks nothing. "Forget it" or "never mind" on its own is "dismiss".
 - "tidy": he wants a thread tidied in T3 Code. "how" is "archive", "unarchive", "rename", "snooze" (hidden until a time), "unsnooze", "settle" (marked done with), "unsettle", "pin" or "unpin". "target" is the thread; to archive, settle or snooze several at once, every handle he means, comma-separated, like "t2, t5, t7"; to unarchive, its handle in ARCHIVED, like a1: you can only unarchive what you archived. "text" is the new title for "rename", in his words. "when" is when a snooze ends, worked out from NOW as his clock reads it, "YYYY-MM-DDTHH:mm", like nine tomorrow for "until tomorrow morning". It changes nothing in the work itself. Not "mute", which only changes what you tell him.`
 
 const hearing = `What he says comes through speech recognition, and names get mangled. A word that doesn't fit the sentence, or sounds like nothing he'd say, is most likely a name misheard: a thread's subject, a project, a machine or a model in THREADS or OTHER THREADS that sounds like it, like a coin, a client or a tool he works on coming out as an everyday word or a made-up one. Weigh such a word above the ordinary ones around it, like "migration" or "status", which fit many threads. His own words get mangled the same way: "appd" and "YAPT" are yapd, "Wig" is rig, "Saul" is Sol, "masterwork tree" is master worktree, "poll request" is pull request, except in what "remember" copies, which is as it came through. Match threads by how they sound and by what the work is about, never by spelling. Short words like "no", "now", "on" and "not" are the least reliable of all.`
 
 const choosing = `Choosing a thread:
-- "it", "that" and "this one" mean FOCUS. "The other one" means the alternative you offered last. When FOCUS is an update not tied to a thread, "it" is the thread in THREADS doing that work, when one is: same project, same subject.
+- "it", "that" and "this one" mean FOCUS. "The other one" means the alternative you offered last. When FOCUS is an update not tied to a thread, "it" is the thread in THREADS doing that work, when one is: same project, same subject. When it's one of a thread's subagents', "it" to mute or unmute is that subagent, s1.
 - "sure" is "high" when his words point at one thread: by name, even misheard, by what it's about, or by "it" with a FOCUS. "medium" when one fits best but another fits nearly as well. "low" when you'd be guessing.
 - When "sure" isn't "high", fill "others".
 - Fill "machine" only when he says where the thread runs, like "on rig". A machine the work is about, like a thread fixing rig's tunnel, doesn't count.
@@ -2775,16 +3498,34 @@ export const unsaid = (kept: Pick<Kept, "detail">) => {
 /** What's known of yapd's own voice in words of his, as the threads keep it for what he dictated. */
 export type Overheard = Threads.Overheard
 
-/** Only what there is to know of it: nothing without an echo, and no pause that's empty. */
-export const overheard = ({ echo, afterPause }: Overheard): { readonly echo?: string; readonly afterPause?: string } =>
-  echo === undefined ? {} : { echo, ...(afterPause === undefined || afterPause.trim() === "" ? {} : { afterPause }) }
+/** Only what there is to know of it: nothing without an echo, no pause that's empty, and the routines it holds only when there are any. */
+export const overheard = ({
+  echo,
+  afterPause,
+  echoRoutines,
+}: Overheard): { readonly echo?: string; readonly afterPause?: string; readonly echoRoutines?: ReadonlyArray<string> } =>
+  echo === undefined
+    ? {}
+    : {
+        echo,
+        ...(afterPause === undefined || afterPause.trim() === "" ? {} : { afterPause }),
+        ...(echoRoutines === undefined || echoRoutines.length === 0 ? {} : { echoRoutines }),
+      }
 
 /** What's known of it for words of his kept in the journal, like what he dictated or said back, as they were heard: nothing for an older entry. */
 export const overheardIn = (kept: Pick<Kept, "detail">): Overheard => {
-  const detail = kept.detail as { readonly echo?: unknown; readonly afterPause?: unknown } | null | undefined
+  const detail = kept.detail as { readonly echo?: unknown; readonly afterPause?: unknown; readonly echoRoutines?: unknown } | null | undefined
   if (typeof detail !== "object" || detail === null || typeof detail.echo !== "string") return {}
-  return overheard({ echo: detail.echo, afterPause: typeof detail.afterPause === "string" ? detail.afterPause : undefined })
+  return overheard({
+    echo: detail.echo,
+    afterPause: typeof detail.afterPause === "string" ? detail.afterPause : undefined,
+    echoRoutines: Array.isArray(detail.echoRoutines) ? detail.echoRoutines.filter((name): name is string => typeof name === "string") : undefined,
+  })
 }
+
+/** What yapd was saying as he began, as the model sees it: when that held one of his routines' steps, the routine by its name alone. */
+const echoed = ({ echo, echoRoutines }: Overheard, most: number) =>
+  (echoRoutines ?? []).length > 0 ? `what you said of ${byName(echoRoutines ?? [])}, whose steps you never see` : fenced(echo ?? "", most)
 
 /**
  * A note after words of his from before, as the model sees them, when he
@@ -2792,10 +3533,11 @@ export const overheardIn = (kept: Pick<Kept, "detail">): Overheard => {
  * followed a pause is his. His words themselves are never touched.
  */
 export const ownVoice = (said: Overheard) => {
-  const { echo, afterPause } = overheard(said)
+  const known = overheard(said)
+  const { echo, afterPause } = known
   return echo === undefined
     ? ""
-    : ` (he began that while your own voice could still get into his microphone, so what came first may be your own words, from around ${fenced(echo, 400)}${
+    : ` (he began that while your own voice could still get into his microphone, so what came first may be your own words, from around ${echoed(known, 400)}${
         afterPause === undefined ? "" : `; what he said after a pause, ${fenced(afterPause, 400)}, is surely his`
       })`
 }
@@ -2823,7 +3565,15 @@ export const missedName = (group: Pick<Missed.Group, "called" | "project"> & { r
   const detail = group.rows?.[0]?.detail as { readonly reminder?: unknown; readonly usage?: unknown } | null | undefined
   // What's about no thread or session, like a reminder or how much of a limit is used, by what it is.
   const own = typeof detail !== "object" || detail === null ? undefined : detail.reminder !== undefined ? "a reminder" : detail.usage !== undefined ? "your usage" : undefined
-  return group.called || group.project || own || "a session"
+  // One of a thread's subagents, which is never on the desk, by what it is.
+  const subagent = group.rows?.some(Missed.subagent) === true ? "a subagent" : undefined
+  return group.called || subagent || group.project || own || "a session"
+}
+
+/** What was said, or would have been, of the newest of a thread's unheard rows, as the model sees it: never a routine's steps. */
+const latestOf = (group: Missed.Group) => {
+  const newest = group.rows.at(-1)
+  return newest === undefined ? group.latest : (unroutined(newest).said ?? "")
 }
 
 /** How he missed what he did of a thread, in a few words each: what needs him, what came while yapd was off, and so on. */
@@ -2847,7 +3597,8 @@ const span = (group: Pick<Missed.Group, "oldest" | "newest" | "rows">, now: numb
  * its own, so a catch-up can be asked about it.
  */
 const unheardLines = (missed: Missed.Missed, now: number, muted: ReadonlySet<string>) => {
-  const { groups } = missed
+  // Never a thread's subagents', which are asked about by the thread they're part of.
+  const groups = missed.groups.filter(({ head }) => head === undefined)
   if (groups.length === 0) return "UNHEARD, what he hasn't heard yet: Nothing."
   const rows = groups.reduce((sum, { rows }) => sum + rows.length, 0)
   const off = groups.reduce((sum, group) => sum + group.off, 0)
@@ -2860,18 +3611,54 @@ const unheardLines = (missed: Missed.Missed, now: number, muted: ReadonlySet<str
     const parts = how(group)
     return `- ${group.handle}${isMuted ? " muted" : ""} ${fenced(missedName(group), 90)}${group.project === undefined || group.called === undefined ? "" : ` · ${group.project}`}${
       group.machine === undefined ? "" : ` · ${group.machine}`
-    }: ${group.rows.length} unheard${parts.length === 0 ? "" : ` (${parts.join(", ")})`}, ${span(group, now)}; latest: ${fenced(group.latest)}`
+    }: ${group.rows.length} unheard${parts.length === 0 ? "" : ` (${parts.join(", ")})`}, ${span(group, now)}; latest: ${fenced(latestOf(group))}`
   }
   const rest = groups.slice(missedShown)
   const more = rest.reduce((sum, { rows }) => sum + rows.length, 0)
   return [header, ...groups.slice(0, missedShown).map(line), ...(rest.length === 0 ? [] : [`- and ${rest.length} more ${rest.length === 1 ? "thread" : "threads"}, ${more} ${more === 1 ? "update" : "updates"}.`])].join("\n")
 }
 
-/** A journal entry as the model sees it. */
+/** Routines by name alone, as the model is told of what holds their steps, which it never sees: his routine «review it». */
+const byName = (names: ReadonlyArray<string>) => `his ${names.length === 1 ? "routine" : "routines"} ${names.map((name) => fenced(name, 90)).join(" and ")}`
+
+/**
+ * A journal entry whose words hold his routines' steps, as code put them in,
+ * as the model sees it: what came of them, by the routines' names alone. His
+ * words that kept one, what was read back of it, offered or sent.
+ */
+const routineEntry = (kept: Kept, names: ReadonlyArray<string>, where: string) => {
+  const named = byName(names)
+  const detail = (typeof kept.detail === "object" && kept.detail !== null ? kept.detail : {}) as Readonly<Record<string, unknown>>
+  switch (kept.kind) {
+    case "dictation":
+      return `he asked you to keep ${named}`
+    case "reply":
+      return `he said over it${where}, asking you to keep ${named}`
+    // What yapd told him of it never holds a message's words.
+    case "sent":
+      return `you sent ${named} to the thread${where}${kept.said === undefined ? "" : `, and told him ${fenced(kept.said)}`}${unsaid(kept) === undefined ? "" : ", but never told him, since he turned you off"}`
+    case "notice":
+      return `you told him${where} that his offer of ${named} came due`
+    default:
+      if (detail.memory !== undefined) return `you ${detail.undo !== undefined ? "brought back" : detail.replaced !== undefined ? "changed" : "kept"} ${named}, reading its steps back to him`
+      if (detail.reminder !== undefined) return `you set an offer of ${named}${where}`
+      // A message that didn't go as asked, or only asks first: what yapd told him of it never holds its words.
+      if (detail.act !== undefined) {
+        const told = kept.said ?? unsaid(kept)
+        return `you didn't send ${named} to the thread${where} as asked${told === undefined ? "" : `, and told him ${fenced(told)}`}`
+      }
+      if (detail.question !== undefined) return `you asked him${where} whether to send ${named}`
+      return `you told him${where} of ${named}`
+  }
+}
+
+/** A journal entry as the model sees it: one that holds his routines' steps, by their names alone. */
 const entry = (desk: Threads.Desk, now: number) => (kept: Kept) => {
   const handle = handleOf(desk, kept.machine, kept.thread)
   const about = [kept.project, handle].filter(Boolean).join(", ")
   const where = about === "" ? "" : ` (${about})`
+  const names = routinesIn(kept)
+  if (names.length > 0) return `- ${lasted(now - kept.at)} ago, ${routineEntry(kept, names, where)}`
   const said = kept.said === undefined ? "" : fenced(kept.said)
   // His own words, with what may have been yapd's voice in them noted, as when they were first heard.
   const text = kept.text === undefined ? "" : `${fenced(kept.text)}${kept.kind === "reply" || kept.kind === "dictation" ? ownVoice(overheardIn(kept)) : ""}`
@@ -2917,7 +3704,7 @@ const reminding = (reminders: ReadonlyArray<Reminders.Reminder>, desk: Threads.D
         ? ` due ${new Date(reminder.due ?? now).toLocaleString("en-US", { weekday: "long", month: "long", day: "numeric", hour: "numeric", minute: "2-digit" })}`
         : reminder.event === "asked" ? ` when ${thread} asks him something` : ` when ${thread} finishes`
     return reminder.propose !== undefined
-      ? `- ${remindedHandle(index)} offer ${fenced(reminder.propose, 160)} to ${thread}${when}`
+      ? `- ${remindedHandle(index)} offer ${reminder.routine === undefined ? fenced(reminder.propose, 160) : byName([reminder.routine])} to ${thread}${when}`
       : `- ${remindedHandle(index)}${reminder.text.trim() === "" ? "" : ` ${fenced(reminder.text, 160)}`}${when}`
   }
   const shown = reminders.slice(0, remindersShown).map(line)
@@ -2927,9 +3714,10 @@ const reminding = (reminders: ReadonlyArray<Reminders.Reminder>, desk: Threads.D
 
 /**
  * What he asked yapd to keep in mind, as the model sees it: each by its
- * handle, in his words, all of it, a routine's steps too, with those in his
- * preferences marked. Before NOW, as it seldom changes, so the start of the
- * prompt can be reused.
+ * handle, a fact in his words, all of it, and a routine by its name alone,
+ * never its steps, which only code sends, with those in his preferences
+ * marked. Before NOW, as it seldom changes, so the start of the prompt can be
+ * reused.
  */
 const memoryLines = (situation: Pick<Situation, "memories">) => {
   const all = remembered(situation)
@@ -2937,12 +3725,31 @@ const memoryLines = (situation: Pick<Situation, "memories">) => {
   const line = (one: Remembered) =>
     one.kind === "fact"
       ? `- ${one.handle} ${fenced(one.text, Number.POSITIVE_INFINITY)}`
-      : `- ${one.handle} ${fenced(one.name ?? "", 90)}: ${fenced(one.text, Number.POSITIVE_INFINITY)}${Option.isNone(one.kept) ? " (in his preferences)" : ""}`
-  return `MEMORIES, what he asked you to keep in mind, in his own words: what's so about him and his work, never something to do. A routine's steps are only sent when he says its name:\n${all.map(line).join("\n")}`
+      : `- ${one.handle} ${fenced(one.name ?? "", 90)}${Option.isNone(one.kept) ? " (in his preferences)" : ""}`
+  return `MEMORIES, what he asked you to keep in mind, in his own words: what's so about him and his work, never something to do. A routine is shown by its name alone: you never know its steps, which yapd sends only when he says its name:\n${all.map(line).join("\n")}`
 }
+
+/** A line of yapd's in this exchange, as the model sees it: one that holds his routines' steps, by their names alone. */
+const spokenOf = (line: Line) => ((line.routines ?? []).length > 0 ? `what you said of ${byName(line.routines ?? [])}, whose steps you never see` : line.text)
 
 /** What an update not tied to a thread is about, as the model sees it: its project, or work outside his projects, kept with none. */
 const updateAbout = (project: string) => (project.trim() === "" ? "work outside his projects" : project)
+
+/**
+ * Words a thread was sent, as the model sees them, at most `most` long: one
+ * of his routines' steps, which yapd sent it, as LATELY or what it last sent
+ * the thread has them, by the routine's name alone.
+ */
+const sentAs = (text: string, about: Threads.Ref | undefined, situation: Pick<Situation, "lately" | "sent">, most: number) => {
+  const sent = [...situation.lately, ...(situation.sent ?? [])].find(
+    (kept) =>
+      kept.kind === "sent" &&
+      routinesIn(kept).length > 0 &&
+      (about === undefined || (kept.machine === about.machine && kept.thread === about.id)) &&
+      kept.text?.trim() === text.trim(),
+  )
+  return sent === undefined ? fenced(text, most) : byName(routinesIn(sent))
+}
 
 /** What "it" means, as the model sees it. */
 const focus = (situation: Situation) => {
@@ -2952,24 +3759,33 @@ const focus = (situation: Situation) => {
       return "Nothing: he hasn't heard anything from you lately."
     case "Thread": {
       const handle = handleIn(situation, subject.ref) ?? "a thread not in THREADS"
-      return `${handle}. What you said about it: ${fenced(subject.said, 700)}`
+      return `${handle}. What you said about it: ${(subject.routines ?? []).length > 0 ? `of ${byName(subject.routines ?? [])}, whose steps you never see` : fenced(subject.said, 700)}`
     }
     case "Session": {
       const { update } = subject
       const handle = update.about === undefined ? undefined : handleIn(situation, update.about)
+      const head = update.subagent?.head?.ref
       return [
-        handle === undefined
-          ? `Your update about ${updateAbout(update.project)}, ${lasted(now - update.at)} ago, from work in ${fenced(update.thread.cwd, 120)} that yapd hasn't tied to a thread yet: ${fenced(update.spoken, 400)}`
-          : `${handle}. Your update about it, ${lasted(now - update.at)} ago: ${fenced(update.spoken, 400)}`,
+        update.subagent !== undefined
+          ? `${subagentHandle}, ${update.subagent.called === undefined ? "" : `${fenced(update.subagent.called, 90)}, `}one of the subagents of ${(head === undefined ? undefined : handleOf(desk, head.machine, head.id)) ?? "a thread not in THREADS"}. Your update from it, ${lasted(now - update.at)} ago: ${fenced(update.spoken, 400)}`
+          : handle === undefined
+            ? `Your update about ${updateAbout(update.project)}, ${lasted(now - update.at)} ago, from work in ${fenced(update.thread.cwd, 120)} that yapd hasn't tied to a thread yet: ${fenced(update.spoken, 400)}`
+            : `${handle}. Your update about it, ${lasted(now - update.at)} ago: ${fenced(update.spoken, 400)}`,
         // Like an answer to what he asked over it, which is what he heard last.
-        ...(subject.said === update.spoken ? [] : [`What you said last, over it: ${fenced(subject.said, 400)}`]),
-        ...Option.match(update.turn.prompt, { onNone: () => [], onSome: (prompt) => [`What it was asked: ${fenced(prompt, 300)}`] }),
+        ...(subject.said === update.spoken
+          ? []
+          : [`What you said last, over it: ${(subject.routines ?? []).length > 0 ? `of ${byName(subject.routines ?? [])}, whose steps you never see` : fenced(subject.said, 400)}`]),
+        ...Option.match(update.turn.prompt, { onNone: () => [], onSome: (prompt) => [`What it was asked: ${sentAs(prompt, update.about, situation, 300)}`] }),
         `What it wrote: ${fenced(update.turn.message, 700)}`,
       ].join("\n")
     }
     case "Answer": {
       const handle = Option.flatMap(subject.about, (ref) => Option.fromNullable(handleIn(situation, ref)))
-      const told = `What you just told him${Option.match(handle, { onNone: () => "", onSome: (handle) => ` about ${handle}` })}: ${fenced(subject.said, 700)}`
+      const about = Option.match(handle, { onNone: () => "", onSome: (handle) => ` about ${handle}` })
+      const told =
+        (subject.routines ?? []).length > 0
+          ? `What you just told him${about} was of ${byName(subject.routines ?? [])}, whose steps you never see.`
+          : `What you just told him${about}: ${fenced(subject.said, 700)}`
       const { catchup } = subject
       if (catchup === undefined) return told
       // Only the desk's handles, which still mean the same threads once what it covered is heard.
@@ -2984,7 +3800,7 @@ const focus = (situation: Situation) => {
   }
 }
 
-const detail = (desk: Threads.Desk, second: NonNullable<Option.Option.Value<Situation["second"]>>) => {
+const detail = (desk: Threads.Desk, second: NonNullable<Option.Option.Value<Situation["second"]>>, situation: Pick<Situation, "lately" | "sent">) => {
   if ("found" in second) {
     return `FOUND, what a search turned up, for this second look:\n${second.found.length === 0 ? "Nothing." : second.found.map((found) => `- ${found}`).join("\n")}`
   }
@@ -2992,7 +3808,7 @@ const detail = (desk: Threads.Desk, second: NonNullable<Option.Option.Value<Situ
   const { messages, runs, request, plan } = second.detail
   return [
     `DETAIL of ${handle}, read just now, for this second look:`,
-    `Latest messages, oldest first:\n${messages.map(({ role, text }) => `- ${role}: ${fenced(text, 600)}`).join("\n")}`,
+    `Latest messages, oldest first:\n${messages.map(({ role, text }) => `- ${role}: ${role === "user" ? sentAs(text, second.ref, situation, 600) : fenced(text, 600)}`).join("\n")}`,
     `Runs: ${runs.toSorted((a, b) => b.ordinal - a.ordinal).slice(0, 3).map(({ status }) => status).join(", ") || "none"}`,
     ...Option.match(request, {
       onNone: () => [],
@@ -3181,15 +3997,22 @@ export const prompt = (situation: Situation, style: Option.Option<string>) => {
             .map((one, index) => `- ${archivedHandle(index)} ${fenced(one.called, 90)} · ${one.ref.machine} · ${lasted(now - one.at)} ago`)
             .join("\n")}`,
         ]),
+    ...((situation.reading ?? []).length === 0
+      ? []
+      : [
+          `SUBAGENTS READ, threads whose subagents you read him, as you keep every other thread's to yourself: ${(situation.reading ?? [])
+            .map((reading) => desk.threads.find(({ ref }) => Mutes.key.thread(ref) === reading.key)?.handle ?? fenced(readingName(reading, desk), 90))
+            .join(", ")}`,
+        ]),
     unheardLines(situation.missed, now, muted),
     reminding(situation.reminders ?? [], desk, now),
     `FOCUS, what "it" means:\n${focus(situation)}${
-      lines.length === 0 ? "" : `\nThis exchange so far:\n${lines.map((line) => (line.speaker === "yapd" ? `You: ${line.text}` : `He: ${line.text}${ownVoice(line)}`)).join("\n")}`
+      lines.length === 0 ? "" : `\nThis exchange so far:\n${lines.map((line) => (line.speaker === "yapd" ? `You: ${spokenOf(line)}` : `He: ${line.text}${ownVoice(line)}`)).join("\n")}`
     }`,
     ...Option.match(open, {
       onNone: () => [],
       onSome: (open) => [
-        `OPEN, your question: ${fenced(open.asked)}${open.heard.trim() === "" ? "" : `\nAbout what he asked: ${fenced(open.heard, 400)}${ownVoice(open)}`}${
+        `OPEN, your question: ${fenced(open.shown ?? open.asked)}${open.heard.trim() === "" ? "" : `\nAbout what he asked: ${fenced(open.heard, 400)}${ownVoice(open)}`}${
           open.candidates.length === 0 && (open.reminders ?? []).length === 0
             ? ""
             : `\nIts choices, in the order you said them: ${[
@@ -3200,7 +4023,7 @@ export const prompt = (situation: Situation, style: Option.Option<string>) => {
           open.asks !== undefined
             ? waitingOn(open, situation.utterance)
             : yesNo(open.kind)
-              ? `\nWhat a yes does: "${open.decision.act}"${open.decision.act === "send" ? ` with the message ${fenced(open.decision.text, 400)}` : ""}${
+              ? `\nWhat a yes does: "${open.decision.act}"${open.decision.act !== "send" ? "" : open.routine === undefined ? ` with the message ${fenced(open.decision.text, 400)}` : ` with ${byName([open.routine])}`}${
                   open.decision.act === "mode"
                     ? ` with "how" "${open.decision.how}", which gives him the catch-up`
                     : open.decision.act === "catchup"
@@ -3219,12 +4042,12 @@ export const prompt = (situation: Situation, style: Option.Option<string>) => {
     }),
     ...Option.match(second, {
       onNone: () => [],
-      onSome: (second) => [`${detail(desk, second)}\nThis is your second look: answer now, with "answer". Don't look or find again.`],
+      onSome: (second) => [`${detail(desk, second, situation)}\nThis is your second look: answer now, with "answer". Don't look or find again.`],
     }),
     ...(situation.utterance.echo === undefined
       ? []
       : [
-          `He began while your own voice could still get into his microphone, so what was heard may start with your own words, from around ${fenced(situation.utterance.echo, 400)}, misheard or not, and his first word may be lost under yours. Words that sound like yours there are yours, however they came out, like "The teaser is important." for "the Tezos importer", or "Stop it." for "Stop the…": take them all out, and never act on them or turn them into words of his. If nothing surely his is left, it's "resume", never "dismiss" or a yes. If what's left for a thread sounds cut off, or hangs on a word that may be yours, don't act on it: with OPEN, "again" with "pending" "answers"; otherwise "answer", asking him in a few words to say it again. A question or a dismissal of his goes as usual.${
+          `He began while your own voice could still get into his microphone, so what was heard may start with your own words, from around ${echoed(situation.utterance, 400)}, misheard or not, and his first word may be lost under yours. Words that sound like yours there are yours, however they came out, like "The teaser is important." for "the Tezos importer", or "Stop it." for "Stop the…": take them all out, and never act on them or turn them into words of his. If nothing surely his is left, it's "resume", never "dismiss" or a yes. If what's left for a thread sounds cut off, or hangs on a word that may be yours, don't act on it: with OPEN, "again" with "pending" "answers"; otherwise "answer", asking him in a few words to say it again. A question or a dismissal of his goes as usual.${
             situation.utterance.afterPause === undefined || situation.utterance.afterPause.trim() === ""
               ? ""
               : ` What he said after a pause, ${fenced(situation.utterance.afterPause, 400)}, is surely his, even where it repeats your words, like naming one of your options; only what came before it may be yours.`
@@ -3270,7 +4093,8 @@ export const briefPrompt = (brief: Brief, desk: Threads.Desk, now: number, style
   const waiting = desk.threads.filter(({ state }) => state === "approval" || state === "question")
   const name = (group: Missed.Group) => fenced(missedName(group), 90)
   // What needs him leads, whatever thread it's of.
-  const needing = brief.groups.flatMap((group) => group.rows.filter(Missed.needs).map((kept) => `- ${name(group)}, ${lasted(now - kept.at)} ago: ${fenced(kept.said ?? "", 300)}`))
+  // Never a routine's steps, which its name stands for.
+  const needing = brief.groups.flatMap((group) => group.rows.filter(Missed.needs).map((kept) => `- ${name(group)}, ${lasted(now - kept.at)} ago: ${fenced(unroutined(kept).said ?? "", 300)}`))
   const threads = brief.groups.toSorted((one, other) => one.oldest - other.oldest)
   const most = brief.kind === "detail" ? 6 : 3
   return [
@@ -3288,7 +4112,7 @@ export const briefPrompt = (brief: Brief, desk: Threads.Desk, now: number, style
           .slice(-most)
           .map((kept) => {
             const more = brief.kind === "detail" ? (kept.detail as { readonly more?: unknown } | undefined)?.more : undefined
-            return `  - ${fenced(kept.said ?? "", 300)}${typeof more === "string" && more.trim() !== "" ? ` More: ${fenced(more, 400)}` : ""}`
+            return `  - ${fenced(unroutined(kept).said ?? "", 300)}${typeof more === "string" && more.trim() !== "" ? ` More: ${fenced(more, 400)}` : ""}`
           })
           .join("\n")}`
       })

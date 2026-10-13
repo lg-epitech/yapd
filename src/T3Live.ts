@@ -67,6 +67,12 @@ export const Thread = Schema.Struct({
   lineage: nullable(
     Schema.Struct({ parentThreadId: nullable(Schema.String), relationshipToParent: nullable(Schema.String) }),
   ),
+  /**
+   * How it came to be, read only to tell a subagent its provider made inside
+   * its parent's own session, "provider", whose hooks never reach yapd: taken
+   * whatever it is, so a kind T3 Code adds never costs the thread.
+   */
+  creationSource: Schema.optional(Schema.Unknown),
   goal: nullable(Schema.Struct({ objective: Schema.String, status: Schema.String })),
   settledOverride: nullable(Schema.String),
   /** When it was settled, by his hand or T3 Code's. */

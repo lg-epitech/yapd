@@ -55,7 +55,7 @@ const update: Conversation.Update = {
  * what's said back plays like afplay, which can't say it's playing, and either plays to the end or can't play at all.
  * With `model`, replies are worked out by the provider's responder with that model instead, and the persona's
  * lines are `lines`, or the plain ones. With `persona`, it's that one that picks and is told the lines. With `routines`,
- * those are the names of his routines.
+ * those are the names of his routines. With `over`, it's that update that's read, with what the journal `kept` before it.
  */
 const conversation = (
   said: ReadonlyArray<string>,
@@ -70,6 +70,8 @@ const conversation = (
     readonly model?: Layer.Layer<Model>
     readonly persona?: Context.Tag.Service<Persona.Persona>
     readonly routines?: ReadonlyArray<string>
+    readonly over?: Conversation.Update
+    readonly kept?: ReadonlyArray<Journal.Entry>
   } = {},
 ) =>
   Effect.gen(function* () {
@@ -121,6 +123,7 @@ const conversation = (
             glossaries.push(terms ?? [])
             return transcripts.shift() ?? ""
           }),
+        ready: Effect.succeed(true),
       }),
       given.model === undefined
         ? Layer.succeed(Responder.Responder, {
@@ -154,7 +157,8 @@ const conversation = (
       withholds: () => Effect.succeed(false),
       ...(given.routines === undefined ? {} : { routines: Effect.succeed(given.routines) }),
     }).pipe(Effect.provide(context))
-    const fiber = yield* Effect.fork(made.converse(update))
+    for (const entry of given.kept ?? []) yield* Context.get(context, Journal.Journal).write(entry)
+    const fiber = yield* Effect.fork(made.converse(given.over ?? update))
     // Lets the fibers catch up on what the test did, since the clock only moves when told to.
     const flush = Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 20)))
     // As long as the microphone's, so what's heard lasts as long as it would.
@@ -839,9 +843,20 @@ const overHelper = (
     readonly follow?: (heard: string, echo?: string, afterPause?: string) => boolean
     /** Whether Whisper fails on all it's given. */
     readonly failing?: boolean
+    /** Whether "Mute." turns yapd off, counted in `offs`, which here leaves it on. */
+    readonly off?: boolean
+    /** How long Whisper takes on each thing it's given, in seconds: at once unless said. */
+    readonly transcribing?: number
+    /** Whether Whisper can't hear yet, its model still loading, though it hears what it's given as ever. */
+    readonly unready?: boolean
+    /** With `tell`, it says a notice in the same words instead, like a failure, which nothing else said over it is for. */
+    readonly tell?: boolean
+    /** Whether something always waits to be said next. */
+    readonly queued?: boolean
   } = {},
 ) =>
   Effect.gen(function* () {
+    let offs = 0
     const runtime = yield* Effect.runtime<never>()
     const runSync = Runtime.runSync(runtime)
     const commands: Array<string> = []
@@ -949,7 +964,8 @@ const overHelper = (
               .join(" ")
             transcribed.push(heard)
             return heard
-          }),
+          }).pipe((heard) => (options.transcribing === undefined ? heard : Effect.delay(heard, `${options.transcribing} seconds`))),
+        ready: Effect.succeed(options.unready !== true),
       }),
       Layer.succeed(Responder.Responder, {
         respond: (interruption) =>
@@ -969,6 +985,16 @@ const overHelper = (
       replied: Effect.void,
       saying: () => Effect.void,
       withholds: () => Effect.succeed(false),
+      // In the timeline too, so what's done before it is known.
+      ...(options.off === true
+        ? {
+            off: Effect.sync(() => {
+              offs++
+              timeline.push({ type: "off", at: (now() - (first ?? now())) / 1000 })
+            }),
+          }
+        : {}),
+      ...(options.queued === true ? { queued: Effect.void } : {}),
     }).pipe(Effect.provide(context))
     // Lets the helper, the microphone and the fibers catch up on what the test did, since the clock only moves when told to.
     const flush = Effect.promise(async () => {
@@ -1007,12 +1033,15 @@ const overHelper = (
         ? made.ask({ audio: "/tmp/question.wav", spoken, answer: respond })
         : options.answer === true
           ? made.answer({ audio: "/tmp/answer.wav", spoken, followUp: respond })
-          : made.converse({ ...long, spoken }),
+          : options.tell === true
+            ? Effect.as(made.tell({ audio: "/tmp/notice.wav", spoken }), false)
+            : made.converse({ ...long, spoken }),
     )
     yield* flush
     yield* flush
     return {
       fiber,
+      offs: () => offs,
       commands,
       timeline,
       plays,
@@ -1033,6 +1062,8 @@ const overHelper = (
       replies: Effect.map(Effect.flatMap(Journal.Journal, (journal) => journal.since(0)), (entries) => entries.map(({ text }) => text)).pipe(
         Effect.provide(context),
       ),
+      /** All the journal kept. */
+      journal: Effect.flatMap(Journal.Journal, (journal) => journal.since(0)).pipe(Effect.provide(context)),
       /** What the journal kept of what may have been its own voice in each reply, as the model asked later reads it back. */
       overheard: Effect.map(Effect.flatMap(Journal.Journal, (journal) => journal.since(0)), (entries) =>
         entries.map(({ detail }) => {
@@ -1134,6 +1165,69 @@ describe("Over its first seconds, while yapd's own voice can still get into the 
       sent: [],
       replies: ["Which PR was that?"],
     })
+  })
+
+  test("keeps and logs none of a secret said over it, whatever the model makes of it, like a remember he's told to ask with his shortcut", async () => {
+    const secret = "Remember that the staging key is sk-live-4f9a8b7c6d5e."
+    /** What's logged and kept of his secret when the model answers it with `spoken`. */
+    const answered = async (spoken: string) => {
+      const lines: Array<string> = []
+      const logger = Logger.make(({ message }) => {
+        lines.push((Array.isArray(message) ? message : [message]).join(" "))
+      })
+      const result = await overHelperScoped(
+        Effect.gen(function* () {
+          const helper = yield* overHelper([[0.9, secret]], { reply: () => ({ intent: "answer", spoken, message: "" }) })
+          yield* helper.wait(1)
+          yield* helper.talk(0.9, 15)
+          yield* helper.quiet
+          yield* helper.wait(1)
+          return { responded: helper.responded.map(({ heard, echo }) => ({ heard, told: echo !== undefined })), journal: yield* helper.journal }
+        }).pipe(Effect.provide(Logger.replace(Logger.defaultLogger, logger))),
+      )
+      return { ...result, lines }
+    }
+    const plain = await answered("Ask me that with your shortcut, sir.")
+    // Over its first second, with what may have been its own voice, which isn't kept with it either.
+    expect(plain.responded).toEqual([{ heard: secret, told: true }])
+    // Nor what the model answered to it, which may give it away in words nothing takes for a secret.
+    expect(plain.journal.map(({ kind, text, said, detail }) => ({ kind, text, said, detail }))).toEqual([
+      { kind: "reply", text: undefined, said: undefined, detail: { intent: "answer", withheld: true } },
+    ])
+    expect(plain.lines.filter((line) => line.includes("sk-live"))).toEqual([])
+    expect(plain.lines).toContain("Heard something that could give a secret away, so it's held back")
+    expect(plain.lines).toContain("Reply: answer")
+    // The model's answer saying it back is said, but neither logged nor kept.
+    const echoed = await answered("I won't keep sk-live-4f9a8b7c6d5e, sir. Ask me that with your shortcut.")
+    expect(echoed.journal.map(({ kind, text, said, detail }) => ({ kind, text, said, detail }))).toEqual([
+      { kind: "reply", text: undefined, said: undefined, detail: { intent: "answer", withheld: true } },
+    ])
+    expect(JSON.stringify(echoed.journal)).not.toContain("4f9a8b7c6d5e")
+    expect(echoed.lines.filter((line) => line.includes("4f9a8b7c6d5e"))).toEqual([])
+    expect(echoed.lines).toContain("Reply: answer")
+  })
+
+  test.each([
+    ["an answer", { answer: true }],
+    ["a question", { ask: true }],
+  ] as const)("logs none of a secret said over %s, whatever comes of it, only that it was heard", async (_, over) => {
+    const lines: Array<string> = []
+    const logger = Logger.make(({ message }) => {
+      lines.push((Array.isArray(message) ? message : [message]).join(" "))
+    })
+    const offered = await overHelperScoped(
+      Effect.gen(function* () {
+        const helper = yield* overHelper([[0.9, "Remember that the staging key is sk-live-4f9a8b7c6d5e."]], over)
+        yield* helper.wait(4)
+        yield* helper.talk(0.9, 15)
+        yield* helper.quiet
+        yield* helper.wait(1)
+        return helper.offered.map(({ heard }) => heard)
+      }).pipe(Effect.provide(Logger.replace(Logger.defaultLogger, logger))),
+    )
+    expect(offered).toEqual(["Remember that the staging key is sk-live-4f9a8b7c6d5e."])
+    expect(lines.filter((line) => line.includes("4f9a8b7c6d5e"))).toEqual([])
+    expect(lines).toContain("Heard something that could give a secret away, so it isn't logged")
   })
 
   test.each(["Okay, thanks.", "Got it."])("follows the model's dismissal of %p said over its first second, falling quiet for good", async (said) => {
@@ -1518,6 +1612,323 @@ describe("Over its first seconds, while yapd's own voice can still get into the 
       transcribed: ["", "", ""],
       responded: [],
     })
+  })
+
+  test("past three times talk that wasn't meant for it, the rest plays through whatever's said, but 'Mute.' still turns yapd off", async () => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        const helper = yield* overHelper([[0.95, "Mute."]], { off: true })
+        yield* helper.wait(4)
+        for (let time = 0; time < 3; time++) {
+          yield* helper.talk(0.8, 10)
+          yield* helper.quiet
+          yield* helper.wait(0.5)
+        }
+        // The TV again, and then him.
+        yield* helper.talk(0.8, 10)
+        yield* helper.quiet
+        const before = helper.offs()
+        yield* helper.talk(0.95, 10)
+        yield* helper.quiet
+        yield* helper.wait(0.5)
+        return { commands: helper.commands, transcribed: helper.transcribed, responded: helper.responded, offs: [before, helper.offs()] }
+      }),
+    )
+    expect(result).toEqual({
+      // Only "Mute." stops it, at once.
+      commands: ["play", "volume", "stop", "play", "volume", "stop", "play", "volume", "stop", "play", "stop"],
+      transcribed: ["", "", "", "", "Mute."],
+      responded: [],
+      offs: [0, 1],
+    })
+  })
+
+  test.each([
+    ["an update", {}],
+    ["a question", { ask: true }],
+    ["an answer", { answer: true }],
+  ] as const)("'Mute.' said on its own after a pause, while what someone else said over %s is still being worked out, turns yapd off", async (_, given) => {
+    const over = (before: string) =>
+      overHelperScoped(
+        Effect.gen(function* () {
+          const helper = yield* overHelper([[0.9, before], [0.95, "Mute."]], { responding: 5, off: true, ...given })
+          yield* helper.wait(4)
+          yield* helper.talk(0.9, 20)
+          yield* helper.quiet
+          // He says it while that's still being worked out.
+          yield* helper.wait(1)
+          yield* helper.talk(0.95, 10)
+          yield* helper.quiet
+          yield* helper.wait(0.1)
+          return { offs: helper.offs(), worked: [...helper.responded, ...helper.offered].map(({ heard }) => heard) }
+        }),
+      )
+    expect(await over("Are you coming to the standup?")).toEqual({ offs: 1, worked: ["Are you coming to the standup?"] })
+    // Trailed off into it, it's the rest of what he was saying, like a thread to mute, for the model to work out once he's done.
+    expect(await over("Can you…")).toEqual({ offs: 0, worked: ["Can you Mute."] })
+  })
+
+  test.each([
+    ["an update", {}],
+    ["a question", { ask: true }],
+    ["an answer", { answer: true }],
+  ] as const)("'Mute.' said on its own over %s turns yapd off, even with talk after it begun while Whisper is still on it", async (_, given) => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        const helper = yield* overHelper([[0.95, "Mute."], [0.9, "Hello?"]], { off: true, transcribing: 0.4, ...given })
+        yield* helper.wait(4)
+        yield* helper.talk(0.95, 10)
+        yield* helper.quiet
+        // His phone rings, and he answers it while "Mute." is still being transcribed.
+        yield* helper.talk(0.9, 20)
+        yield* helper.wait(0.4)
+        yield* helper.quiet
+        yield* helper.wait(0.4)
+        return { offs: helper.offs(), worked: [...helper.responded, ...helper.offered].map(({ heard }) => heard) }
+      }),
+    )
+    expect(result).toEqual({ offs: 1, worked: [] })
+  })
+
+  test.each([
+    ["once its own voice is learnt", 4],
+    ["over its first seconds, while its own voice can still get into the microphone", 1],
+  ] as const)("over a notice, %s, nothing he says turns it down, so talk in the room can't keep it low, and 'Mute.' stops it before yapd is turned off", async (_, at) => {
+    const over = (said: string) =>
+      overHelperScoped(
+        Effect.gen(function* () {
+          const helper = yield* overHelper([[0.95, said]], { off: true, tell: true })
+          yield* helper.wait(at)
+          yield* helper.talk(0.95, 10)
+          yield* helper.quiet
+          yield* helper.wait(0.5)
+          return { timeline: helper.timeline.map(({ type, value }) => (value === undefined ? type : `${type} ${value}`)), offs: helper.offs() }
+        }),
+      )
+    expect(await over("Mute.")).toEqual({ timeline: ["play", "stop", "off"], offs: 1 })
+    expect(await over("What time is it?")).toEqual({ timeline: ["play"], offs: 0 })
+  })
+
+  test("over a notice, talk longer than 'Mute.' could be, like a TV's, is never even transcribed", async () => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        // What Whisper would hear as "Mute." were it asked, so asking it would show.
+        const helper = yield* overHelper([[0.95, "Mute."]], { off: true, tell: true })
+        yield* helper.wait(4)
+        yield* helper.talk(0.95, 100)
+        yield* helper.quiet
+        yield* helper.wait(0.5)
+        return { transcribed: helper.transcribed, offs: helper.offs(), commands: helper.commands }
+      }),
+    )
+    expect(result).toEqual({ transcribed: [], offs: 0, commands: ["play"] })
+  })
+
+  test.each([
+    ["a notice", { tell: true }],
+    ["the rest of an update played through after talk that wasn't meant for it", {}],
+    ["the rest of an answer played through so", { answer: true }],
+    ["the rest of a question played through so", { ask: true }],
+  ] as const)("with something waiting to be said next, the moment after %s is over after the pause between lines, and a 'Mute.' begun in it is heard out", async (_, given) => {
+    const after = (mute: boolean) =>
+      overHelperScoped(
+        Effect.gen(function* () {
+          const helper = yield* overHelper([[0.95, "Mute."]], { off: true, queued: true, ...given })
+          yield* helper.wait(4)
+          // Talk Whisper makes nothing of, three times, as from a TV, unless it's a notice, which plays through all that's said anyway.
+          if (!("tell" in given)) {
+            for (let time = 0; time < 3; time++) {
+              yield* helper.talk(0.8, 10)
+              yield* helper.quiet
+              yield* helper.wait(0.5)
+            }
+          }
+          yield* helper.finish
+          yield* helper.wait(0.2)
+          if (mute) yield* helper.talk(0.95, 10)
+          yield* helper.wait(0.2)
+          const early = Option.isSome(yield* Fiber.poll(helper.fiber))
+          // Past the pause between lines.
+          yield* helper.wait(0.3)
+          const late = Option.isSome(yield* Fiber.poll(helper.fiber))
+          if (mute) yield* helper.quiet
+          return { early, late, done: Option.isSome(yield* Fiber.poll(helper.fiber)), offs: helper.offs() }
+        }),
+      )
+    expect(await after(false)).toEqual({ early: false, late: true, done: true, offs: 0 })
+    expect(await after(true)).toEqual({ early: false, late: false, done: true, offs: 1 })
+  })
+
+  test("once the moment after a notice is over, 'Mute.' begun while other talk is still being transcribed is heard out too", async () => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        const helper = yield* overHelper([[0.8, "Is that the news?"], [0.95, "Mute."]], { off: true, tell: true, queued: true, transcribing: 0.4 })
+        yield* helper.finish
+        // Someone else begins just as it ends, and goes on past the pause between lines.
+        yield* helper.wait(0.3)
+        yield* helper.talk(0.8, 10)
+        yield* helper.wait(0.4)
+        yield* helper.quiet
+        // He says it while that's being transcribed.
+        yield* helper.talk(0.95, 10)
+        yield* helper.quiet
+        yield* helper.wait(0.4)
+        yield* helper.wait(0.4)
+        return { transcribed: helper.transcribed, offs: helper.offs() }
+      }),
+    )
+    expect(result).toEqual({ transcribed: ["Is that the news?", "Mute."], offs: 1 })
+  })
+
+  test.each([
+    [
+      "talk begun a while before the notice ended, like a TV's, and still going",
+      (helper: Effect.Effect.Success<ReturnType<typeof overHelper>>) =>
+        Effect.gen(function* () {
+          yield* helper.wait(4)
+          yield* helper.talk(0.8, 30)
+          yield* helper.wait(1)
+          yield* helper.finish
+          // The pause between lines.
+          yield* helper.wait(0.5)
+        }),
+    ],
+    [
+      "talk begun a while after other talk ended, while that's still being made out",
+      (helper: Effect.Effect.Success<ReturnType<typeof overHelper>>) =>
+        Effect.gen(function* () {
+          yield* helper.finish
+          yield* helper.wait(0.3)
+          yield* helper.talk(0.8, 10)
+          yield* helper.wait(0.4)
+          yield* helper.quiet
+          // A TV, begun most of a second after, as Whisper is still on what came before.
+          yield* helper.wait(0.8)
+          yield* helper.talk(0.85, 30)
+          yield* helper.wait(0.2)
+        }),
+    ],
+  ] as const)("once the moment after a notice is over with something waiting, %s, holds what's next up no longer", async (_, said) => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        const helper = yield* overHelper([[0.8, "Is that the news?"], [0.85, "Back to you."]], { off: true, tell: true, queued: true, transcribing: 1 })
+        yield* said(helper)
+        return { done: Option.isSome(yield* Fiber.poll(helper.fiber)), offs: helper.offs() }
+      }),
+    )
+    expect(result).toEqual({ done: true, offs: 0 })
+  })
+
+  test("once the moment after a notice is over, talk that keeps starting again right after it stops is listened to for 'Mute.' four seconds at most", async () => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        const helper = yield* overHelper([[0.8, "Is that the news?"]], { off: true, tell: true, queued: true })
+        yield* helper.finish
+        for (let time = 0; time < 8; time++) {
+          yield* helper.wait(0.3)
+          yield* helper.talk(0.8, 10)
+          yield* helper.wait(0.2)
+          yield* helper.quiet
+        }
+        yield* helper.wait(0.3)
+        yield* helper.talk(0.8, 10)
+        yield* helper.wait(0.1)
+        const listening = Option.isNone(yield* Fiber.poll(helper.fiber))
+        // Four seconds after the pause between lines.
+        yield* helper.wait(0.1)
+        return { listening, done: Option.isSome(yield* Fiber.poll(helper.fiber)), offs: helper.offs() }
+      }),
+    )
+    expect(result).toEqual({ listening: true, done: true, offs: 0 })
+  })
+
+  test("a 'Mute.' begun a beat after the pause between lines that follows a notice is still heard, rather than cut in two", async () => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        const helper = yield* overHelper([[0.95, "Mute."]], { off: true, tell: true, queued: true })
+        yield* helper.finish
+        yield* helper.wait(0.5)
+        yield* helper.wait(0.05)
+        yield* helper.talk(0.95, 10)
+        yield* helper.quiet
+        return helper.offs()
+      }),
+    )
+    expect(result).toBe(1)
+  })
+
+  test("with nothing waiting to be said next, a 'Mute, mute' begun in the moment after a notice and still going as it's over is heard out", async () => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        const helper = yield* overHelper([[0.95, "Mute, mute."]], { off: true, tell: true })
+        yield* helper.finish
+        yield* helper.wait(1.5)
+        yield* helper.talk(0.95, 10)
+        // Just past the usual moment after it.
+        yield* helper.wait(1.7)
+        yield* helper.quiet
+        return helper.offs()
+      }),
+    )
+    expect(result).toBe(1)
+  })
+
+  test("once the moment after a notice is over, Whisper is waited on no longer than what's next is held up for 'Mute.'", async () => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        const helper = yield* overHelper([[0.95, "Mute."]], { off: true, tell: true, queued: true, transcribing: 10 })
+        yield* helper.finish
+        yield* helper.wait(0.3)
+        yield* helper.talk(0.95, 10)
+        // Heard out three seconds into the four what's next can be held up for.
+        yield* helper.wait(3.2)
+        yield* helper.quiet
+        // Four seconds after the pause between lines.
+        yield* helper.wait(1)
+        return { done: Option.isSome(yield* Fiber.poll(helper.fiber)), offs: helper.offs() }
+      }),
+    )
+    expect(result).toEqual({ done: true, offs: 0 })
+  })
+
+  test("once the moment after a notice is over, short talk like a TV's left waiting while Whisper lags holds what's next up no longer than 'Mute.' could", async () => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        const helper = yield* overHelper([[0.8, "Is that the news?"]], { off: true, tell: true, queued: true, transcribing: 3.9 })
+        yield* helper.finish
+        yield* helper.wait(0.3)
+        // Three short bursts in the moment after it, the last two waiting while Whisper is on the first until 0.3 seconds before what's
+        // next can be held up no longer.
+        for (let time = 0; time < 3; time++) {
+          yield* helper.talk(0.8, 10)
+          yield* helper.quiet
+          yield* helper.wait(0.05)
+        }
+        yield* helper.wait(3.75)
+        // Just past four seconds after the pause between lines.
+        yield* helper.wait(0.4)
+        return { done: Option.isSome(yield* Fiber.poll(helper.fiber)), offs: helper.offs() }
+      }),
+    )
+    expect(result).toEqual({ done: true, offs: 0 })
+  })
+
+  test.each([
+    ["while Whisper can't hear yet, its model still loading, it isn't asked", { unready: true, transcribing: 30 }, 0.6],
+    ["Whisper taking longer than 'Mute.' could be heard out in, it's taken for other talk", { transcribing: 10 }, 4],
+  ] as const)("over a notice, %s, so what's next is held up no longer", async (_, given, after) => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        const helper = yield* overHelper([[0.95, "Mute."]], { off: true, tell: true, queued: true, ...given })
+        yield* helper.wait(4)
+        yield* helper.talk(0.95, 10)
+        yield* helper.quiet
+        yield* helper.finish
+        yield* helper.wait(after)
+        return { done: Option.isSome(yield* Fiber.poll(helper.fiber)), offs: helper.offs() }
+      }),
+    )
+    expect(result).toEqual({ done: true, offs: 0 })
   })
 
   /** What's said as a line ends, `at` seconds into its `duration`, `frames` long, and what came of it. */
@@ -2138,6 +2549,17 @@ describe("Responder", () => {
     expect(prompt).toContain(`Agreeing with what the agent already said it would do changes nothing, so that's "dismiss".`)
   })
 
+  test("keeps which subagents are read aloud for yapd, never the agent, while asking the agent to use one is still its", () => {
+    const prompt = Responder.prompt(
+      { project: "yapd", turn: { prompt: Option.none(), message: "Done." }, needsYou: false, lines: [], heard: "Could you start reading me the subagents from now on?" },
+      Option.none(),
+    )
+    expect(prompt).toContain(
+      `Which threads you read aloud to them, a thread's subagents included, like "read me its subagents", "start reading the subagents" or "keep its subagents to yourself", is for you, never the agent: never "send".`,
+    )
+    expect(prompt).toContain(`Asking the agent to use subagents, like "have a subagent review it", is the agent's as usual.`)
+  })
+
   test("passes on every step without saying it back", () => {
     const prompt = Responder.prompt(
       {
@@ -2403,6 +2825,19 @@ describe("more, and how yapd talks, over an update", () => {
     for (const heard of ["What did I miss?", "Catch me up.", "Anything else from rig?"]) expect(quickly(over(heard, "Retries back off now."))).toBeUndefined()
   })
 
+  test("a bare forget it or never mind over an update is hearing enough, without the model, even when the agent asked something: never asked to use the shortcut", () => {
+    const dismissed: Responder.Reply = { intent: "dismiss", spoken: "", message: "" }
+    for (const heard of ["Forget it.", "Forget about it.", "Never mind."]) {
+      expect(quickly(over(heard))).toEqual(dismissed)
+      expect(quickly({ ...over(heard), needsYou: true, turn: { prompt: Option.none(), message: "The PR is up. Should I merge it?" } })).toEqual(dismissed)
+    }
+    // Forgetting something in particular is for yapd, which the model is told to have him ask with the shortcut.
+    expect(quickly(over("Forget that one about rig."))).toBeUndefined()
+    expect(Responder.prompt(over("Forget that one about rig."), Option.none())).toContain(
+      `telling them in a few words to ask you that with their shortcut. A bare "forget it" or "never mind" isn't that: it's "dismiss".`,
+    )
+  })
+
   test("a routine's name said over an update is never for its agent as the bare words: the model is told his routines, and to have him say one with the shortcut", async () => {
     const result = await scoped(
       Effect.gen(function* () {
@@ -2420,6 +2855,27 @@ describe("more, and how yapd talks, over an update", () => {
     )
     expect(result.sent).toEqual([])
     expect(Responder.prompt(over("Land it."), Option.none())).not.toContain("Their routines")
+  })
+
+  test("what the thread was asked, when it's one of his routines' steps yapd sent it, the model is told of by the routine's name alone", async () => {
+    // Words of his own, never an example the model is shown.
+    const steps = "have Codex audit the fee code twice"
+    const result = await scoped(
+      Effect.gen(function* () {
+        const { asked, layer } = scripted([{ intent: "dismiss", spoken: "", message: "" }])
+        const { fiber, speak, wait } = yield* conversation(["Do that again, and merge it."], 0, [], "sent", {
+          model: layer,
+          over: { ...update, turn: { prompt: Option.some(steps), message: "Both audits came back clean." }, about: { machine: "Rosie", id: "t-mina" } },
+          kept: [{ at: 0, kind: "sent", machine: "Rosie", thread: "t-mina", text: steps, said: "On it, sir.", detail: { routines: ["review it"] } }],
+        })
+        yield* speak
+        yield* wait(20)
+        yield* Fiber.join(fiber)
+        return asked
+      }),
+    )
+    expect(result[0]).not.toContain(steps)
+    expect(result[0]).toContain(`User's prompt to the agent:\nhis routine "review it"`)
   })
 })
 
@@ -2543,6 +2999,13 @@ describe("quick replies", () => {
 })
 
 describe("Transcriber", () => {
+  test("only 'Mute.' on its own, however often Whisper heard it, is his emergency off, and only so many words turn yapd back on", () => {
+    for (const heard of ["Mute.", "mute mute", "Mute, mute, mute.", "Jarvis, mute.", "Mute, sir!"]) expect(Responder.halts(heard)).toBe(true)
+    for (const heard of ["Mute it.", "Mute that for an hour.", "Mute the Tezos one.", "What's muted?", "Unmute.", "Mute it, mute it.", "Mute?", "Mute, mute?", ""]) expect(Responder.halts(heard)).toBe(false)
+    for (const heard of ["Unmute.", "Un-mute.", "Turn on.", "Turn it on, please.", "Jarvis, turn yourself on.", "Turn back on.", "Unmute, unmute."]) expect(Responder.wakes(heard)).toBe(true)
+    for (const heard of ["Unmute it.", "Unmute the Tezos one.", "Turn on the lights.", "Turn it off.", "Mute.", "Unmute?", "Turn on?", ""]) expect(Responder.wakes(heard)).toBe(false)
+  })
+
   test("drops what Whisper writes for sounds that aren't words", () => {
     expect(clean(" [BLANK_AUDIO]")).toBe("")
     expect(clean(" (coughs) Merge it  now.")).toBe("Merge it now.")

@@ -74,6 +74,32 @@ export interface Kept extends Omit<Entry, "host"> {
   readonly id: number
 }
 
+/**
+ * The routines whose steps code put into an entry's words, by name, as its
+ * `detail` notes where they came from: his words that kept one, what yapd
+ * read back of one, offered or sent. None for most.
+ */
+export const routinesIn = (kept: Pick<Entry, "detail">): ReadonlyArray<string> => {
+  const detail = kept.detail as { readonly routines?: unknown } | null | undefined
+  const names = typeof detail === "object" && detail !== null && Array.isArray(detail.routines) ? (detail.routines as ReadonlyArray<unknown>) : []
+  return names.filter((name): name is string => typeof name === "string")
+}
+
+/** Routines as a model is told of them in place of their steps: by name alone, like his routine "review it". */
+export const routinesNamed = (names: ReadonlyArray<string>) => `his ${names.length === 1 ? "routine" : "routines"} ${names.map((name) => `"${name}"`).join(" and ")}`
+
+/**
+ * An entry as a model may be shown it: words that hold a routine's steps,
+ * which code put in, are what they're of, the routine by name alone, never
+ * its steps, which only yapd sends, for its name said.
+ */
+export const unroutined = <K extends Pick<Entry, "said" | "text" | "detail">>(kept: K): K => {
+  const names = routinesIn(kept)
+  if (names.length === 0) return kept
+  const named = routinesNamed(names)
+  return { ...kept, ...(kept.said === undefined ? {} : { said: `what was said of ${named}` }), ...(kept.text === undefined ? {} : { text: named }) }
+}
+
 export class Journal extends Context.Tag("yapd/Journal")<
   Journal,
   {
@@ -89,12 +115,25 @@ export class Journal extends Context.Tag("yapd/Journal")<
     readonly claim: (entry: Entry & { readonly key: string }, alongside?: (database: Database) => boolean) => Effect.Effect<Option.Option<Option.Option<number>>>
     /**
      * Notes that the user heard these through, answered them or was briefed
-     * on them, unless they had already, and with each the entry it took the
-     * place of, if any, as what he heard told him of that too.
+     * on them, unless they had already, other than by setting them aside
+     * unheard, and with each the entry it took the place of, if any, as what
+     * he heard told him of that too.
      */
     readonly markHeard: (ids: ReadonlyArray<number>, at: number) => Effect.Effect<void>
     /** Notes that the user is still to hear these, like a question put by to be asked again, whatever they heard of them before. */
     readonly markUnheard: (ids: ReadonlyArray<number>) => Effect.Effect<void>
+    /**
+     * Sets aside these, as he asked, without his hearing them: noted as heard
+     * at `at`, those he hadn't heard yet, which it gives back, so nothing
+     * counts them as missed. Heard since, they're heard as any other is.
+     */
+    readonly setAside: (ids: ReadonlyArray<number>, at: number) => Effect.Effect<ReadonlyArray<number>>
+    /**
+     * Brings back as unheard what was set aside at `at`, of these: only
+     * what's still heard only as it was set aside then, never what he heard
+     * since. It gives back what it brought back.
+     */
+    readonly bringBack: (ids: ReadonlyArray<number>, at: number) => Effect.Effect<ReadonlyArray<number>>
     /** Notes that what was said for an entry was these words in the end, like a line played without "it's on your screen". */
     readonly reword: (id: number, said: string) => Effect.Effect<void>
     /**
@@ -118,7 +157,11 @@ export class Journal extends Context.Tag("yapd/Journal")<
      * turn took the place of, as with all that reads what he hasn't heard.
      */
     readonly unheard: (at: number, most: number, muted?: boolean, held?: boolean) => Effect.Effect<ReadonlyArray<Kept>>
-    /** Each thread's newest update or notice since `at`, newest first, `most` threads at most. */
+    /**
+     * Each thread's newest update or notice since `at`, newest first, `most`
+     * threads at most: the subagents of each thread as one, by the newest of
+     * them, and none kept to yapd, which never takes a thread's place.
+     */
     readonly latest: (at: number, most: number) => Effect.Effect<ReadonlyArray<Kept>>
     /** Notes that these were kept quiet because he muted their thread, like updates dropped as he did. */
     readonly mute: (ids: ReadonlyArray<number>) => Effect.Effect<void>
@@ -280,6 +323,12 @@ const told: ReadonlySet<Kind> = new Set<Kind>(["update", "notice"])
 /** Whether a row was kept quiet because he muted its thread, as SQLite reads its detail. */
 const quiet = "coalesce(json_extract(detail, '$.muted'), 0)"
 
+/** Whether a row is one of T3 Code's own subagents', as SQLite reads its detail. */
+const ofSubagent = "coalesce(json_extract(detail, '$.subagent'), 0)"
+
+/** What a row's thread is listed as: a subagent's as the thread it's part of, so they're listed as one. */
+const partOf = `case when ${ofSubagent} then 'head:' || coalesce(json_extract(detail, '$.head'), thread) else thread end`
+
 /** Whether a row was held for later, as SQLite reads its detail. */
 const heldBack = "(json_extract(detail, '$.held') is not null)"
 
@@ -310,6 +359,15 @@ const unmissable =
  * is asked; a notice that tells of a failure or a limit does.
  */
 const telling = "json_extract(detail, '$.request') is null"
+
+/**
+ * Whether a row is still to be heard, as hearing it notes it: unheard, or
+ * only set aside, which he never heard, so hearing it notes when he did.
+ */
+const hearable = "(heard_at is null or json_extract(detail, '$.setAside') is not null)"
+
+/** A row's detail once it's heard, or to be heard again: no longer set aside. */
+const unsetAside = "case when json_extract(detail, '$.setAside') is null then detail else json_remove(detail, '$.setAside') end"
 
 const hour = 60 * 60_000
 const day = 24 * hour
@@ -379,7 +437,7 @@ export const fromStore = (
             .transaction((database: Database) => {
               database
                 .query<never, Array<number>>(
-                  `update journal set heard_at = ? where heard_at is null and (id in (${ids.map(() => "?").join(", ")})
+                  `update journal set heard_at = ?, detail = ${unsetAside} where ${hearable} and (id in (${ids.map(() => "?").join(", ")})
                    or id in (select json_extract(detail, '$.replaces') from journal where id in (${ids.map(() => "?").join(", ")})))`,
                 )
                 .run(at, ...ids, ...ids)
@@ -390,9 +448,57 @@ export const fromStore = (
         ? Effect.void
         : store
             .transaction((database: Database) => {
-              database.query<never, Array<number>>(`update journal set heard_at = null where id in (${ids.map(() => "?").join(", ")})`).run(...ids)
+              database
+                .query<never, Array<number>>(`update journal set heard_at = null, detail = ${unsetAside} where id in (${ids.map(() => "?").join(", ")})`)
+                .run(...ids)
             })
             .pipe(mark, Effect.catchAll((error) => Effect.logWarning("Could not note what you've still to hear in my journal", error))),
+    setAside: (ids, at) =>
+      ids.length === 0
+        ? Effect.succeed([])
+        : store
+            .transaction((database: Database) => {
+              const among = ids.map(() => "?").join(", ")
+              const unheard = database
+                .query<{ readonly id: number }, Array<number>>(`select id from journal where heard_at is null and id in (${among}) order by at, id`)
+                .all(...ids)
+                .map(({ id }) => id)
+              if (unheard.length === 0) return unheard
+              database
+                .query<never, Array<number>>(
+                  `update journal set heard_at = ?, detail = json_set(coalesce(detail, '{}'), '$.setAside', ?) where id in (${unheard.map(() => "?").join(", ")})`,
+                )
+                .run(at, at, ...unheard)
+              return unheard
+            })
+            .pipe(
+              mark,
+              Effect.catchAll((error) => Effect.logWarning("Could not set aside what you didn't want to hear in my journal", error).pipe(Effect.as<ReadonlyArray<number>>([]))),
+            ),
+    bringBack: (ids, at) =>
+      ids.length === 0
+        ? Effect.succeed([])
+        : store
+            .transaction((database: Database) => {
+              const among = ids.map(() => "?").join(", ")
+              const aside = database
+                .query<{ readonly id: number }, Array<number>>(
+                  `select id from journal where heard_at = ? and json_extract(detail, '$.setAside') = ? and id in (${among}) order by at, id`,
+                )
+                .all(at, at, ...ids)
+                .map(({ id }) => id)
+              if (aside.length === 0) return aside
+              database
+                .query<never, Array<number>>(
+                  `update journal set heard_at = null, detail = ${unsetAside} where id in (${aside.map(() => "?").join(", ")})`,
+                )
+                .run(...aside)
+              return aside
+            })
+            .pipe(
+              mark,
+              Effect.catchAll((error) => Effect.logWarning("Could not bring back what you set aside in my journal", error).pipe(Effect.as<ReadonlyArray<number>>([]))),
+            ),
     reword: (id, said) =>
       store
         .transaction((database: Database) => {
@@ -452,11 +558,13 @@ export const fromStore = (
       reading(
         store.transaction((database: Database) =>
           database
-            // By when each happened, not when it was kept: an update summed up slowly can be kept after a newer notice.
+            // By when each happened, not when it was kept: an update summed up slowly can be kept after a newer notice. A muted thread keeps its
+            // row, where he unmutes it, but a subagent's kept quiet never takes one.
             .query<Row, [number, number]>(
               `select * from (
-                 select *, row_number() over (partition by machine, thread order by at desc, id desc) as rank
+                 select *, row_number() over (partition by machine, ${partOf} order by at desc, id desc) as rank
                  from journal where kind in ('update', 'notice') and thread is not null and at >= ?
+                   and not (${ofSubagent} and ${quiet})
                ) where rank = 1 order by at desc, id desc limit ?`,
             )
             .all(at, most)
@@ -601,7 +709,8 @@ export const fromStore = (
       .transaction((database: Database) =>
         Option.map(
           Option.fromNullable(
-            database.query<Row, []>("select * from journal where heard_at is not null order by heard_at desc, id desc limit 1").get(),
+            // Never what he set aside unheard.
+            database.query<Row, []>("select * from journal where heard_at is not null and json_extract(detail, '$.setAside') is null order by heard_at desc, id desc limit 1").get(),
           ),
           kept,
         ),

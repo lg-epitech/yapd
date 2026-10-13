@@ -1,4 +1,4 @@
-import { Effect } from "effect"
+import { Effect, Option } from "effect"
 import type { Held, Journal, Kept } from "./Journal.ts"
 import type * as Threads from "./Threads.ts"
 
@@ -46,7 +46,7 @@ export const off = (switched: ReadonlyArray<Kept>): (Off & { readonly before?: n
 /** How many times yapd was turned on or off in a week at most, as far as what he missed reads them. */
 export const switches = 1000
 
-const detail = (kept: Kept) => (typeof kept.detail === "object" && kept.detail !== null ? (kept.detail as Record<string, unknown>) : {})
+const detail = (kept: Pick<Kept, "detail">) => (typeof kept.detail === "object" && kept.detail !== null ? (kept.detail as Record<string, unknown>) : {})
 
 /** Whether a row needs him: an update that asks something of him, or a notice of a failure or a limit, but not one only held for a digest. */
 export const needs = (kept: Kept) => (kept.kind === "notice" && detail(kept).priority !== "done") || detail(kept).priority === "needs-you"
@@ -76,9 +76,29 @@ export const held = (kept: Kept) => typeof detail(kept).held === "string" && !wh
 /** Whether a row was read to him and cut off, rather than never read out. */
 export const cut = (kept: Kept) => kept.kind === "update" && !muted(kept) && detail(kept).held === undefined
 
-/** Why an update wasn't read out, as the API says it: kept quiet as he muted its thread, or held, and for what. */
-export const unsaid = (kept: Kept): "muted" | Held | undefined => {
+/** Whether a row is one of T3 Code's own subagents', kept under it. */
+export const subagent = (kept: Pick<Kept, "detail">) => detail(kept).subagent === true
+
+/**
+ * Whether a row is what one of T3 Code's own subagents said that yapd kept to
+ * itself, as he never asked to hear them: never what he hasn't heard, only
+ * what he asks about by the thread it's part of.
+ */
+export const withheld = (kept: Kept) => subagent(kept) && muted(kept)
+
+/** The thread a subagent's row is part of, when its chain could be followed up to one: on the same machine. */
+export const headOf = (kept: Pick<Kept, "machine" | "detail">): Option.Option<Threads.Ref> => {
+  const head = detail(kept).head
+  return subagent(kept) && typeof head === "string" && kept.machine !== undefined ? Option.some({ machine: kept.machine, id: head }) : Option.none()
+}
+
+/**
+ * Why an update wasn't read out, as the API says it: kept to yapd as a
+ * subagent's, kept quiet as he muted its thread, or held, and for what.
+ */
+export const unsaid = (kept: Kept): "subagent" | "muted" | Held | undefined => {
   if (kept.kind !== "update") return undefined
+  if (withheld(kept)) return "subagent"
   if (muted(kept)) return "muted"
   const { held } = detail(kept)
   return held === "focus" || held === "quiet" || held === "progress" || held === "off" ? held : undefined
@@ -91,6 +111,8 @@ export interface Group {
   readonly project: string | undefined
   /** What it's called aloud, while it's on the desk. */
   readonly called?: string
+  /** For one of T3 Code's own subagents, the thread it's part of, when that's known. */
+  readonly head?: Threads.Ref
   /** Its handle: the desk's while it's there, like "t4", or else one of its own, like "u1". */
   readonly handle: string
   /** Oldest first. */
@@ -120,13 +142,14 @@ export const only = (group: Group, keep: (kept: Kept) => boolean): Group | undef
   return rows.length === 0 ? undefined : tally(group, rows)
 }
 
-const tally = (group: Pick<Group, "machine" | "thread" | "project" | "called" | "handle">, rows: ReadonlyArray<Kept>): Group => {
+const tally = (group: Pick<Group, "machine" | "thread" | "project" | "called" | "head" | "handle">, rows: ReadonlyArray<Kept>): Group => {
   const newest = rows.at(-1)!
   return {
     machine: group.machine,
     thread: group.thread,
     project: group.project,
     ...(group.called === undefined ? {} : { called: group.called }),
+    ...(group.head === undefined ? {} : { head: group.head }),
     handle: group.handle,
     rows,
     needs: rows.filter(needs).length,
@@ -163,7 +186,11 @@ export const group = (rows: ReadonlyArray<Kept>, desk: Threads.Desk): ReadonlyAr
     const on = listed(desk, first)
     // Outside his projects, kept with none, it isn't named by one.
     const project = all.findLast((kept) => kept.project !== undefined && kept.project.trim() !== "")?.project
-    return tally({ machine: first.machine, thread: first.thread, project, ...(on === undefined ? {} : { called: on.called }), handle: on?.handle ?? `u${++own}` }, all)
+    const head = Option.getOrUndefined(Option.firstSomeOf(all.map(headOf)))
+    return tally(
+      { machine: first.machine, thread: first.thread, project, ...(on === undefined ? {} : { called: on.called }), ...(head === undefined ? {} : { head }), handle: on?.handle ?? `u${++own}` },
+      all,
+    )
   })
 }
 
@@ -183,12 +210,19 @@ export interface Missed {
  * What came in while yapd was off, what needs him and what he's to hear
  * whatever he muted count for a week, whenever he had yapd off, so a short
  * time off since, or another night off, never makes them drop out unheard.
+ * What a thread's subagents said that yapd kept to itself is in it only
+ * when `withheld`, as for a catch-up, which tells of it when he asks.
  */
-export const gather = (journal: Pick<Journal["Type"], "missed" | "switched">, given: { readonly now: number; readonly spoke: number; readonly coming: ReadonlyArray<number>; readonly desk: Threads.Desk }) =>
+export const gather = (
+  journal: Pick<Journal["Type"], "missed" | "switched">,
+  given: { readonly now: number; readonly spoke: number; readonly coming: ReadonlyArray<number>; readonly desk: Threads.Desk; readonly withheld?: boolean },
+) =>
   Effect.gen(function* () {
     const last = off(yield* journal.switched(given.now - week, switches))
     const from = since(given.now, last?.from)
-    const rows = (yield* journal.missed(from, Math.max(from, given.spoke), undefined, given.now - week)).filter(({ id }) => !given.coming.includes(id))
+    const rows = (yield* journal.missed(from, Math.max(from, given.spoke), undefined, given.now - week)).filter(
+      (kept) => !given.coming.includes(kept.id) && (given.withheld === true || !withheld(kept)),
+    )
     const switched = last === undefined ? undefined : { from: last.from, ...(last.to === undefined ? {} : { to: last.to }) }
     return {
       since: Math.min(from, ...rows.map(({ at }) => at)),
@@ -197,6 +231,16 @@ export const gather = (journal: Pick<Journal["Type"], "missed" | "switched">, gi
       groups: group(rows, given.desk),
     } satisfies Missed
   })
+
+/** Whether a group is of a subagent of this thread. */
+export const of = (group: Pick<Group, "head">, head: Threads.Ref) => group.head !== undefined && group.head.machine === head.machine && group.head.id === head.id
+
+/**
+ * Whether the subagents of a thread kept anything he hasn't heard that a
+ * catch-up of them would tell him of, as of `now`.
+ */
+export const keptBy = (journal: Pick<Journal["Type"], "missed" | "switched">, head: Threads.Ref, now: number) =>
+  Effect.map(gather(journal, { now, spoke: now, coming: [], desk: { threads: [], away: [] }, withheld: true }), ({ groups }) => groups.some((group) => of(group, head)))
 
 /** How much of it there is, threads and rows. */
 export const counted = (groups: ReadonlyArray<Group>) => ({ threads: groups.length, rows: groups.reduce((sum, { rows }) => sum + rows.length, 0) })

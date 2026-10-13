@@ -705,7 +705,8 @@ export const make = (options: {
           kind: "notice" as const,
           ...(about === undefined ? {} : { machine: about.machine, thread: about.id }),
           said: line,
-          detail: { reminder: reminder.id, ...(on ? {} : { held: "off" }) },
+          // An offer of one of his routines, said in words, holds its steps: noted as that routine, which is all a model is told of it.
+          detail: { reminder: reminder.id, ...(on ? {} : { held: "off" }), ...(reminder.routine === undefined ? {} : { routines: [reminder.routine] }) },
         }
         const kept = yield* options.reminders.fire(reminder, entry)
         if (Option.isNone(kept)) {

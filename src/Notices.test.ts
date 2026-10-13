@@ -1552,6 +1552,20 @@ describe("Notices of reminders", () => {
     expect(result.missed[0]!.said).toMatch(/: call the bank\.$/)
   })
 
+  test("an offer of one of his routines due while yapd is off is kept unheard as that routine, so a model is only ever told of it by its name", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const off = yield* notices({ view: [], bounded: {}, reminding: true, power: { on: false, turns: 1 } })
+        yield* off.reminders!.add({ at: now - 60 * 60_000, heard: "Later, offer to review it on the Tezos one.", text: "", propose: "have Codex audit the fee code twice", routine: "review it", due: now - 60_000, machine: "Rosie", thread: "tezos", called: "the Tezos importer" })
+        yield* off.due
+        const missed = yield* off.journal.missed(now - 24 * 60 * 60_000, now - 24 * 60 * 60_000)
+        return missed.map(({ said, detail }) => ({ said, routines: (detail as { routines?: unknown }).routines }))
+      }),
+    )
+    // He hears the steps, as for any offer, once he's caught up.
+    expect(result).toEqual([{ said: expect.stringMatching(/you wanted me to offer to tell the Tezos importer: have Codex audit the fee code twice, sir\.$/), routines: ["review it"] }])
+  })
+
   test("a reminder is said even after older ones were pruned", async () => {
     const result = await run(
       Effect.gen(function* () {

@@ -22,6 +22,10 @@ export interface Line {
   readonly echo?: string
   /** With `echo`, what they said once they carried on after a pause, which is surely theirs. */
   readonly afterPause?: string
+  /** With `echo`, the routines whose steps the line it came from holds, as code put them in: a model is only ever told of it by their names. */
+  readonly echoRoutines?: ReadonlyArray<string>
+  /** For yapd, the routines whose steps its line holds, as code put them in: a model is only ever told of it by their names. */
+  readonly routines?: ReadonlyArray<string>
 }
 
 /** The user said something while yapd was reading an update, or right after. */
@@ -66,9 +70,10 @@ Reply with only a JSON object with the keys "intent", "spoken" and "message".
 - "send" if it's meant for the agent and would change what it does: an instruction, a correction, a decision it asked for, or a question its message doesn't answer. Agreeing with what the agent already said it would do changes nothing, so that's "dismiss". So is telling it to do nothing, leave something as it is, or not go ahead, like "keep the ticket as it is" or "no, leave it", even when the agent asked: it has already stopped, and sending that only wakes it to say it understood.
 - "resume" if it wasn't meant for you, like talking to someone else or background noise.
 - Muting or unmuting this thread or any other, like "mute this", "silence it for now" or "unmute the Tezos one", or asking what's muted, is for you, never the agent: never "send". It's "answer", telling them in a few words to ask you that with their shortcut. Taking back a mute or unmute you just told them of, like "scratch that" or "undo that" right after you said you muted it, is never "send" either: it's "answer", asking them in a few words to say it again.
+- Which threads you read aloud to them, a thread's subagents included, like "read me its subagents", "start reading the subagents" or "keep its subagents to yourself", is for you, never the agent: never "send". It's "answer", telling them in a few words to ask you that with their shortcut. Asking the agent to use subagents, like "have a subagent review it", is the agent's as usual.
 - How you talk to them is for you, never the agent: focus, quiet, goodnight, being back, shorter updates or everything in full, like "let me focus till three", "I'm off to bed" or "stop giving me the short version". Never "send". It's "answer", telling them in a few words to ask you that with their shortcut.
 - Catching up is for you, never the agent: hearing what they missed or haven't heard, or what came in while they were away or had you off, however they put it, like "what did I miss?", "catch me up" or "anything else from rig?". Never "send". It's "answer", telling them in a few words to ask you that with their shortcut.
-- What they want you to keep in mind, or forget, is for you, never the agent: a fact, like "remember that rig's T3 Code runs the nightly", or steps for when they say a name, like "when I say review it, have Sol review it until it's clean". Never "send". It's "answer", telling them in a few words to ask you that with their shortcut.
+- What they want you to keep in mind, or forget, is for you, never the agent: a fact, like "remember that rig's T3 Code runs the nightly", or steps for when they say a name, like "when I say review it, have Sol review it until it's clean". Never "send". It's "answer", telling them in a few words to ask you that with their shortcut. A bare "forget it" or "never mind" isn't that: it's "dismiss".
 - Tidying a thread in T3 Code is for you, never the agent: archiving, unarchiving, renaming, snoozing, settling or pinning it, or undoing that, like "archive this thread" or "snooze it till tomorrow". Never "send". It's "answer", telling them in a few words to ask you that with their shortcut.
 
 "spoken": what you say back. They're listening, not reading.
@@ -129,7 +134,7 @@ export const prompt = ({ project, turn, needsYou, lines, heard, echo, afterPause
   ].join("\n\n")
 
 /** What only fills a pause or asks nicely, which is never what was said. */
-const padding = ["uh", "um", "erm", "oh", "ah", "hmm", "sir", "please"]
+export const padding = ["uh", "um", "erm", "oh", "ah", "hmm", "sir", "please"]
 
 /** What he calls yapd, which is only how he addresses it, unless it's all he said. */
 const names = ["jarvis", "yapd"]
@@ -153,6 +158,30 @@ export const gist = (heard: string) => {
 export const enough: ReadonlySet<string> = new Set([
   "stop", "quiet", "be quiet", "shut up", "silence", "mute", "skip", "skip it", "next", "enough", "that's enough", "never mind",
 ])
+
+/** Calling it off, said on its own to an update: hearing enough of it, never something for yapd to forget, which is asked with the shortcut. */
+const callingOff: ReadonlySet<string> = new Set(["forget it", "forget about it"])
+
+/** What's said, as it's compared, each word once, so what Whisper heard again and again, like "Stop, stop.", is as if said once. */
+export const once = (heard: string) => [...new Set(gist(heard).split(" "))].join(" ")
+
+/**
+ * "Mute." on its own, however many times Whisper heard it: his emergency off,
+ * which turns yapd off at once wherever he says it, as the menu does, with
+ * nothing worked out of it. Never "mute it" or "mute the Tezos one", which
+ * mute a thread, nor "Mute?", which asks something: that's the model's to
+ * make sense of.
+ */
+export const halts = (heard: string) => !question.test(heard) && once(heard) === "mute"
+
+/** Turning yapd back on, in so many words, which only said by the shortcut while it's off turns it on: on, "unmute" is about a thread. */
+const turningOn: ReadonlySet<string> = new Set(["unmute", "un mute", "turn on", "turn it on", "turn yourself on", "turn back on"])
+
+/** Whether what he said is only to turn yapd back on: never asked, like "Unmute?", which is the model's to make sense of. */
+export const wakes = (heard: string) => !question.test(heard) && turningOn.has(once(heard))
+
+/** What what he said turns yapd to, as it is now: off for "Mute." while it's on, on for "unmute" while it's off, and nothing otherwise. */
+export const switches = (heard: string, on: boolean) => (on ? (halts(heard) ? false : undefined) : wakes(heard) ? true : undefined)
 
 /** What Whisper writes for near-silence, which nobody said. */
 export const hallucinated: ReadonlySet<string> = new Set(["you", "thank you", "bye", "see you again", "kid", "thanks for watching"])
@@ -206,7 +235,7 @@ const typed = (heard: string) => {
 export const quick = (interruption: Interruption, onIt: Effect.Effect<string>): Effect.Effect<Reply | undefined> => {
   const said = gist(interruption.heard)
   if (said === "") return Effect.succeed(undefined)
-  if (enough.has(said)) return Effect.succeed({ intent: "dismiss", spoken: "", message: "" })
+  if (enough.has(said) || callingOff.has(said)) return Effect.succeed({ intent: "dismiss", spoken: "", message: "" })
   // The rest of an update said in its headline. Begun while yapd's own voice could still get into the microphone, "more" may be its own word: the model weighs that.
   const more = interruption.more?.trim() ?? ""
   if (more !== "" && interruption.echo === undefined && morePlease.has(said)) return Effect.succeed({ intent: "answer", spoken: more, message: "" })

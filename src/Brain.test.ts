@@ -1618,6 +1618,82 @@ describe("Brain", () => {
       expect(checked._tag === "Do" ? checked.plan.decision.how : checked).toBe("clear")
     })
 
+    // An update from T3 Code's review of the Tezos migration, run as its subagent.
+    const subagent: Assistant.Subject = {
+      _tag: "Session",
+      update: {
+        session: "codex:s-review",
+        project: "integration",
+        turn: { prompt: Option.none(), message: "One blocker." },
+        needsYou: false,
+        spoken: "For Migrate Tezos Integration: one blocker.",
+        audio: "/tmp/update.wav",
+        thread: { agent: "codex", session: "s-review", cwd: "/code/integration", message: "One blocker.", origin: {} },
+        at: now - 20_000,
+        subagent: { child: { machine: "Rosie", id: "t-review" }, called: "Sol review", head: { ref: ref(tezos), called: "Migrate Tezos Integration" } },
+      },
+      said: "For Migrate Tezos Integration: one blocker.",
+    }
+
+    test("'read its subagents' or 'stop reading their subagents' are the thread he's on about, or the one a subagent's update is part of, with no model, and any other way is the model's", () => {
+      expect(mute("Read me its subagents.")).toMatchObject({ act: "mute", how: "subagents", target: tezosHandle(), when: "" })
+      expect(mute("Stop reading their subagents.")).toMatchObject({ act: "mute", how: "nosubagents", target: tezosHandle(), when: "" })
+      expect(mute("Don't read its subagents.", { subject: subagent })).toMatchObject({ act: "mute", how: "nosubagents", target: "" })
+      for (const heard of ["Read me the Tezos one's subagents.", "Read its subagents for an hour.", "Can you read me its subagents?", "Keep its subagents to yourself."]) {
+        expect([heard, mute(heard)]).toEqual([heard, undefined])
+      }
+      // Asked for a while, as the model may take it, it's said to last until he says otherwise, and nothing changes.
+      const timed = Brain.check(Brain.decision({ act: "mute", how: "subagents", target: tezosHandle(), when: "2026-10-08T23:00" }), situation("Read me the Tezos one's subagents for an hour."), lines)
+      expect(timed).toEqual({ _tag: "Say", spoken: "I can't read you the subagents of Migrate Tezos Integration for a set time, sir, only until you tell me to stop." })
+      // "What's muted?" ends with whose subagents are read.
+      const reading = [{ key: `t3:Rosie:${tezos.id}`, at: now - 60_000 }]
+      expect(mute("What's muted?", { reading })?.spoken).toBe("Nothing's muted, sir. I'm reading you the subagents of Migrate Tezos Integration.")
+    })
+
+    test("the model mutes a subagent he's on about by its own handle, for as long as he says, and 'read me <thread>'s subagents' is them read from now on, never only what they said", () => {
+      // FOCUS gives the subagent a handle of its own, beside the thread it's part of, which a mute takes as it takes one of MUTED.
+      expect(Brain.prompt(situation("Mute it until tomorrow.", { subject: subagent }), Option.none())).toContain(
+        `s1, «Sol review», one of the subagents of ${tezosHandle()}. Your update from it`,
+      )
+      const timed = Brain.check(Brain.decision({ act: "mute", how: "mute", target: "s1", when: "2026-10-09T09:00" }), situation("Mute it until tomorrow.", { subject: subagent }), lines)
+      expect(timed._tag === "Do" ? timed.plan.decision : timed).toMatchObject({ act: "mute", how: "mute", target: "s1", when: "2026-10-09T09:00" })
+      const read = (heard: string) => Brain.check(Brain.decision({ act: "catchup", how: "subagents", target: tezosHandle() }), situation(heard), lines)
+      for (const heard of ["Read me the Tezos migration's subagents.", "Read me the subagents of the Tezos migration.", "Can you read me its subagents from now on?"]) {
+        const checked = read(heard)
+        expect([heard, checked._tag === "Do" ? checked.plan.decision : checked]).toMatchObject([heard, { act: "mute", how: "subagents", target: tezosHandle(), when: "" }])
+      }
+      // Anything more than asking for them, like what they said, since when or again, is the model's: a catch-up, as it decided.
+      for (const heard of [
+        "What did the Tezos migration's subagents say?",
+        "Read me what the Tezos migration's subagents said.",
+        "Read me the Tezos migration's subagents' findings.",
+        "Read me everything from the Tezos migration's subagents.",
+        "Read me the latest from the Tezos migration's subagents.",
+        "Read me the subagents of the Tezos migration from this morning.",
+        "Read me the subagents of the Tezos migration again.",
+        "Read me its subagents again.",
+      ]) {
+        const checked = read(heard)
+        expect([heard, checked._tag === "Do" ? checked.plan.decision : checked]).toMatchObject([heard, { act: "catchup", how: "subagents" }])
+      }
+      // A catch-up of them since when the model gave is never made a setting, nor its time dropped.
+      const since = Brain.check(
+        Brain.decision({ act: "catchup", how: "subagents", target: tezosHandle(), when: "2026-10-08T09:00" }),
+        situation("Read me the Tezos migration's subagents."),
+        lines,
+      )
+      expect(since._tag === "Do" ? since.plan.decision : since).toMatchObject({ act: "catchup", how: "subagents", when: "2026-10-08T09:00" })
+    })
+
+    test("the model is told which threads' subagents are read, only while any are, and that reading them lasts until he says otherwise", () => {
+      const reading = [{ key: `t3:Rosie:${tezos.id}`, at: now - 60_000 }]
+      const shown = Brain.prompt(situation("Read me the Tezos one's subagents.", { reading }), Option.none())
+      expect(shown).toContain(`SUBAGENTS READ, threads whose subagents you read him, as you keep every other thread's to yourself: ${tezosHandle()}`)
+      expect(shown).toContain(`"how" "subagents" when he wants a thread's subagents read to him from now on`)
+      expect(shown).toContain(`"when" always "", as it lasts until he says otherwise`)
+      expect(Brain.prompt(situation("Read me the Tezos one's subagents."), Option.none())).not.toContain("SUBAGENTS READ")
+    })
+
     test("'scratch that' takes back a mute made since the last thing yapd did, and that thing when it came after", () => {
       const sent: Ledger.Row = {
         commandId: "yapd:u0:0",
@@ -1954,6 +2030,24 @@ describe("catching up", () => {
     expect(said.unbriefedRest).toBe("I couldn't sum up the rest just now, sir. Ask me again in a moment.")
     expect(said.more).toBe("There's more, sir. Ask me for more when you're ready.")
     expect(said.offer(5)).toEqual({ news: "You missed five, sir.", question: "Want the rundown?" })
+    expect(said.cleared(53)).toBe("Cleared, sir: fifty-three updates set aside.")
+    expect(said.cleared(1)).toBe("Cleared, sir: one update set aside.")
+  })
+
+  test("clearing the catch-up is all of it or nothing, only on his word, and scratch that right after takes it back", () => {
+    const over = (heard: string, voiced: number) => {
+      const given = situation(heard, { desk: on, missed })
+      return { ...given, utterance: { ...given.utterance, via: "reply" as const, voiced } }
+    }
+    const clear = Brain.decision({ act: "catchup", how: "clear" })
+    expect(Brain.check(clear, over("Clear the catch-up.", 2), lines)._tag).toBe("Do")
+    // Too little speech over something to be his: talk or noise nearby, never something to do.
+    const faint = Brain.check(clear, over("Clear the catch-up.", 0.2), lines)
+    expect(faint._tag === "Do" ? faint.plan.decision.act : faint).toBe("resume")
+    // Never only what he named of it, which clearing everything would lose.
+    expect(Brain.check({ ...clear, target: handle(tezos) }, over("Clear the Tezos catch-up.", 2), lines)).toEqual({ _tag: "Say", spoken: "I can only clear the whole catch-up, sir." })
+    const noted = Option.some<Brain.Noted>({ at: now - 30_000, kind: "cleared", id: 7, about: Option.none(), ids: [1, 2] })
+    expect(Brain.fast(situation("Scratch that.", { noted }), lines)).toMatchObject({ act: "undo", how: "catchup" })
   })
 })
 
@@ -1991,5 +2085,163 @@ describe("memories", () => {
       Brain.check(Brain.decision({ act: "forget", target: "k1", sure, others: sure === "high" ? "" : "k2" }), situation("Forget the one about rig.", { memories }), lines)
     expect(forget("medium")).toEqual({ _tag: "Say", spoken: lines.cantTell })
     expect(forget("high")).toMatchObject({ _tag: "Do" })
+  })
+
+  test("he's never told he didn't say a word he did for its quotes or backticks, though only his words as written are kept", () => {
+    const remember = (heard: string, text: string) => Brain.check(Brain.decision({ act: "remember", how: "fact", text }), situation(heard), lines)
+    const unsaved = { _tag: "Say", spoken: "I couldn't keep that in your own words, sir, so I didn't save it." } as const
+    expect(remember('Remember that rig uses "C++" for the parser.', "rig uses C++ for the parser")).toEqual(unsaved)
+    expect(remember("Remember that rig uses C++ for the parser.", "rig uses `C++` for the parser")).toEqual(unsaved)
+    // A word that isn't his still is, in quotes or not.
+    expect(remember('Remember that rig uses "C++" for the parser.', 'rig uses "C" for the parser')).toEqual({
+      _tag: "Say",
+      spoken: "I couldn't keep that in your own words, sir: I didn't hear 'C' from you, so I didn't save it.",
+    })
+  })
+
+  const routines = { kept: [], written: [{ name: "ship", steps: "merge the PR" }] }
+  const handleOf = (listed: T3Live.Thread) => desk().threads.find(({ thread }) => thread.id === listed.id)?.handle ?? ""
+
+  test("a routine is shown to the model by its name alone, never its steps, which only code puts in", () => {
+    const memories = {
+      kept: [
+        { id: 1, at: now, kind: "fact" as const, text: "rig's T3 Code runs the nightly", heard: "Remember that rig's T3 Code runs the nightly." },
+        { id: 2, at: now, kind: "routine" as const, name: "review it", text: "have Codex review the diff twice", heard: "When I say review it, have Codex review the diff twice." },
+      ],
+      written: [{ name: "land it", steps: "Merge the PR once checks pass, then deploy." }],
+    }
+    const prompt = Brain.prompt(situation("What's my land it routine?", { memories }), Option.none())
+    expect(prompt).toContain("- k1 «rig's T3 Code runs the nightly»\n- p1 «land it» (in his preferences)\n- p2 «review it»")
+    expect(prompt).not.toContain("Merge the PR once checks pass")
+    expect(prompt).not.toContain("have Codex review the diff twice")
+  })
+
+  test("a routine's handle sends its steps only for its name said, and no other handle the model was shown ever reaches a thread, while his own words go whatever they are", () => {
+    // Every kind of handle shown: a fact's and a routine's in MEMORIES, a reminder's, a mute's, the threads' and one of UNHEARD's own.
+    const shown: Partial<Brain.Situation> = {
+      memories: { kept: [{ id: 1, at: now, kind: "fact", text: "rig's T3 Code runs the nightly", heard: "Remember that rig's T3 Code runs the nightly." }], written: routines.written },
+      reminders: [{ id: 1, at: now, heard: "Remind me at six to stretch.", text: "stretch", due: now + 60 * 60_000, state: "pending" }],
+      mutes: [{ key: "session:rig:s-importer", called: "the importer session", at: now }],
+      missed: {
+        since: now - 24 * 60 * 60_000,
+        spoke: now - 60 * 60_000,
+        groups: Missed.group([{ id: 1, at: now - 60_000, kind: "update", machine: "rig", thread: "claude:s-importer", project: "importer", said: "The importer compiles.", detail: { priority: "done" } }], desk()),
+      },
+    }
+    const prompt = Brain.prompt(situation("Ship the Tezos one.", shown), Option.none())
+    for (const listed of ["- k1 «", "- p1 «", "- r1 «", "m1 «", `\n${handleOf(std)} · «`, "- u1 «"]) expect([listed, prompt.includes(listed)]).toEqual([listed, true])
+    const check = (heard: string, given: Partial<Brain.Decision> & Pick<Brain.Decision, "act">) =>
+      Brain.check(Brain.decision({ how: given.act === "send" ? "now" : given.act === "offer" ? "finished" : "", ...given }), situation(heard, shown), lines)
+    const refused = { _tag: "Say" as const, spoken: lines.cantTell }
+    const sent = (checked: Brain.Checked) => (checked._tag === "Do" ? checked.plan.decision.text : checked)
+    expect(sent(check("Ship the Tezos one.", { act: "send", target: handleOf(tezos), text: "p1" }))).toBe("merge the PR")
+    expect(sent(check("Offer to ship the Tezos one once it's done.", { act: "offer", target: handleOf(tezos), text: "p1" }))).toBe("merge the PR")
+    // His own plain message goes, as any he says does, whatever a routine's steps say, and so do words he never said, as ever.
+    expect(sent(check("Tell the Tezos one to merge the PR.", { act: "send", target: handleOf(tezos), text: "merge the PR" }))).toBe("merge the PR")
+    expect(sent(check("Tell the std one to merge the PR.", { act: "reply", target: handleOf(std), text: "merge the PR" }))).toBe("merge the PR")
+    expect(sent(check("Wrap the Tezos one up.", { act: "send", target: handleOf(tezos), text: "merge the PR" }))).toBe("merge the PR")
+    // Its name not said, the handle sends nothing; nor does any other handle shown, in any case or punctuation, the routine's too, nor an answer
+    // by any of them, even with its name said.
+    expect(check("Wrap the Tezos one up.", { act: "send", target: handleOf(tezos), text: "p1" })).toEqual(refused)
+    const handles = ["k1", "R1.", "m1", "u1", handleOf(std).toUpperCase(), "P1", " p1. "]
+    for (const text of handles) expect([text, check("Ship the Tezos one.", { act: "send", target: handleOf(tezos), text })]).toEqual([text, refused])
+    expect(check("Ship the Tezos one.", { act: "offer", target: handleOf(tezos), text: "k1" })).toEqual(refused)
+    for (const text of [...handles, "p1"]) expect([text, check("Tell the std one to ship.", { act: "reply", target: handleOf(std), text })]).toEqual([text, refused])
+    // What only looks like a handle, with none such shown, is words like any: like his answer "r2", with one reminder.
+    for (const text of ["r2", "k2", "p2", "m2", "u2", "a1", "t99"]) {
+      expect([text, sent(check(`Tell the std one ${text}.`, { act: "reply", target: handleOf(std), text }))]).toEqual([text, text])
+      expect([text, sent(check(`Tell the Tezos one ${text}.`, { act: "send", target: handleOf(tezos), text }))]).toEqual([text, text])
+    }
+  })
+
+  test("a thread in ARCHIVED is unarchived by its handle there, and that handle as a message's words never reaches a thread", () => {
+    const shown: Partial<Brain.Situation> = { archived: [{ ref: { machine: "Rosie", id: "f00dcafe-0000-4000-8000-000000000001" }, called: "the Mina fees", at: now - 60_000 }] }
+    const check = (heard: string, given: Partial<Brain.Decision> & Pick<Brain.Decision, "act">) => Brain.check(Brain.decision(given), situation(heard, shown), lines)
+    const unarchived = check("Unarchive the Mina fees.", { act: "tidy", how: "unarchive", target: "a1" })
+    expect(unarchived._tag === "Do" ? unarchived.plan.decision.target : unarchived).toBe("a1")
+    expect(check("Tell the Tezos one a1.", { act: "send", how: "now", target: handleOf(tezos), text: "a1" })).toEqual({ _tag: "Say", spoken: lines.cantTell })
+    expect(check("Tell the std one a1.", { act: "reply", target: handleOf(std), text: "A1." })).toEqual({ _tag: "Say", spoken: lines.cantTell })
+  })
+
+  test("a routine's name is his as he said it, symbols and all, so the model's \"C\" for his \"C++\" keeps nothing, and saying \"C++\" never sends one called \"C\"", () => {
+    const remember = (text: string) =>
+      Brain.check(Brain.decision({ act: "remember", how: "routine", text }), situation("When I say C++, review the C++ parser."), lines)
+    expect(remember("C: review the C++ parser")).toEqual({ _tag: "Say", spoken: "I couldn't keep that in your own words, sir: I didn't hear 'C' from you, so I didn't save it." })
+    const kept = remember("C++: review the C++ parser")
+    expect(kept._tag === "Do" ? kept.plan.decision.text : kept).toBe("C++: review the C++ parser")
+    // Kept as he said it up to his pause, in his case, never the model's.
+    const his = Brain.check(Brain.decision({ act: "remember", how: "routine", text: "net build: run the tests" }), situation("When I say .NET build, run the tests."), lines)
+    expect(his._tag === "Do" ? his.plan.decision.text : his).toEqual({ _tag: "Say", spoken: "I couldn't keep that in your own words, sir: I didn't hear 'net' from you, so I didn't save it." })
+    const dotted = Brain.check(Brain.decision({ act: "remember", how: "routine", text: ".net build: run the tests" }), situation("When I say .NET build, run the tests."), lines)
+    expect(dotted._tag === "Do" ? dotted.plan.decision.text : dotted).toBe(".NET build: run the tests")
+    // Two routines whose names differ by a symbol are two, and saying one never sends the other.
+    const both = { kept: [], written: [{ name: "C", steps: "review the C parser" }, { name: "C++", steps: "review the C++ parser" }] }
+    const send = (heard: string, text: string) => {
+      const checked = Brain.check(Brain.decision({ act: "send", how: "now", target: handleOf(tezos), text }), situation(heard, { memories: both }), lines)
+      return checked._tag === "Do" ? checked.plan.decision.text : checked
+    }
+    expect(Brain.remembered({ memories: both }).map(({ handle, name }) => `${handle} ${name}`)).toEqual(["p1 C", "p2 C++"])
+    expect(send("C++ the Tezos one.", "p1")).toEqual({ _tag: "Say", spoken: lines.cantTell })
+    expect(send("C++ the Tezos one.", "p2")).toBe("review the C++ parser")
+    expect(send("C the Tezos one.", "p1")).toBe("review the C parser")
+  })
+
+  test("whatever holds a routine's steps reaches the model by its name alone: an offer come due, unheard or briefed, and the steps a thread was sent, as it was asked them and shows them", () => {
+    // Words of his own, never the example the model is shown.
+    const steps = "have Codex audit the fee code twice"
+    const on = desk()
+    const due: Kept = {
+      id: 1,
+      at: now - 60_000,
+      kind: "notice",
+      machine: "Rosie",
+      thread: mina.id,
+      said: `At 9:58 PM you wanted me to offer to tell Open Mina SSV2 Bug Tickets: ${steps}, sir.`,
+      detail: { reminder: 1, held: "off", routines: ["review it"] },
+    }
+    const sent: Kept = { id: 2, at: now - 120_000, kind: "sent", machine: "Rosie", thread: mina.id, text: steps, said: "On it, sir.", detail: { routines: ["review it"] } }
+    const groups = Missed.group([due], on)
+    const update: Conversation.Update = {
+      session: "claude:s-mina",
+      project: "integration-connectors",
+      turn: { prompt: Option.some(steps), message: "Both audits came back clean." },
+      needsYou: false,
+      spoken: "Both audits of the fee code came back clean.",
+      audio: "/tmp/update.wav",
+      thread: { agent: "claude", session: "s-mina", cwd: "/code/integration-connectors", message: "Both audits came back clean.", origin: {} },
+      at: now - 20_000,
+      about: ref(mina),
+    }
+    const detail: T3Actions.Detail = {
+      messages: [
+        { role: "user", text: steps, createdAt: "2026-10-08T21:58:00.000Z", streaming: false },
+        { role: "assistant", text: "Both audits came back clean.", createdAt: "2026-10-08T21:59:00.000Z", streaming: false },
+      ],
+      runs: [],
+      request: Option.none(),
+      plan: Option.none(),
+      pending: [],
+      resolved: () => true,
+    }
+    const prompt = Brain.prompt(
+      situation("What did I miss?", { lately: [sent, due], missed: { since: now - 24 * 60 * 60_000, spoke: now - 24 * 60 * 60_000, groups }, subject: { _tag: "Session", update, said: update.spoken }, second: Option.some({ ref: ref(mina), detail }) }),
+      Option.none(),
+    )
+    expect(prompt).not.toContain(steps)
+    expect(prompt).toContain("you sent his routine «review it» to the thread")
+    expect(prompt).toContain("that his offer of his routine «review it» came due")
+    expect(prompt).toContain(`latest: «what was said of his routine "review it"»`)
+    expect(prompt).toContain("What it was asked: his routine «review it»")
+    expect(prompt).toContain("- user: his routine «review it»")
+    const brief = Brain.briefPrompt({ kind: "catchup", groups, left: { threads: 0, rows: 0 } }, on, now, Option.none())
+    expect(brief).not.toContain(steps)
+    // Sent before LATELY reaches, what yapd last sent the thread still tells it by the routine's name.
+    const since = Brain.prompt(
+      situation("What's it doing?", { sent: [sent], subject: { _tag: "Session", update, said: update.spoken }, second: Option.some({ ref: ref(mina), detail }) }),
+      Option.none(),
+    )
+    expect(since).not.toContain(steps)
+    expect(since).toContain("What it was asked: his routine «review it»")
+    expect(since).toContain("- user: his routine «review it»")
   })
 })

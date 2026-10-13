@@ -30,6 +30,8 @@ export interface Reminder {
   readonly text: string
   /** For an offer: the message to offer the thread then, which only his yes sends. */
   readonly propose?: string | undefined
+  /** For an offer of one of his routines, its name: the message is its steps, which a model is only ever told of by that name. */
+  readonly routine?: string | undefined
   /** When it's due, for one at a time. */
   readonly due?: number | undefined
   /** The thread watched, or the one an offer is for. */
@@ -86,6 +88,7 @@ interface Row {
   readonly heard: string
   readonly text: string
   readonly propose: string | null
+  readonly routine: string | null
   readonly due: number | null
   readonly machine: string | null
   readonly thread: string | null
@@ -102,6 +105,7 @@ const reminder = (row: Row): Reminder => ({
   heard: row.heard,
   text: row.text,
   ...(row.propose === null ? {} : { propose: row.propose }),
+  ...(row.routine === null ? {} : { routine: row.routine }),
   ...(row.due === null ? {} : { due: row.due }),
   ...(row.machine === null ? {} : { machine: row.machine }),
   ...(row.thread === null ? {} : { thread: row.thread }),
@@ -164,7 +168,7 @@ export const make = (store: Store.Store["Type"], journal: Pick<Journal["Type"], 
         const id = Number(
           database
             .query(
-              "insert into reminders (at, utterance, heard, text, propose, due, machine, thread, called, event, state) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')",
+              "insert into reminders (at, utterance, heard, text, propose, routine, due, machine, thread, called, event, state) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')",
             )
             .run(
               asked.at,
@@ -172,6 +176,7 @@ export const make = (store: Store.Store["Type"], journal: Pick<Journal["Type"], 
               asked.heard,
               asked.text,
               asked.propose ?? null,
+              asked.routine ?? null,
               asked.due ?? null,
               asked.machine ?? null,
               asked.thread ?? null,

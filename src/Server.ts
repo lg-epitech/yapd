@@ -90,6 +90,19 @@ export interface Recent {
   readonly replayable: boolean
   /** How many of its updates and notices he hasn't heard, that a catch-up about it would tell him of, muted or not. */
   readonly unheard?: number
+  /**
+   * Whether its subagents are read to him, for a thread T3 Code runs, a
+   * subagent's row by the thread it's part of: never on a session's row.
+   */
+  readonly subagents?: boolean
+  /** For a row of a thread's subagents, the thread they're part of, which their Read Subagents acts on. */
+  readonly head?: Head
+}
+
+/** The thread a subagent is part of, by its key and title. */
+export interface Head {
+  readonly key: string
+  readonly title: string
 }
 
 /** A card as `/state` points at it. */
@@ -126,6 +139,8 @@ export interface Machine {
     /** What it's muted by. */
     readonly key: string
     readonly muted: boolean
+    /** Whether its subagents are read to him. */
+    readonly subagents: boolean
     readonly project: string
     readonly title: string
     readonly state: string
@@ -162,6 +177,10 @@ export interface Details {
   readonly muted: boolean
   /** ISO 8601, when the mute ends on its own, if it does. */
   readonly until?: string
+  /** Whether its subagents are read to him, as in `recent`: never for a session. */
+  readonly subagents?: boolean
+  /** For one of a thread's subagents, the thread it's part of. */
+  readonly head?: Head
   /** The latest of what was told of it and what was sent to it for him, from every session of it, newest first. */
   readonly updates: ReadonlyArray<Told>
 }
@@ -198,8 +217,12 @@ export interface Entry {
   readonly utterance?: string
   /** ISO 8601, when the user heard it through. */
   readonly heard?: string
-  /** For an update yapd didn't read out, why: kept quiet as he muted its thread, or held for focus, quiet, the digest, or as yapd was off. */
-  readonly unsaid?: "muted" | "focus" | "quiet" | "progress" | "off"
+  /**
+   * For an update yapd didn't read out, why: kept to yapd as one of a
+   * thread's subagents', kept quiet as he muted its thread, or held for
+   * focus, quiet, the digest, or as yapd was off.
+   */
+  readonly unsaid?: "subagent" | "muted" | "focus" | "quiet" | "progress" | "off"
 }
 
 /** Which of the journal's entries `/journal` returns. */
@@ -234,12 +257,20 @@ export interface Api {
   readonly mute: (key: string, until?: number) => Effect.Effect<"muted" | "unknown" | "invalid">
   /** Unmutes a thread by its key, whether it was muted or not. */
   readonly unmute: (key: string) => Effect.Effect<void>
+  /**
+   * Has a thread's subagents read to him, or no longer, by its key: unknown
+   * when it's no thread yapd lists or T3 Code has, invalid for a session's
+   * or no key at all, and subagent for a subagent's own.
+   */
+  readonly subagents: (key: string, on: boolean) => Effect.Effect<"done" | "unknown" | "invalid" | "subagent">
   /** Says a thread's latest update again, by its key: unreachable when it's a row that can't be heard again. */
   readonly replayThread: (key: string) => Effect.Effect<"queued" | "off" | "unknown" | "unreachable", unknown>
   /** What's known of a thread by its key, for a panel beside its row: none when it's no thread yapd knows. Only reads. */
   readonly details: (key: string) => Effect.Effect<Option.Option<Details>>
   /** A project's image, by its machine and id. */
   readonly icon: (machine: string, project: string) => Effect.Effect<Option.Option<Icons.Image>>
+  /** Sets aside, unheard, all a catch-up would tell him now, as `unheard` counts it, without saying any of it, while yapd is off too: how many. */
+  readonly clearCatchup: Effect.Effect<number>
 }
 
 const decodeChange = Schema.decodeUnknownOption(
@@ -412,6 +443,8 @@ export const serve = (port: number, api: Api) =>
             onSome: (card) => Response.json(card),
           })
         }
+        // Only marks what a catch-up would tell as heard, so it's done while yapd is off too.
+        if (route === "POST /catchup/clear") return Response.json({ cleared: yield* api.clearCatchup })
         if (route === "GET /threads") return Response.json(yield* api.threads)
         if (route === "GET /journal") {
           const asked = paging(url.searchParams)
@@ -445,7 +478,7 @@ export const serve = (port: number, api: Api) =>
             onSome: (details) => Response.json(details),
           })
         }
-        const thread = /^\/threads\/([^/]+)\/(mute|replay)$/.exec(url.pathname)
+        const thread = /^\/threads\/([^/]+)\/(mute|replay|subagents)$/.exec(url.pathname)
         if (thread !== null) {
           const key = decoded(thread[1]!)
           const route = `${request.method} ${thread[2]}`
@@ -467,6 +500,17 @@ export const serve = (port: number, api: Api) =>
               : muted === "invalid"
                 ? new Response("That's no thread's key.", { status: 400 })
                 : new Response("No such thread.", { status: 404 })
+          }
+          if (route === "PUT subagents" || route === "DELETE subagents") {
+            if (Option.isNone(key)) return new Response("That's no thread's key.", { status: 400 })
+            const done = yield* api.subagents(key.value, route === "PUT subagents")
+            return done === "done"
+              ? new Response(null, { status: 204 })
+              : done === "invalid"
+                ? new Response("That's no thread's key.", { status: 400 })
+                : done === "subagent"
+                  ? new Response("It's part of another thread: read its subagents from that one.", { status: 409 })
+                  : new Response("No such thread.", { status: 404 })
           }
           if (route === "DELETE mute") {
             // A key yapd never makes, as one taken apart and put back wrong, was never muted: saying it's no longer muted would hide that.

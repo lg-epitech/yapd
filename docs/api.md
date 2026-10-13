@@ -61,7 +61,7 @@ There's no authentication: anything that can reach the port can use it, as hooks
 - `mode`: how yapd talks of its own accord. `normal` says what finished and what needs you; `focus` and `quiet` say only what needs you, and hold the rest for later. See [Modes](#modes). A yapd from before modes doesn't send it: take that as `normal`.
 - `until`: when `focus` or `quiet` ends on its own, only while one is on.
 - `waiting`: how many threads wait on you for an approval or an answer, on every machine whose threads yapd can see. A yapd from before it doesn't send it: take that as `0`.
-- `unheard`: how many updates and notices a [catch-up](#catching-up) would tell you of now, muted threads aside, not counting what yapd is reading you or is about to. It drops as soon as you've heard one through. A yapd from before it doesn't send it: take that as `0`.
+- `unheard`: how many updates and notices a [catch-up](#catching-up) would tell you of now, muted threads aside, not counting what yapd is reading you or is about to. It drops as soon as you've heard one through, and to `0` once you [clear the catch-up](#clearing-the-catch-up). A yapd from before it doesn't send it: take that as `0`.
 - `updates`: the last five updates you heard, newest first, to [hear again](#hearing-an-update-again). `text` is what yapd said and `at` when the agent's turn ended. They're kept through a restart, under the same `id`s. Treat an `id` as a name. A yapd from before that forgets them when it restarts, and its ids change then.
 - `recent`: the threads with the latest updates, one row each, newest first: up to eight, from the last seven days, whether or not yapd said them, so muted threads are there too. It's kept through a restart. A yapd from before it doesn't send it. See [Recent threads](#recent-threads).
 - `showing`: the [card](#cards) yapd is showing, or `null`. `kind` and `title` are the card's, and `at` is when yapd put it up. Fetch the card itself from `/cards/{id}`. A yapd from before cards doesn't send it at all.
@@ -103,6 +103,8 @@ curl -X PUT -H 'Content-Type: application/json' -d '{"mode": "focus"}' http://12
 
 Turning it off stops whatever yapd is saying at once, and drops what you asked that hasn't started yet: a dictation being recorded or transcribed, and new work still being written up or waiting on an answer. A session already being started still starts, but nothing is said about it. What was waiting to be said, being summed up or cut off is kept unheard, not dropped, and agents' hooks are let go at once, so none waits on yapd while it's off. The [card](#cards) yapd is showing comes down too, so `showing` is `null`. While it's off, its mode stays as it was, and a mode that ends meanwhile ends without a word. Turning it on again stops whatever it was saying in answer to you while it was off.
 
+Saying "Mute." on its own, over anything yapd says or by the shortcut, turns it off the same way, and while it's off, "unmute" or "turn on" by the shortcut turns it on the same way, so the state and its stream say so. So does sending either to [`/utterances`](#asking-yapd-something), which answers `202` once it's under way.
+
 ## Modes
 
 yapd starts each update with its headline, about fifteen words, and keeps the rest for when you say "more". What it says only to tell you how something's going, like another review round, it holds for a digest, a short catch-up said once things have been quiet for a minute, at most every twenty minutes, when three such updates are waiting or one has waited twenty minutes. "Give me everything" has yapd say every update in full and hold none of them, until "talk shorter".
@@ -116,6 +118,26 @@ What was held is kept like any update, unheard, so a [catch-up](#catching-up) an
 yapd keeps everything it summed up, and knows which of it you heard through. Ask it to catch you up, however you put it ("catch me up", "what did I miss on Distribox?", "anything from rig since lunch?", "what did the muted ones say?"), by the shortcut or through [`/utterances`](#asking-yapd-something), and it tells you what you haven't heard: first what needs you, like a run that failed while it was off or a question in an agent's last words, then the answer to what you asked a thread and any turn it couldn't sum up, read as it was kept, options and all, four at most; then a brief of the rest, a thread at a time, in about ninety words and eight threads at most. "More" then gives you the threads it left out, or the detail of those it covered. No phrase is built into yapd for this: the model decides from what you said, as it does for anything else.
 
 What a catch-up told you counts as heard only once you've heard it to the end; cut off, it's all still unheard. It covers the last day, or since you last turned yapd off if that's longer, up to a week; what came in while yapd was off, at any time that week, and what needs you, count for the whole week, so a short off and on since, or another night off, never drops them. Updates it cut off count only since you last spoke to it; everything it never read out counts whenever it came. Agents' questions still waiting aren't part of it: they're asked, and "who needs me?" lists them. A muted thread is left out unless you ask about it. Catching up only ever reads: nothing reaches an agent, and "tell the Distribox one to…" after it is a request like any other.
+
+## Clearing the catch-up
+
+`POST /catchup/clear` sets aside everything a [catch-up](#catching-up) would tell you now, exactly what `unheard` in the [state](#state) counts, without reading any of it: it counts as heard from then on, so the next catch-up doesn't tell of it and `unheard` drops to `0`, which the state stream says at once. Agents' questions still waiting aren't touched: they're still asked, and "who needs me?" still lists them. Muted threads aren't either, nor what yapd is reading you or is about to. It works while yapd is off too, since it only marks things heard, and nothing reaches an agent.
+
+```sh
+curl -X POST http://127.0.0.1:4747/catchup/clear
+```
+
+```json
+{ "cleared": 53 }
+```
+
+| Status | |
+| --- | --- |
+| `200` | `cleared` is how many updates and notices it set aside, `0` when there was nothing to. |
+
+A yapd from before it answers `404`.
+
+By voice it's the model's to tell, however you put it: "clear the catch-up", "skip the catch-up", "mark everything as heard" or "I don't need the catch-up" gets "Cleared, sir: fifty-three updates set aside.", or "There's nothing to catch up on, sir." It's all of it or nothing: "I can only clear the whole catch-up, sir." Like any change, it needs your own word, so nothing faint over something yapd says clears it. "Scratch that" or "undo that" within two minutes, by voice, of either way of clearing it, brings back what it set aside that you haven't heard since: "Brought them back, sir." The [journal](#journal) has an `action` entry for each.
 
 ## Hearing an update again
 
@@ -211,6 +233,7 @@ curl -X PUT -H 'Content-Type: application/json' -d '{"id": "cmgi3k2xa4f1", "revi
         "state": "running",
         "since": "2026-10-02T13:40:00.000Z",
         "muted": false,
+        "subagents": false,
         "pr": { "number": 412, "url": "https://github.com/lg-epitech/integration/pull/412", "state": "open", "checks": "passing" }
       }
     ]
@@ -221,6 +244,7 @@ curl -X PUT -H 'Content-Type: application/json' -d '{"id": "cmgi3k2xa4f1", "revi
 
 - `reason`: why a machine's threads can't be seen right now, like T3 Code not running. Its `threads` are empty then.
 - `key`: the thread's key, to [mute](#muting-a-thread) it by, and `muted` whether it is. A yapd from before mutes sends neither.
+- `subagents`: whether its [subagents are read](#hearing-a-threads-subagents) to you. A yapd from before it doesn't send it: take that as `false`.
 - `state`: `approval` or `question` when the thread waits on you, `running`, `finishing`, `queued`, `failed`, `limited` when it hit a usage limit, or `idle`. `since` is when it got there.
 - `pr`: its latest pull request, when it has one. `url` is only ever `https`, and missing when the address T3 Code has for it isn't. `state`, `checks`, `review` and `mergeability` are there when T3 Code knows them.
 
@@ -239,6 +263,10 @@ Each row of `recent` in the [state](#state) is a thread, by its newest update or
 - `waiting`: whether the thread waits on you, for an approval or an answer.
 - `replayable`: whether it can be [heard again](#hearing-a-thread-again). It's `true` while its latest update is one of the `updates` you heard, and otherwise only for a thread yapd can reach: one T3 Code has, not archived, on a machine whose threads yapd can see now. A session's row, or an archived or deleted thread, or one on a machine that's away, is `false` once its update is no longer among the `updates`. It can lag a minute behind, as when a thread is archived; hearing it again checks then. A yapd from before it doesn't send it: take that as `true`.
 - `unheard`: how many of the thread's updates and notices you haven't heard, from every session of it, that a [catch-up](#catching-up) would tell you of, muted or not. What was kept under another session of it, like one whose link to the thread timed out, is told in a catch-up of everything rather than in one about the thread alone. A menu shows it beside a thread that isn't muted. It drops as soon as you've heard them through. A yapd from before it doesn't send it: take that as `0`.
+- `subagents`: on every T3 Code thread's row, whether its [subagents are read](#hearing-a-threads-subagents) to you; on a subagent's row, whether those of the thread it's part of are. Never on a session's row. A yapd from before it doesn't send it.
+- `head`: only on a subagent's row, the thread it's part of, by its `key` and `title`, which its `subagents` is about and turning them on or off goes by.
+
+A thread's subagents that are read to you take one row between them, the newest, titled as T3 Code titles that subagent, like "Sol review: release blockers". It's `muted` when it or the thread it's part of is, and `replayable` only while its update is one of the `updates` you heard. Subagents kept to yapd, as every thread's are until you have them read, take no row.
 
 `icon` is how T3 Code draws the project, as one of these `kind`s:
 
@@ -275,7 +303,7 @@ Every icon carries `text` and `color` too, the monogram to draw for a kind you d
 
 - `machine` and `thread`: as in `recent`.
 - `state`, `since`, `branch` and `pr`: what it's doing and since when, the branch it works on and its latest pull request, as [`/threads`](#threads) has them. They're there only for a thread T3 Code has that yapd can see now, and `branch` and `pr` only when it has them.
-- `muted` and `until`: as in `recent`.
+- `muted` and `until`: as in `recent`, and so are `subagents` and `head`.
 - `updates`: its latest five updates and notices, heard or not, and messages yapd passed on to it for you, newest first, from every session of it. `said` is all of what yapd said or kept of an update or notice, what it keeps for "more" too, and a message has only `text`, the words it passed on. `heard` and `unsaid` are as the [journal](#journal) has them. `unheard` is `true` only for one you haven't heard that a [catch-up](#catching-up) would tell you of, the ones `unheard` in `recent` counts: one you never heard through but a catch-up no longer tells of, like an update cut off before you last spoke, has neither `heard` nor `unheard`.
 
 It only reads: nothing reaches the thread, and nothing counts as heard.
@@ -303,6 +331,23 @@ curl -X PUT 'http://127.0.0.1:4747/threads/t3%3ARosie%3A850299f8-3b2a-4c1d-8e7f-
 | `404` | Muting, no thread yapd knows: not in `recent`, not one T3 Code has, as [`/threads`](#threads) lists them and those it archived, and not muted already. |
 
 You can mute by voice too: "mute it", "mute that for an hour", "unmute it", "what's muted?" and "unmute everything". "Scratch that" takes back a mute you just made. Muting never sends anything to the thread.
+
+A subagent's row mutes that subagent only, like any thread, and muting the thread it's part of mutes it too.
+
+## Hearing a thread's subagents
+
+The reviews and other work T3 Code runs for a thread as its subagents are kept to yapd by default: summed up and kept, as a muted thread's are, but never said, never counted as unheard, and left out of `recent` and of a catch-up unless you ask what that thread's subagents said. Whatever one says is kept so, even what would need you. The thread's own turns, like the one where it takes in a subagent's result, are said as ever. Subagents a provider runs inside its thread's own session, like Claude's Agent tool, never reach yapd.
+
+`PUT /threads/{key}/subagents` has a thread's subagents read to you from now on, by its `key`, percent-encoded, whether it has any yet or not; each is then said led by the thread, like "For the Tezos migration: one release blocker is left." It lasts until you take it off, never for a set time. `DELETE /threads/{key}/subagents` keeps them to yapd again, and drops what of them was waiting to be said, whatever it is, but never what's being said. Neither sends anything to a thread.
+
+| Status | |
+| --- | --- |
+| `204` | They're read, or no longer, also when nothing changed. |
+| `400` | The key isn't a T3 Code thread's, like a session's. |
+| `404` | No thread yapd knows, as for [muting](#muting-a-thread) one, and not one whose subagents are read already. |
+| `409` | It's a subagent's own key: its subagents are read by the thread it's part of. |
+
+By voice: "read me its subagents" and "stop reading its subagents" over an update, or "read me the Tezos migration's subagents" with the shortcut, and "what did its subagents say?" to hear what they kept. "What's muted?" ends with whose subagents are read.
 
 ## Hearing a thread again
 
@@ -334,7 +379,7 @@ You can mute by voice too: "mute it", "mute that for an hour", "unmute it", "wha
 
 - `kind`: `update` for an agent's turn yapd summed up, whether it said it, the thread was muted, or yapd held it for later, `reply` for what you said back to one, `dictation` for what you dictated or typed, `answer` for what yapd answered, `started` for work it started, `sent` for a message it passed on, `notice` for something it brought up itself, `brief` for a digest of what it held for later, and `action` for anything else it did, like turning off, muting a thread or changing its mode.
 - `said` is what yapd said, `text` the words it was about, like what you said or an agent's message, and `heard` when you heard it through.
-- `unsaid`: for an update yapd didn't read out, why: `muted`, `focus`, `quiet`, `progress` for one held for the digest, or `off` for one that came in while yapd was off. Missing when it was read out. With `heard`, it tells an update read out in full (`heard`, no `unsaid`), cut off (neither), told of later in a catch-up, a digest or from the menu (both), or still missed (`unsaid`, no `heard`).
+- `unsaid`: for an update yapd didn't read out, why: `subagent` for one of a thread's subagents' kept to yapd, `muted`, `focus`, `quiet`, `progress` for one held for the digest, or `off` for one that came in while yapd was off. Missing when it was read out. With `heard`, it tells an update read out in full (`heard`, no `unsaid`), cut off (neither), told of later in a catch-up, a digest or from the menu (both), or still missed (`unsaid`, no `heard`). One you [cleared](#clearing-the-catch-up) has `heard` as of when you did.
 - `machine` and `project` are where it happened, `thread` the id of the T3 Code thread it's about, as [`/threads`](#threads) has it, and `utterance` the id of the request it came from, as [`/utterances`](#asking-yapd-something) gives it.
 - Each is there only when there's one.
 

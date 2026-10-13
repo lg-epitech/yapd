@@ -176,6 +176,9 @@ describe("T3Actions", () => {
     expect(typed("Question", "Which token should the indexer track first?")).toEqual(Option.some("Question"))
     expect(typed("Question", "Should I sort by the date key or the name key?")).toEqual(Option.some("Question"))
     expect(typed("Question", "What should the new branch be called?")).toEqual(Option.some("Question"))
+    // Nor is one that only uses words a fact to keep is refused for, as a credential's said aloud.
+    expect(typed("Question", "Which phrase for the title?")).toEqual(Option.some("Question"))
+    expect(typed("Question", "Should I sign in with the test account?")).toEqual(Option.some("Question"))
     expect(typed("Keys", "Keep the API keys in the vault?", [{ label: "Yes", description: "Yes" }, { label: "No", description: "No" }])).toEqual(Option.some("Question"))
   })
 

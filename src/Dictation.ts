@@ -31,6 +31,9 @@ export interface Press {
 /** How many times yapd has been turned on or off by now, which each press keeps. */
 export class Turns extends Context.Tag("yapd/Turns")<Turns, Effect.Effect<number>>() {}
 
+/** Whether what was dictated is handed on at once, ahead of those before it still being heard, like "Mute." while yapd is on. */
+export class Ahead extends Context.Tag("yapd/Ahead")<Ahead, (heard: string) => Effect.Effect<boolean>>() {}
+
 export class Dictation extends Context.Tag("yapd/Dictation")<
   Dictation,
   {
@@ -38,10 +41,10 @@ export class Dictation extends Context.Tag("yapd/Dictation")<
     readonly presses: Stream.Stream<Press>
     /**
      * What the user said, each time a dictation ends, in the order they said
-     * it, with how many seconds of it was speech, when they stopped talking,
-     * however long it took to hear, and the press it began with: nothing when
-     * it came to nothing, like one cancelled or one that failed, so whoever
-     * waited on it knows it's over.
+     * it, but for what goes `Ahead`, with how many seconds of it was speech,
+     * when they stopped talking, however long it took to hear, and the press
+     * it began with: nothing when it came to nothing, like one cancelled or
+     * one that failed, so whoever waited on it knows it's over.
      */
     readonly transcripts: Stream.Stream<Press & { readonly heard: string; readonly voiced: number; readonly at: number }>
     /** Drops every dictation not handed on yet, without a sound, like when yapd is turned off. */
@@ -203,6 +206,7 @@ export const WhisperDictation = Layer.scoped(
     const transcriber = yield* DictationTranscriber
     const voice = yield* Voice
     const turns = yield* Turns
+    const ahead = yield* Ahead
     const device = Floor.use(yield* Floor.Floor, audio)
     const scope = yield* Effect.scope
     /** Each with how many times dictations were dropped before it was sent, so one handed on just before isn't taken in after. */
@@ -381,7 +385,10 @@ export const WhisperDictation = Layer.scoped(
     /**
      * `before` is done once the dictation before this one has been dealt with,
      * which a long one can be after a short one that followed it: what they
-     * said is passed on in the order they said it, since one can build on another.
+     * said is passed on in the order they said it, since one can build on
+     * another. What goes `ahead`, like "Mute." while yapd is on, is passed on
+     * at once, never waiting for those before it, which turning off then
+     * drops; those after it still wait for them.
      */
     const dictate = (press: Press, ended: Deferred.Deferred<Ending>, before: Deferred.Deferred<void> | undefined, done: Deferred.Deferred<void>) =>
       Effect.gen(function* () {
@@ -389,8 +396,10 @@ export const WhisperDictation = Layer.scoped(
         yield* Effect.forkIn(transcriber.prepare, scope)
         yield* Floor.take
         const heard = yield* hear(ended)
-        if (before !== undefined) yield* Deferred.await(before)
+        const earlier = before === undefined ? Effect.void : Deferred.await(before)
+        if (!(yield* ahead(heard.text))) yield* earlier
         yield* PubSub.publish(transcripts, { ...press, heard: heard.text, voiced: heard.voiced, at: heard.at, drops })
+        yield* earlier
       }).pipe(
         Effect.ensuring(Deferred.succeed(done, undefined)),
         Effect.scoped,

@@ -288,6 +288,81 @@ describe("Mutes", () => {
     expect(result.again).toBe(false)
   })
 
+  test("a subagent's update is muted by itself and its session, and kept quiet by the thread it's part of too, which unmuting it never touches", () => {
+    const named = (host: string) => (host.toLowerCase() === hostname().toLowerCase() ? "Rosie" : host.split(".")[0]!)
+    const review = Mutes.key.thread({ machine: "Rosie", id: "t-review" })
+    const subagent = { child: { machine: "Rosie", id: "t-review" }, called: "Sol review", head: { ref: { machine: "Rosie", id: "t-tezos" } } }
+    const said = { ...update("codex:s-review"), subagent }
+    expect(Mutes.keysOf(said, named)).toEqual([review, "session:Rosie:codex:s-review"])
+    expect(Mutes.covering(said, named)).toEqual([review, "session:Rosie:codex:s-review", tezos])
+    // As it's kept, under the subagent, with the thread it's part of.
+    const kept = { machine: "Rosie", thread: "t-review", detail: { session: "codex:s-review", subagent: true, head: "t-tezos" } }
+    expect(Mutes.keysOfKept(kept, named)).toEqual([review, "session:Rosie:codex:s-review"])
+    expect(Mutes.coveringKept(kept, named)).toEqual([review, "session:Rosie:codex:s-review", tezos])
+  })
+
+  test("reading a thread's subagents outlives a restart, scratch that flips it back, and unmuting everything leaves it; stopped, what of them was kept is kept quiet", async () => {
+    const root = await mkdtemp(join(tmpdir(), "yapd-mutes-"))
+    try {
+      const path = join(root, "yapd.sqlite")
+      // A database without the setting yet reads none.
+      const fresh = await run(Effect.flatMap(Effect.flatMap(Store.make(path), Mutes.make), (mutes) => Effect.zip(mutes.reading, mutes.reads(tezos))))
+      expect(fresh).toEqual([[], false])
+      const result = await run(
+        Effect.gen(function* () {
+          const journal = Journal.fromStore(yield* Store.make(":memory:"))
+          const mutes = yield* Mutes.make(yield* Store.make(path))
+          const unread: Array<string> = []
+          const controls = Mutes.controls({ mutes, journal, silence: () => Effect.void, unread: (key) => Effect.sync(() => void unread.push(key)) })
+          const steps: Array<ReadonlyArray<string>> = []
+          const reading = Effect.map(mutes.reading, (all) => all.map(({ key }) => key))
+          const on = yield* controls.subagents({ key: tezos, called: "the Tezos migration" }, true)
+          const again = yield* controls.subagents({ key: tezos }, true)
+          steps.push(yield* reading)
+          yield* controls.undo
+          steps.push(yield* reading)
+          yield* controls.undo
+          steps.push(yield* reading)
+          yield* controls.mute({ key: terminal })
+          yield* controls.clear
+          steps.push(yield* reading)
+          yield* controls.subagents({ key: mina }, true)
+          yield* controls.subagents({ key: mina }, false)
+          steps.push(yield* reading)
+          const noted = (yield* journal.since(0, { kinds: ["action"] })).map(({ detail }) => Object.keys(detail as object)[0])
+          return { on, again, steps, unread, noted }
+        }),
+      )
+      expect(result.on).toBe(true)
+      expect(result.again).toBe(false)
+      expect(result.steps).toEqual([[tezos], [], [tezos], [tezos], [tezos]])
+      // Each time they stop being read, taking it back too, what of them waits or was held is kept quiet.
+      expect(result.unread).toEqual([tezos, mina])
+      expect(result.noted).toEqual(["subagents", "undo", "undo", "mute", "unmute", "subagents", "nosubagents"])
+      const kept = await run(Effect.flatMap(Effect.flatMap(Store.make(path), Mutes.make), (mutes) => mutes.reading))
+      expect(kept).toEqual([{ key: tezos, called: "the Tezos migration", at: 0 }])
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  test("reading a thread's subagents is understood only as \"read its subagents\" or \"stop reading their subagents\", and anything else about them never goes to an agent", () => {
+    const heard = (said: string) => Option.getOrUndefined(Mutes.command(said))
+    expect(heard("Read me its subagents.")).toEqual({ how: "subagents" })
+    expect(heard("Read their subagents, sir.")).toEqual({ how: "subagents" })
+    expect(heard("Stop reading its subagents.")).toEqual({ how: "nosubagents" })
+    expect(heard("Don't read me their subagents.")).toEqual({ how: "nosubagents" })
+    for (const said of ["Read me the subagents.", "Read me the Tezos one's subagents.", "Can you read me its subagents?", "Read its subagents for an hour.", "Keep its subagents to yourself."]) {
+      expect([said, heard(said)]).toEqual([said, undefined])
+    }
+    for (const said of ["Read me the subagents.", "Can you read me its subagents?", "Start reading its subagents.", "Keep its subagents to yourself.", "Please read us their subagents too.", "Mute its subagents."]) {
+      expect([said, Mutes.aboutSubagents(said)]).toEqual([said, true])
+    }
+    for (const said of ["Have a subagent review it.", "Read the subagents' findings and fix them.", "Use subagents for the tests.", "Read me the subagents' report and merge it."]) {
+      expect([said, Mutes.aboutSubagents(said)]).toEqual([said, false])
+    }
+  })
+
   test("muting what he's on about is understood in so many words, with how long, and anything more is left to the model", () => {
     const heard = (said: string) => Option.getOrUndefined(Mutes.command(said))
     expect(heard("Mute it.")).toEqual({ how: "mute" })

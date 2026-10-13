@@ -1,8 +1,8 @@
 import type { Database } from "bun:sqlite"
-import { Clock, Context, Data, type Duration, Effect, Either, Fiber, Option, Stream } from "effect"
+import { Clock, Context, Data, Deferred, type Duration, Effect, Either, Fiber, Option, Stream } from "effect"
 import { realpath } from "node:fs/promises"
 import { english, speakable } from "./Condenser.ts"
-import type { Journal, Kept } from "./Journal.ts"
+import { type Journal, type Kept, unroutined } from "./Journal.ts"
 import type * as Store from "./Store.ts"
 import * as T3Actions from "./T3Actions.ts"
 import * as T3Live from "./T3Live.ts"
@@ -26,6 +26,21 @@ export interface Placed extends T3Live.Project {
 
 /** Whether two refs are the same thread. */
 export const same = (one: Ref, other: Ref) => one.machine === other.machine && one.id === other.id
+
+/** The thread at the top of a subagent's chain, which is the one he addresses, and what it's called aloud. */
+export interface Head {
+  readonly ref: Ref
+  readonly called: string
+}
+
+/**
+ * What a hook's session is in T3 Code: a thread's own, or one of T3 Code's
+ * own subagents', with what that's called aloud and the thread it's part of,
+ * when its chain can be followed up to one.
+ */
+export type Linked =
+  | { readonly _tag: "Thread"; readonly ref: Ref }
+  | { readonly _tag: "Subagent"; readonly child: Ref; readonly called: string; readonly head: Option.Option<Head> }
 
 /** What a thread is doing, in the terms the user cares about. */
 export type State = "running" | "finishing" | "queued" | "approval" | "question" | "failed" | "limited" | "idle"
@@ -117,11 +132,14 @@ export class Threads extends Context.Tag("yapd/Threads")<
      * The thread a hook on `machine` came from, found by the agent's own id
      * for its session among the threads working in its directory, while that
      * machine's T3 Code is followed (I11): this machine's directories as they
-     * really are, links followed, another's as its hooks give them. None
-     * otherwise, which keeps its update on the way hooks have always gone.
-     * Never fails.
+     * really are, links followed, another's as its hooks give them. Failing
+     * that, the subagent of T3 Code's own it came from, among those at work
+     * there lately, with the thread it's part of: `promising` is told once
+     * one of those is to be read, as only then is waiting on it likely to
+     * pay. None otherwise, which keeps its update on the way hooks have
+     * always gone. Never fails.
      */
-    readonly link: (machine: string, session: string, cwd: string) => Effect.Effect<Option.Option<Ref>>
+    readonly link: (machine: string, session: string, cwd: string, promising?: Deferred.Deferred<void>) => Effect.Effect<Option.Option<Linked>>
     /**
      * The project of a thread on `machine`, or else the one whose folder, or
      * a thread's worktree of it, holds `directory`, the nearest first. None
@@ -225,7 +243,32 @@ export const called = (title: string, description: string | null | undefined, pr
 }
 
 /** Threads that are part of another, which the user never addresses on their own. */
-const subagent = (thread: T3Live.Thread) => thread.lineage?.relationshipToParent === "subagent"
+export const subagent = (thread: T3Live.Thread) => thread.lineage?.relationshipToParent === "subagent"
+
+/** How many threads up a subagent's chain are followed at most, to the one it's part of. */
+const deepest = 8
+
+/**
+ * The thread a subagent is part of: up its parents while each is a
+ * subagent, to the first that isn't, a top-level thread or a fork, in the
+ * same machine's threads. Never the root T3 Code gives, which for a fork's
+ * subagents is the thread the fork came from. None for a thread that isn't a
+ * subagent, and for a chain that's broken, by a parent gone or archived, or
+ * that runs on too long.
+ */
+export const head = (view: Pick<T3Live.View, "threads">, thread: T3Live.Thread): Option.Option<T3Live.Thread> => {
+  let current = thread
+  for (let step = 0; step < deepest && subagent(current); step++) {
+    const parent = current.lineage?.parentThreadId
+    const found = parent === null || parent === undefined ? undefined : view.threads.get(parent)
+    if (found === undefined || found.archivedAt !== null) return Option.none()
+    current = found
+  }
+  return current === thread || subagent(current) ? Option.none() : Option.some(current)
+}
+
+/** A subagent its provider made inside its parent's own session, like Claude's Agent tool, whose hooks never reach yapd. */
+const inside = (thread: T3Live.Thread) => thread.creationSource === "provider"
 
 /**
  * What yapd was saying around when he began words of his, when its own voice
@@ -235,6 +278,12 @@ const subagent = (thread: T3Live.Thread) => thread.lineage?.relationshipToParent
 export interface Overheard {
   readonly echo?: string | undefined
   readonly afterPause?: string | undefined
+  /**
+   * With `echo`, the routines whose steps the line it came from holds, as
+   * code put them in, like an offer of one read as it comes due: a model is
+   * only ever told of what yapd was saying then by their names.
+   */
+  readonly echoRoutines?: ReadonlyArray<string> | undefined
 }
 
 /** What was noted about work yapd started, by thread id. */
@@ -248,9 +297,14 @@ export interface Started extends Overheard {
 const overheardIn = (detail: string | null): Overheard => {
   if (detail === null) return {}
   try {
-    const { dictated } = JSON.parse(detail) as { readonly dictated?: { readonly echo?: unknown; readonly afterPause?: unknown } }
+    const { dictated } = JSON.parse(detail) as { readonly dictated?: { readonly echo?: unknown; readonly afterPause?: unknown; readonly echoRoutines?: unknown } }
     if (typeof dictated?.echo !== "string") return {}
-    return { echo: dictated.echo, ...(typeof dictated.afterPause === "string" && dictated.afterPause.trim() !== "" ? { afterPause: dictated.afterPause } : {}) }
+    const routines = Array.isArray(dictated.echoRoutines) ? dictated.echoRoutines.filter((name): name is string => typeof name === "string") : []
+    return {
+      echo: dictated.echo,
+      ...(typeof dictated.afterPause === "string" && dictated.afterPause.trim() !== "" ? { afterPause: dictated.afterPause } : {}),
+      ...(routines.length === 0 ? {} : { echoRoutines: routines }),
+    }
   } catch {
     return {}
   }
@@ -355,11 +409,12 @@ export const shortlist = (input: {
         thread,
         state: doing,
         since: since(thread, doing),
-        started: Option.map(Option.fromNullable(own), ({ dictated, description, echo, afterPause }) => ({
+        started: Option.map(Option.fromNullable(own), ({ dictated, description, echo, afterPause, echoRoutines }) => ({
           dictated,
           description,
           ...(echo === undefined ? {} : { echo }),
           ...(afterPause === undefined ? {} : { afterPause }),
+          ...(echoRoutines === undefined ? {} : { echoRoutines }),
         })),
         last: Option.fromNullable(said.get(thread.id)),
         brief: index >= most,
@@ -500,12 +555,16 @@ export interface Usage {
 /** Threads read at most to link one hook: those that ran in its directory lately, since its own just did. */
 const linkable = 8
 
+/** How long ago a subagent finished for its hook to still be looked for among its sessions. */
+const lately = 5 * 60_000
+
 /** What the user said they'd been told, as far back as the desk looks for it. */
 const latest = (entries: ReadonlyArray<Kept>, machine: string) => {
   const said = new Map<string, { readonly at: number; readonly said: string }>()
   for (const entry of entries) {
     if (entry.thread === undefined || entry.machine !== machine || entry.said === undefined || entry.said.trim() === "") continue
-    said.set(entry.thread, { at: entry.at, said: entry.said })
+    // As a model is shown it: never one of his routines' steps, which it's only told of by the routine's name.
+    said.set(entry.thread, { at: entry.at, said: unroutined(entry).said ?? entry.said })
   }
   return said
 }
@@ -674,45 +733,91 @@ export const make = (options: {
     /** Whether a directory is `root` or in it, and how near, the nearest the longest. */
     const within = (root: string, path: string) => (root === path || path.startsWith(root.endsWith("/") ? root : `${root}/`) ? Option.some(root.length) : Option.none())
 
-    const link = (from: string, session: string, cwd: string) =>
+    const link = (from: string, session: string, cwd: string, promising?: Deferred.Deferred<void>) =>
       Effect.gen(function* () {
-        const unlinked = (why: string) => Effect.as(Effect.logInfo(`Not linked: ${why}`), Option.none<Ref>())
-        const owned = (thread: T3Live.Thread) => Effect.as(Effect.logInfo(`Linked to "${thread.title}"`), Option.some<Ref>({ machine: from, id: thread.id }))
+        const unlinked = (why: string) => Effect.as(Effect.logInfo(`Not linked: ${why}`), Option.none<Linked>())
+        const owned = (thread: T3Live.Thread) =>
+          Effect.as(Effect.logInfo(`Linked to "${thread.title}"`), Option.some<Linked>({ _tag: "Thread", ref: { machine: from, id: thread.id } }))
         const at = linked(from)
         if (at === undefined) return yield* unlinked(`${from}'s T3 Code isn't followed`)
         const view = yield* at.live.view
         if (Option.isNone(view)) return yield* unlinked(at.here ? "T3 Code isn't followed right now" : `${from}'s T3 Code isn't followed right now`)
         const { threads, projects } = view.value
-        const owner = threads.get(owners.get(on(from, session)) ?? "")
-        if (owner !== undefined && !subagent(owner)) return yield* owned(owner)
-        // A subagent's own conversation is its provider's to talk to, so its hooks keep to their old way.
+        const now = yield* Clock.currentTimeMillis
+        /** A subagent of T3 Code's own, called as the desk would call it, with the thread it's part of, by what the desk calls that. */
+        const part = (thread: T3Live.Thread) =>
+          Effect.gen(function* () {
+            const noted = (yield* startedWork).get(from)
+            const named = (one: T3Live.Thread) =>
+              called(one.title, noted?.get(one.id)?.description, projects.get(one.projectId)?.title ?? "", time(one.createdAt) ?? now, now)
+            const top = head(view.value, thread)
+            yield* Effect.logInfo(Option.match(top, { onNone: () => "Linked to a subagent whose thread can't be found", onSome: (top) => `Linked to a subagent of "${top.title}"` }))
+            return Option.some<Linked>({
+              _tag: "Subagent",
+              child: { machine: from, id: thread.id },
+              called: named(thread),
+              head: Option.map(top, (top): Head => ({ ref: { machine: from, id: top.id }, called: named(top) })),
+            })
+          })
+        /** The thread it's behind once one was read for it, by this lookup or by another hook's meanwhile. */
+        const known = () => Option.fromNullable(threads.get(owners.get(on(from, session)) ?? ""))
+        // As its own or a subagent's: what a subagent's hook says is its provider's to talk to, so it's only ever tied to it for what's
+        // kept, shown and muted of it.
+        const tied = (thread: T3Live.Thread) => (subagent(thread) ? part(thread) : owned(thread))
+        const owner = known()
+        if (Option.isSome(owner)) return yield* tied(owner.value)
         const here = yield* resolved(at, cwd)
         // In its directory, or one it holds, since the agent may have gone into a folder of it: the nearest first, then the newest.
-        const candidates = (yield* Effect.forEach(
-          [...threads.values()].filter((thread) => !subagent(thread)),
-          (thread) => {
-            const directory = thread.worktreePath ?? projects.get(thread.projectId)?.workspaceRoot
-            if (directory === undefined) return Effect.succeed([])
-            return Effect.map(resolved(at, directory), (real) => Option.match(within(real, here), { onNone: () => [], onSome: (depth) => [{ thread, depth }] }))
-          },
-        ))
-          .flat()
-          .toSorted((one, other) => other.depth - one.depth || (time(other.thread.updatedAt) ?? 0) - (time(one.thread.updatedAt) ?? 0))
-          .map(({ thread }) => thread)
-          .slice(0, linkable)
-        for (const thread of candidates.filter(({ id, updatedAt }) => read.get(on(from, id)) !== updatedAt)) {
-          const found = yield* Effect.either(sessions({ machine: from, id: thread.id }))
-          if (Either.isLeft(found)) {
-            yield* Effect.logWarning(`Could not read which sessions "${thread.title}" has: ${found.left.reason}`)
-            continue
-          }
-          read.set(on(from, thread.id), thread.updatedAt)
-          for (const native of found.right) owners.set(on(from, native), thread.id)
-          if (found.right.includes(session)) return yield* owned(thread)
-        }
-        return yield* unlinked(candidates.length === 0 ? "no thread in T3 Code works in this directory or one holding it" : "no thread in this directory, or one holding it, has this session")
+        const near = (which: ReadonlyArray<T3Live.Thread>) =>
+          Effect.map(
+            Effect.forEach(which, (thread) => {
+              const directory = thread.worktreePath ?? projects.get(thread.projectId)?.workspaceRoot
+              if (directory === undefined) return Effect.succeed([])
+              return Effect.map(resolved(at, directory), (real) => Option.match(within(real, here), { onNone: () => [], onSome: (depth) => [{ thread, depth }] }))
+            }),
+            (found) =>
+              found
+                .flat()
+                .toSorted((one, other) => other.depth - one.depth || (time(other.thread.updatedAt) ?? 0) - (time(one.thread.updatedAt) ?? 0))
+                .map(({ thread }) => thread)
+                .slice(0, linkable),
+          )
+        /** Reads which sessions each has that it hadn't when last read, until one has this one. */
+        const among = (candidates: ReadonlyArray<T3Live.Thread>) =>
+          Effect.gen(function* () {
+            for (const thread of candidates) {
+              const found = yield* Effect.either(sessions({ machine: from, id: thread.id }))
+              if (Either.isLeft(found)) {
+                yield* Effect.logWarning(`Could not read which sessions "${thread.title}" has: ${found.left.reason}`)
+                continue
+              }
+              read.set(on(from, thread.id), thread.updatedAt)
+              for (const native of found.right) owners.set(on(from, native), thread.id)
+              if (found.right.includes(session)) return Option.some(thread)
+            }
+            // Another hook's lookup may have read its thread meanwhile, one this lookup then passed over as read already.
+            return known()
+          })
+        const unread = (thread: T3Live.Thread) => read.get(on(from, thread.id)) !== thread.updatedAt
+        const candidates = yield* near([...threads.values()].filter((thread) => !subagent(thread)))
+        const top = yield* among(candidates.filter(unread))
+        if (Option.isSome(top)) return yield* tied(top.value)
+        // Then T3 Code's own subagents there, which work in the worktree of the thread they're part of: only those at work, or done in the
+        // last few minutes, since more than a hundred can share one, and never one its provider made inside its parent's own session.
+        const working = (thread: T3Live.Thread) => T3Live.busy(thread) || now - (time(thread.latestRunCompletedAt) ?? Number.NEGATIVE_INFINITY) <= lately
+        const helpers = yield* near([...threads.values()].filter((thread) => subagent(thread) && !inside(thread) && working(thread)))
+        const toRead = helpers.filter(unread)
+        // Worth waiting on: one of them is still to be read.
+        if (toRead.length > 0 && promising !== undefined) yield* Deferred.succeed(promising, undefined)
+        const helper = yield* among(toRead)
+        if (Option.isSome(helper)) return yield* tied(helper.value)
+        return yield* unlinked(
+          candidates.length === 0 && helpers.length === 0
+            ? "no thread in T3 Code works in this directory or one holding it"
+            : "no thread in this directory, or one holding it, has this session",
+        )
       }).pipe(
-        Effect.catchAllCause((cause) => Effect.as(Effect.logWarning("Could not link a hook to its thread", cause), Option.none<Ref>())),
+        Effect.catchAllCause((cause) => Effect.as(Effect.logWarning("Could not link a hook to its thread", cause), Option.none<Linked>())),
         Effect.annotateLogs({ session }),
       )
 

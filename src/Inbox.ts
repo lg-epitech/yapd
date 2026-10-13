@@ -51,6 +51,8 @@ export interface Notice {
    * it went stale meanwhile.
    */
   readonly instead?: { readonly spoken: string; readonly when: Effect.Effect<boolean>; readonly used?: Effect.Effect<void> }
+  /** What came of a request held back as a secret, like the model's answer to it: said, but its words are logged nowhere, whatever they are. */
+  readonly withheld?: true
   /** Run as it starts being said, which is when the user hears of it: never when it can't be played, and for a question, undone if it breaks off. */
   readonly saying?: Effect.Effect<void>
   /**

@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { Option } from "effect"
 import type { Catalog } from "./Launcher.ts"
+import type * as Memory from "./Memory.ts"
 import type { Line } from "./Responder.ts"
 import * as Writer from "./Writer.ts"
 
@@ -68,6 +69,20 @@ describe("Writer", () => {
     expect(prompt).toContain("On box: nothing can start there right now. I can't reach box.")
     expect(prompt).toContain("Never guess a project")
     expect(prompt.endsWith("What they dictated:\nIn yap D, fix the loader.")).toBe(true)
+  })
+
+  test("never shows a routine, kept by voice or in his preferences, whose steps only yapd sends for its name said", () => {
+    const memories: ReadonlyArray<Memory.Memory> = [
+      { id: 1, at: now, kind: "fact", text: "rig's T3 Code runs the nightly", heard: "Remember that rig's T3 Code runs the nightly." },
+      { id: 2, at: now, kind: "routine", name: "review it", text: "Have Codex review the diff twice.", heard: "When I say review it, have Codex review the diff twice." },
+    ]
+    const rules = "Fable on high for hard bugs.\n\n## Routines\n\n- land it: Merge the PR once checks pass, then deploy.\n\n### Worktrees\n\nNo worktree for questions."
+    const prompt = Writer.prompt(material({ rules: Option.some(rules), memories }), Option.none())
+    expect(prompt).toContain("Their rules, as they wrote them:\nFable on high for hard bugs.\n\n### Worktrees\n\nNo worktree for questions.")
+    expect(prompt).toContain("- «rig's T3 Code runs the nightly»")
+    for (const routine of ["Routines", "land it", "Merge the PR once checks pass", "review it", "Have Codex review the diff twice"]) expect([routine, prompt.includes(routine)]).toEqual([routine, false])
+    // Rules that are only routines are none.
+    expect(Writer.prompt(material({ rules: Option.some("## Routines\n- land it: Merge the PR.") }), Option.none())).toContain("They have written no rules.")
   })
 
   test("passes on what was read out lately, by the name of the machine it came from", () => {
