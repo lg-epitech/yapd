@@ -4678,6 +4678,51 @@ describe("Daemon with threads muted", () => {
     expect(await said(Option.none())).toEqual([`yapd. ${answer}`])
   })
 
+  test("a follow-up sent soon after work yapd started isn't taken for its first turn when T3 Code says which message began its run", async () => {
+    const asked = "Find out whether Apple shipped an API for glucose sensors."
+    const followUp = "Also compare Dexcom."
+    const reply = "Dexcom has one for its G7."
+    const glucose = { machine: "Rosie", id: "t-glucose" }
+    const rows = [
+      { at: 0, digest: Ledger.digest(asked), kind: "start" as const, messageId: "yapd:u1:0:m" },
+      { at: 20_000, digest: Ledger.digest(followUp), kind: "message" as const, messageId: "yapd:u2:0:m" },
+    ]
+    /** What comes of his follow-up's reply in quiet, told of by its hook or by T3 Code's word, whose run began with the follow-up. */
+    const kept = (how: "hook" | "word") =>
+      run(
+        Effect.gen(function* () {
+          const { handle, made, wait, played, journal } = yield* make(undefined, {
+            link: () => Effect.succeedSome(glucose),
+            sent: (to, since) => Effect.succeed(Threads.same(to, glucose) ? rows.filter(({ at }) => at >= since) : []),
+            began: () => Effect.succeedSome(Option.some("yapd:u2:0:m")),
+            holding: Effect.succeedSome("quiet"),
+          })
+          // Its first answer came at five seconds; he sent the follow-up at twenty.
+          yield* wait(20)
+          if (how === "hook") {
+            yield* handle("claude", { hook_event_name: "UserPromptSubmit", session_id: "s-glucose", cwd: "/code/yapd", prompt: followUp }, { project: "yapd", host: hostname() }, false)
+            yield* wait(60)
+            yield* stopHere(handle, "s-glucose", reply)
+          } else {
+            yield* wait(5)
+            yield* made.finished({
+              ...unhooked(reply, "run-2", (yield* made.power).turns),
+              about: glucose,
+              turn: { prompt: Option.some(followUp), message: reply },
+              at: 25_000,
+              run: { status: "completed", final: reply, others: [], natives: ["s-glucose"], previous: Option.none(), userMessageId: Option.some("yapd:u2:0:m"), startedAt: 20_000 },
+              answering: true,
+            })
+          }
+          yield* wait(11)
+          return { played: [...played], held: (yield* journal.since(0, { kinds: ["update"] })).map(heldFor) }
+        }),
+      )
+    // It answers his message, which quiet never holds: only the first turn of the work is kept for the morning.
+    expect(await kept("word")).toEqual({ played: [`yapd. ${reply}`], held: [undefined] })
+    expect(await kept("hook")).toEqual({ played: [`yapd. ${reply}`], held: [undefined] })
+  })
+
   test("a research answer that comes in quiet is held for the morning, and said at once in focus", async () => {
     const asked = "Find out whether Apple shipped an API for third-party glucose sensors on the Watch."
     const sent = "Also check the fee table."

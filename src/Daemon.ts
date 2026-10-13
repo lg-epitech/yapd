@@ -749,8 +749,13 @@ export const make = (
     readonly fallback?: Fallback
     /** Whether it answers what he asked of it himself, a follow-up by voice or a message yapd sent it, which is said however he muted its thread. */
     readonly answering: boolean
-    /** Whether it's the first turn of work yapd started for him, which is what he asked for, however slight. */
-    readonly opening?: boolean
+    /**
+     * For a turn said in its hook's place, the id of the message its run
+     * began with, as T3 Code has it, none when it began with none: what alone
+     * tells whether it's the first turn of work yapd started, which is what
+     * he asked for, however slight.
+     */
+    readonly began?: Option.Option<string>
     /** The prompt its turn began with, through the hooks or as T3 Code has its run, and when, to tell whether it's one yapd sent its thread. */
     readonly prompted?: { readonly text: string | undefined; readonly at: number }
     /**
@@ -926,28 +931,40 @@ export const make = (
    * T3 Code has them. A hook's turn whose prompt never came through the
    * hooks, as when it began before yapd restarted, goes by what's kept:
    * the work yapd started, while nothing of the thread was kept since, or what
-   * it sent after the last that was. The work yapd started only when the
-   * thread's latest run began with the message it started with, where T3
-   * Code can say: a first turn that was stopped, or left nothing kept, isn't
-   * answered by the next.
+   * it sent after the last that was. Wherever T3 Code says which message
+   * began its run, as its run has it for a turn said in its hook's place,
+   * the work yapd started is answered only by the turn its own message began,
+   * whatever when it came or its words say: a first turn that was stopped,
+   * or left nothing kept, isn't answered by the next, nor is the work by a
+   * follow-up sent soon after.
    */
   const asked = (to: Threads.Ref, finished: Finished) =>
     Effect.gen(function* () {
       const { prompted, arrivedAt } = finished
       const rows = yield* answerable(to, arrivedAt)
       if (rows.length === 0) return Option.none()
+      const last = prompted === undefined ? ((yield* journal.byThread(to.machine, to.id, 1, ["update"]))[0]?.at ?? Number.NEGATIVE_INFINITY) : Number.NEGATIVE_INFINITY
+      const candidates = rows.filter(({ at }) => at > last)
+      // Which message its run began with, as T3 Code has it, read only when it may be the work yapd started that it answers.
+      const began =
+        finished.began !== undefined
+          ? Option.some(finished.began)
+          : options.began !== undefined && candidates.some(({ kind }) => kind === "start")
+            ? yield* options.began(to)
+            : Option.none()
+      /** Whether a row is the work yapd started, begun with the message its run began with, when T3 Code says which: none when it can't. */
+      const opened = ({ messageId }: { readonly messageId?: string | null }) =>
+        Option.map(began, (id) => Option.exists(id, (began) => began === messageId))
       if (prompted === undefined) {
-        const last = (yield* journal.byThread(to.machine, to.id, 1, ["update"]))[0]?.at ?? Number.NEGATIVE_INFINITY
-        const since = rows.filter(({ at }) => at > last)
-        const began = options.began !== undefined && since.some(({ kind }) => kind === "start") ? yield* options.began(to) : Option.none()
-        return answered(
-          since.filter(({ kind, messageId }) => kind !== "start" || Option.match(began, { onNone: () => true, onSome: (id) => Option.exists(id, (began) => began === messageId) })),
-        )
+        return answered(candidates.filter((row) => row.kind !== "start" || Option.getOrElse(opened(row), () => true)))
       }
       const words = prompted.text === undefined ? "" : Ledger.digest(prompted.text)
       return answered(
-        rows.filter(
-          ({ at, digest, how }) => (words !== "" && digest === words) || (at >= prompted.at - sending && (at <= prompted.at || how !== "queued")),
+        candidates.filter((row) =>
+          Option.getOrElse(
+            row.kind === "start" ? opened(row) : Option.none(),
+            () => (words !== "" && row.digest === words) || (row.at >= prompted.at - sending && (row.at <= prompted.at || row.how !== "queued")),
+          ),
         ),
       )
     }).pipe(Effect.catchAllCause((cause) => Effect.as(Effect.logWarning("Could not tell whether it answers what I sent it", cause), Option.none())))
@@ -1028,7 +1045,7 @@ export const make = (
       const tied = Option.orElse(about, () => owner)
       // What it answers of what yapd sent its thread for him, if anything: the first turn of work yapd started is what he asked for.
       const answers = Option.isSome(tied) ? yield* asked(tied.value, finished) : Option.none()
-      const opening = finished.opening === true || Option.contains(answers, "start")
+      const opening = Option.contains(answers, "start")
       // Whatever needs him is said in full, question and all, and so is everything once he asked to hear everything, when nothing is held
       // as progress. Otherwise only the headline is said, and the rest is kept for when he asks for more.
       const full = needsYou || summary.priority === "needs-you" || (yield* options.detail ?? Effect.succeed<Modes.Detail>("brief")) === "full"
@@ -1407,13 +1424,6 @@ export const make = (
           sentAt <= input.at &&
           input.run.natives.includes(current.update.thread.session),
       )
-      // The first turn of work yapd started, by the message it started with, is what he asked for, however slight.
-      const opening =
-        options.sent !== undefined &&
-        Option.isSome(input.run.userMessageId) &&
-        (yield* options.sent(input.about, input.at - lastDay)).some(
-          ({ kind, messageId }) => kind === "start" && messageId === Option.getOrUndefined(input.run.userMessageId),
-        )
       forsake(session)
       fallbacks.set(input.key, fallback)
       // A newer one for the thread takes the place of one waiting to be said, and a reply to that one is held back.
@@ -1447,7 +1457,8 @@ export const make = (
           known: input.about,
           fallback,
           answering: input.answering === true || followedUp,
-          opening,
+          // The message its run began with, which alone tells the first turn of work yapd started, by the message it started with.
+          began: input.run.userMessageId,
           // Its run's prompt and start, so a message yapd sent the thread for him, steered into it or begun in its words, is told as a hook's is.
           prompted: { text: Option.getOrUndefined(input.turn.prompt), at: input.run.startedAt },
         }),
