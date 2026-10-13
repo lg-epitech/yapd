@@ -11421,7 +11421,7 @@ describe("Assistant reminders", () => {
             if (heard.startsWith("Tell the Tezos one")) return Brain.decision({ act: "send", target: handle(situation, tezos), text: "Use the fee table.", how: "now", rest: "let me know when it finishes" })
             if (heard === "let me know when it finishes") return Brain.decision({ act: "remind", how: "finished", target: handle(situation, tezos) })
             if (heard === "Take back the message to the Tezos one.") return Brain.decision({ act: "undo", target: handle(situation, tezos), how: "message" })
-            if (heard === "Tell the Mina one to rebase.") return Brain.decision({ act: "send", target: handle(situation, mina), text: "Rebase.", how: "now" })
+            if (heard === "tell the Mina one to rebase") return Brain.decision({ act: "send", target: handle(situation, mina), text: "Rebase.", how: "now" })
             if (heard === "Cancel that reminder.") return Brain.decision({ act: "undo", how: "reminder" })
             return undefined
           },
@@ -11806,6 +11806,38 @@ describe("Assistant memories", () => {
       said: "Changed, sir. Review it: have the agent open a PR, then two Codex agents review it on t3.",
       kept: ["review it: have the agent open a PR, then two Codex agents review it on t3"],
     })
+  })
+
+  test("a routine whose steps leave out what he said with them, like a don't before them or a but after them, isn't saved, so its name never sends the opposite", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(
+          (situation) => {
+            const { heard } = situation.utterance
+            if (heard === "tell the Mina one to rebase") return Brain.decision({ act: "send", target: handle(situation, mina), text: "Rebase.", how: "now" })
+            // His words, all of them, but not all he said of them.
+            const rest = heard.endsWith("and tell the Mina one to rebase.") ? "tell the Mina one to rebase" : ""
+            return Brain.decision({ act: "remember", how: "routine", text: "ship: merge the PR, then deploy", rest })
+          },
+          undefined,
+          { memories: true },
+        )
+        const kept = () => Effect.map(made.memories!.list, (all) => all.map(({ name, text }) => `${name}: ${text}`))
+        const saying = (heard: string) => Effect.zipRight(made.dictate(heard), Effect.map(kept(), (all) => ({ said: made.spoken().at(-1), kept: all })))
+        const negated = yield* saying("When I say ship, don't merge the PR, then deploy.")
+        const qualified = yield* saying("When I say ship, merge the PR, then deploy, but only once the checks pass.")
+        // Its name after its steps, thanks, or the rest of his request, are no part of them.
+        const named = yield* saying("Merge the PR, then deploy, when I say ship, thanks.")
+        const more = yield* saying("When I say ship, merge the PR, then deploy, and tell the Mina one to rebase.")
+        return { negated, qualified, named, more, sent: made.dispatched.filter(({ type }) => type === "message.dispatch").map(({ text }) => text) }
+      }),
+    )
+    const refused = { said: "I couldn't keep the steps in your own words, sir, so I didn't save it.", kept: [] }
+    expect(result.negated).toEqual(refused)
+    expect(result.qualified).toEqual(refused)
+    expect(result.named).toEqual({ said: "Noted, sir. Ship: merge the PR, then deploy.", kept: ["ship: merge the PR, then deploy"] })
+    expect(result.more.kept).toEqual(["ship: merge the PR, then deploy"])
+    expect(result.sent).toEqual(["Rebase."])
   })
 
   test("a secret isn't remembered, nor kept in the journal, whatever else would turn it down", async () => {

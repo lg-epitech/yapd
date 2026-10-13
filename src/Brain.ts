@@ -1911,6 +1911,38 @@ export const asSaid = (words: string, said: string) => {
   return kept !== "" && ` ${Ledger.digest(said)} `.includes(` ${kept} `)
 }
 
+/** A word that turns around what follows it, as words compare: "don't" comes out of them as "don t". */
+const negation = / (?:not|never|no|without|nor|stop|dont|\p{L}+n t) /u
+
+/** What may follow a routine's steps that's no part of them: thanks, his calling yapd, or a word joining on the rest of his request. */
+const trailing = / (?:please|thanks|thank you|cheers|sir|jarvis|yapd|ok|okay|alright|all right|that s it|that s all|thats it|thats all|and|then|also)(?= )/g
+
+/**
+ * Whether a routine's steps, his words as heard, are all he asked for under
+ * its name: nothing that turns them around just before them, between its
+ * name and them, like "don't" in "when I say ship, don't merge the PR", and
+ * nothing after them, like "but only once the checks pass", but thanks, its
+ * name, as in "… when I say ship", or the `rest` of his request. A check
+ * that turns down, never one that keeps anything.
+ */
+const wholeSteps = (steps: string, name: string, said: string, rest: string) => {
+  const his = ` ${Ledger.digest(said)} `
+  const kept = ` ${Ledger.digest(steps)} `
+  const at = his.indexOf(kept)
+  if (kept.trim() === "" || at < 0) return false
+  const before = his.slice(0, at + 1)
+  const called = Ledger.digest(name)
+  const from = called === "" ? -1 : before.lastIndexOf(` ${called} `)
+  // Without its name before them, the last few words before them.
+  const lead = from < 0 ? ` ${before.trim().split(" ").slice(-4).join(" ")} ` : before.slice(from + called.length + 1)
+  if (negation.test(lead)) return false
+  let after = his.slice(at + kept.length - 1)
+  const more = Ledger.digest(rest)
+  if (more !== "") after = after.replace(` ${more} `, " ")
+  if (called !== "") after = after.replace(new RegExp(` (?:when|whenever|if|once|any time|anytime|every time|each time) i (?:say|tell you) ${called} `), " ")
+  return after.replace(trailing, " ").trim() === ""
+}
+
 /**
  * The model's words that are nowhere in what he said, as it wrote them, in
  * its order, so he's told which weren't his, like a name it put right that
@@ -2160,6 +2192,10 @@ export const check = (given: Decision, situation: Situation, lines: Lines): Chec
       if (utterance.echo === undefined && heard !== "" && !asSaid(text, heard)) {
         const missing = unheard(text, heard)
         return { _tag: "Say", spoken: routine === undefined ? said.words(missing) : said.steps(missing) }
+      }
+      // His words, but not all he said of them, like "don't" before them, which saying its name would then send the opposite of.
+      if (routine !== undefined && utterance.echo === undefined && heard !== "" && !wholeSteps(routine.steps, routine.name, heard, choice.rest)) {
+        return { _tag: "Say", spoken: said.steps() }
       }
       if (routine !== undefined) {
         // The one in his preferences is the one, and a name yapd answers to already would never be heard as the routine's.
