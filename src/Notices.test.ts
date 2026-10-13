@@ -9,7 +9,7 @@ import * as Persona from "./Persona.ts"
 import * as Reminders from "./Reminders.ts"
 import * as Store from "./Store.ts"
 import * as T3Actions from "./T3Actions.ts"
-import type * as Server from "./T3CodeServer.ts"
+import * as Server from "./T3CodeServer.ts"
 import * as T3Live from "./T3Live.ts"
 import * as Threads from "./Threads.ts"
 
@@ -98,6 +98,8 @@ const notices = (
     readonly usage?: () => ReadonlyArray<Record<string, unknown>>
     /** Focus or quiet, while one is on. */
     readonly holding?: () => Option.Option<"focus" | "quiet">
+    /** Whether reading a thread fails now, as when T3 Code fails a moment. */
+    readonly troubled?: (thread: string) => boolean
   },
 ) =>
   Effect.gen(function* () {
@@ -123,6 +125,7 @@ const notices = (
         api: (<A, I>(path: string, schema: Schema.Schema<A, I>) => {
           const id = decodeURIComponent(path.split("/").at(-2) ?? "")
           reads.push(`${machine} ${id}`)
+          if (given.troubled?.(id) === true) return Effect.fail(new Server.Trouble({ reason: "T3 Code is taking too long." }))
           const read = bounded[id] ?? {}
           const providerThreads = (read.sessions ?? []).map((nativeId) => ({ nativeThreadRef: { driver: "claudeAgent", nativeId, strength: "strong" } }))
           return Schema.decodeUnknown(schema)({
@@ -1229,6 +1232,236 @@ describe("Notices while yapd is off", () => {
       }),
     )
     expect(result).toEqual([{ key: "done:Rosie:run-glucose", message: "Apple hasn't shipped one.", answering: true }])
+  })
+
+  test("the first turn of work yapd started that ended while yapd restarted is looked into again, under its run's key, until what it tells is kept", async () => {
+    const glucose = thread("glucose", "glucose", { latestRunId: "run-glucose", latestRunCompletedAt: minutes(2) })
+    const bounded = {
+      glucose: {
+        runs: [{ id: "run-glucose", status: "completed", ordinal: 1, startedAt: minutes(8), userMessageId: "yapd:glucose:0:m" }],
+        messages: [
+          { id: "yapd:glucose:0:m", runId: "run-glucose", role: "user", text: "Find out.", createdAt: minutes(8) },
+          { id: "a-glucose", runId: "run-glucose", role: "assistant", text: "Apple hasn't shipped one.", createdAt: minutes(2) },
+        ],
+      },
+    }
+    const result = await run(
+      Effect.gen(function* () {
+        let troubled = false
+        const made = yield* notices({
+          view: [glucose],
+          bounded,
+          started: [{ at: now - 10 * 60_000, thread: "glucose", messageId: "yapd:glucose:0:m" }],
+          troubled: () => troubled,
+        })
+        const told = () => made.finished.map(({ key }) => key)
+        // Found to be its first turn, then T3 Code fails a moment as what it said is read.
+        yield* made.reconcileOn("Rosie")
+        troubled = true
+        yield* made.wait(13)
+        troubled = false
+        for (let i = 0; i < 6; i++) yield* made.wait(5)
+        const read = told()
+        // Handed on, but nothing of it was kept, as when it couldn't be got ready: it's looked into again, under the same key.
+        for (let i = 0; i < 18; i++) yield* made.wait(5)
+        const again = told()
+        // Once it's kept, it's done with, even when T3 Code catches up again.
+        yield* made.journal.write({ at: now, kind: "update", machine: "Rosie", thread: "glucose", project: "", said: "Apple hasn't shipped one." })
+        for (let i = 0; i < 18; i++) yield* made.wait(5)
+        yield* made.reconcileOn("Rosie")
+        for (let i = 0; i < 6; i++) yield* made.wait(5)
+        return { read, again, kept: told() }
+      }),
+    )
+    expect(result).toEqual({
+      read: ["done:Rosie:run-glucose"],
+      again: ["done:Rosie:run-glucose", "done:Rosie:run-glucose"],
+      kept: ["done:Rosie:run-glucose", "done:Rosie:run-glucose"],
+    })
+  })
+
+  test("the first turn of work yapd started still under way as T3 Code catches up is looked into once it's over, should what's heard of it then come to nothing", async () => {
+    const going = thread("glucose", "glucose", { activeRunId: "run-glucose", latestRunId: "run-glucose" })
+    const over = thread("glucose", "glucose", { latestRunId: "run-glucose", latestRunCompletedAt: minutes(0) })
+    const asked = { id: "yapd:glucose:0:m", runId: "run-glucose", role: "user", text: "Find out.", createdAt: minutes(8) }
+    const latest = { id: "run-glucose", status: "running", ordinal: 1, startedAt: minutes(8), userMessageId: asked.id }
+    const bounded = { glucose: { runs: [latest], messages: [asked] } }
+    const result = await run(
+      Effect.gen(function* () {
+        let troubled = false
+        const made = yield* notices({ view: [going], bounded, started: [{ at: now - 10 * 60_000, thread: "glucose", messageId: asked.id }], troubled: () => troubled })
+        yield* made.reconcileOn("Rosie")
+        yield* made.wait(5)
+        // It ends, and T3 Code fails a moment as what it said is read.
+        bounded.glucose = {
+          runs: [{ ...latest, status: "completed" }],
+          messages: [asked, { id: "a-glucose", runId: "run-glucose", role: "assistant", text: "Apple hasn't shipped one.", createdAt: minutes(0) }],
+        }
+        troubled = true
+        yield* made.becomes(over)
+        yield* made.hear(ended(over, "run-glucose"))
+        yield* made.wait(13)
+        troubled = false
+        const heard = made.finished.map(({ key }) => key)
+        for (let i = 0; i < 18; i++) yield* made.wait(5)
+        return { heard, looked: made.finished.map(({ key }) => key) }
+      }),
+    )
+    expect(result).toEqual({ heard: [], looked: ["done:Rosie:run-glucose"] })
+  })
+
+  test("the first turn of work yapd started once T3 Code had caught up is looked into again, under its run's key, until what it tells is kept, when it can't be read as it ends", async () => {
+    const over = thread("glucose", "glucose", { latestRunId: "run-glucose", latestRunCompletedAt: minutes(0) })
+    const asked = { id: "yapd:glucose:0:m", runId: "run-glucose", role: "user", text: "Find out.", createdAt: minutes(3) }
+    const bounded: Record<string, Bounded> = {}
+    const starts: Array<{ readonly at: number; readonly thread: string; readonly messageId: string | null }> = []
+    const result = await run(
+      Effect.gen(function* () {
+        let troubled = false
+        const made = yield* notices({ view: [], bounded, started: starts, troubled: () => troubled })
+        const told = () => made.finished.map(({ key }) => key)
+        // T3 Code catches up before any of it.
+        yield* made.reconcileOn("Rosie")
+        yield* made.wait(5)
+        // He starts it, its first turn ends, and T3 Code fails a moment as what it said is read.
+        starts.push({ at: now - 3 * 60_000, thread: "glucose", messageId: asked.id })
+        bounded.glucose = {
+          runs: [{ id: "run-glucose", status: "completed", ordinal: 1, startedAt: minutes(3), userMessageId: asked.id }],
+          messages: [asked, { id: "a-glucose", runId: "run-glucose", role: "assistant", text: "Apple hasn't shipped one.", createdAt: minutes(0) }],
+        }
+        troubled = true
+        yield* made.becomes(over)
+        yield* made.hear(ended(over, "run-glucose"))
+        yield* made.wait(13)
+        troubled = false
+        const heard = told()
+        for (let i = 0; i < 18; i++) yield* made.wait(5)
+        const looked = told()
+        // Once it's kept, it's done with.
+        yield* made.journal.write({ at: now, kind: "update", machine: "Rosie", thread: "glucose", project: "", said: "Apple hasn't shipped one." })
+        for (let i = 0; i < 18; i++) yield* made.wait(5)
+        return { heard, looked, kept: told() }
+      }),
+    )
+    expect(result).toEqual({ heard: [], looked: ["done:Rosie:run-glucose"], kept: ["done:Rosie:run-glucose"] })
+  })
+
+  test("the first turn of work yapd started that ended while T3 Code's word couldn't be heard, which then only tells of a new thread, is looked into", async () => {
+    const over = thread("glucose", "glucose", { latestRunId: "run-glucose", latestRunCompletedAt: minutes(1) })
+    const asked = { id: "yapd:glucose:0:m", runId: "run-glucose", role: "user", text: "Find out.", createdAt: minutes(3) }
+    const bounded: Record<string, Bounded> = {}
+    const starts: Array<{ readonly at: number; readonly thread: string; readonly messageId: string | null }> = []
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* notices({ view: [], bounded, started: starts })
+        yield* made.reconcileOn("Rosie")
+        yield* made.wait(5)
+        starts.push({ at: now - 3 * 60_000, thread: "glucose", messageId: asked.id })
+        bounded.glucose = {
+          runs: [{ id: "run-glucose", status: "completed", ordinal: 1, startedAt: minutes(3), userMessageId: asked.id }],
+          messages: [asked, { id: "a-glucose", runId: "run-glucose", role: "assistant", text: "Apple hasn't shipped one.", createdAt: minutes(1) }],
+        }
+        yield* made.becomes(over)
+        yield* made.hear({ _tag: "Created", thread: over })
+        for (let i = 0; i < 18; i++) yield* made.wait(5)
+        return made.finished.map(({ key }) => key)
+      }),
+    )
+    expect(result).toEqual(["done:Rosie:run-glucose"])
+  })
+
+  test("the first turn of work yapd started is kept looking into once at a time, though what let go of it before ends after it's taken up again", async () => {
+    const glucose = thread("glucose", "glucose", { activeRunId: "run-glucose", latestRunId: "run-glucose" })
+    const salt = thread("salt", "salt", { activeRunId: "run-salt", latestRunId: "run-salt" })
+    const bounded = {
+      glucose: { runs: [{ id: "run-glucose", status: "running", ordinal: 1, startedAt: minutes(8), userMessageId: "yapd:glucose:0:m" }] },
+      salt: { runs: [{ id: "run-salt", status: "running", ordinal: 1, startedAt: minutes(8), userMessageId: "yapd:salt:0:m" }] },
+    }
+    const started = [
+      { at: now - 10 * 60_000, thread: "glucose", messageId: "yapd:glucose:0:m" },
+      { at: now - 10 * 60_000, thread: "salt", messageId: "yapd:salt:0:m" },
+    ]
+    const result = await run(
+      Effect.gen(function* () {
+        // T3 Code catches up before the glucose thread can be seen, so it's let go of at once, and the salt one is kept looking into.
+        const made = yield* notices({ view: [salt], bounded, started })
+        yield* made.reconcileOn("Rosie")
+        yield* made.wait(5)
+        // The glucose thread is heard of as new, and taken up again a minute later.
+        yield* made.becomes(glucose)
+        yield* made.hear({ _tag: "Created", thread: glucose })
+        yield* made.wait(60)
+        // The salt thread is archived, so what was looking into both ends.
+        yield* made.becomes({ ...salt, archivedAt: minutes(0) })
+        yield* made.wait(60)
+        // The glucose thread is heard of as new again, while it's still being looked into.
+        yield* made.hear({ _tag: "Created", thread: glucose })
+        const from = made.reads.length
+        for (let i = 0; i < 5; i++) yield* made.wait(60)
+        return made.reads.slice(from).filter((read) => read === "Rosie glucose").length
+      }),
+    )
+    expect(result).toBe(5)
+  })
+
+  test("the first turn of work yapd started on rig, heard from a hook that couldn't be tied to its thread, isn't said again after a restart, nor when T3 Code tells of it again", async () => {
+    // He started it ten hours ago, and its answer was said from rig's Stop, kept under the hook's session rather than the thread.
+    const asr = thread("asr", "OpenAI ASR releases", { latestRunId: "run-asr", latestRunCompletedAt: minutes(599) })
+    const asked = { id: "yapd:asr:0:m", runId: "run-asr", role: "user", text: "Look up when OpenAI last released an ASR model.", createdAt: minutes(600) }
+    const rig = {
+      view: [asr],
+      bounded: {
+        asr: {
+          runs: [{ id: "run-asr", status: "completed", ordinal: 1, startedAt: minutes(600), completedAt: minutes(599), userMessageId: asked.id }],
+          messages: [asked, { id: "a-asr", runId: "run-asr", role: "assistant", text: "OpenAI's last speech model came out in March.", createdAt: minutes(599) }],
+          sessions: ["5dba8e2d-b807520"],
+        },
+      },
+    }
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* notices({ view: [], bounded: {}, rig, started: [{ at: now - 601 * 60_000, thread: "asr", messageId: asked.id }] })
+        yield* made.journal.write({
+          at: now - 599 * 60_000,
+          kind: "update",
+          machine: "rig",
+          thread: "claude:5dba8e2d-b807520",
+          project: "asr",
+          said: "OpenAI's last speech model came out in March.",
+          heardAt: now - 599 * 60_000,
+          detail: { priority: "done", prompt: asked.text },
+        })
+        // Rig's T3 Code catches up after the restart.
+        yield* made.rig.reached(true)
+        yield* made.reconcileOn("rig")
+        for (let i = 0; i < 18; i++) yield* made.wait(5)
+        const recovered = [...made.finished]
+        // Its word that the turn ended comes again, as after a reconnect, with its Stop long forgotten.
+        yield* made.rig.hear(ended(asr, "run-asr"))
+        for (let i = 0; i < 18; i++) yield* made.wait(5)
+        return { recovered, heard: made.finished, told: made.told }
+      }),
+    )
+    expect(result).toEqual({ recovered: [], heard: [], told: [] })
+  })
+
+  test("the first turn of work yapd started in a thread he archived since is never looked into", async () => {
+    const archived = thread("glucose", "glucose", { latestRunId: "run-glucose", latestRunCompletedAt: minutes(2), archivedAt: minutes(1) })
+    const bounded = {
+      glucose: {
+        runs: [{ id: "run-glucose", status: "completed", ordinal: 1, startedAt: minutes(8), userMessageId: "yapd:glucose:0:m" }],
+        messages: [{ id: "a-glucose", runId: "run-glucose", role: "assistant", text: "Apple hasn't shipped one.", createdAt: minutes(2) }],
+      },
+    }
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* notices({ view: [archived], bounded, started: [{ at: now - 10 * 60_000, thread: "glucose", messageId: "yapd:glucose:0:m" }] })
+        yield* made.reconcileOn("Rosie")
+        for (let i = 0; i < 36; i++) yield* made.wait(5)
+        return { finished: made.finished, reads: made.reads.length }
+      }),
+    )
+    expect(result).toEqual({ finished: [], reads: 0 })
   })
 
   test("a question asked while yapd is off isn't worded then, and is asked once it's on", async () => {

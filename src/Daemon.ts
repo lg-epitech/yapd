@@ -1,4 +1,4 @@
-import { Cause, Clock, Effect, FiberMap, Option, PubSub, STM, Stream, SubscriptionRef, TRef } from "effect"
+import { Cause, Clock, Deferred, Effect, Fiber, FiberMap, Option, PubSub, STM, Stream, SubscriptionRef, TRef } from "effect"
 import { mkdtemp, rm } from "node:fs/promises"
 import { hostname, tmpdir } from "node:os"
 import { join } from "node:path"
@@ -261,6 +261,12 @@ export const make = (
   const stops = new Map<string, ReadonlyArray<Notices.Stop>>()
   /** Stops not said since a turn said in their hook's place was theirs, which makes them that run's and no other's. */
   const taken = new WeakSet<Notices.Stop>()
+  /**
+   * Each Stop's, done once what comes of its update is known: said, kept, or
+   * dropped, which it then says. T3 Code's word for its turn waits on it, so
+   * a turn of work yapd sent whose hook told of nothing is said in its place.
+   */
+  const deciding = new WeakMap<Notices.Stop, Deferred.Deferred<void>>()
   /**
    * A turn T3 Code said finished that no hook had told of, said in its hook's
    * place, under the session `finished:<machine>:<thread>`: what tells a Stop
@@ -762,8 +768,13 @@ export const make = (
     readonly fallback?: Fallback
     /** Whether it answers what he asked of it himself, a follow-up by voice or a message yapd sent it, which is said however he muted its thread. */
     readonly answering: boolean
-    /** Whether it's the first turn of work yapd started for him, which is what he asked for, however slight. */
-    readonly opening?: boolean
+    /**
+     * For a turn said in its hook's place, the id of the message its run
+     * began with, as T3 Code has it, none when it began with none: what alone
+     * tells whether it's the first turn of work yapd started, which is what
+     * he asked for, however slight.
+     */
+    readonly began?: Option.Option<string>
     /** The prompt its turn began with, through the hooks or as T3 Code has its run, and when, to tell whether it's one yapd sent its thread. */
     readonly prompted?: { readonly text: string | undefined; readonly at: number }
     /**
@@ -955,31 +966,52 @@ export const make = (
    * T3 Code has them. A hook's turn whose prompt never came through the
    * hooks, as when it began before yapd restarted, goes by what's kept:
    * the work yapd started, while nothing of the thread was kept since, or what
-   * it sent after the last that was. The work yapd started only when the
-   * thread's latest run began with the message it started with, where T3
-   * Code can say: a first turn that was stopped, or left nothing kept, isn't
-   * answered by the next.
+   * it sent after the last that was. Wherever T3 Code says which message
+   * began its run, as its run has it for a turn said in its hook's place,
+   * the work yapd started is answered only by the turn its own message began,
+   * whatever when it came or its words say: a first turn that was stopped,
+   * or left nothing kept, isn't answered by the next, nor is the work by a
+   * follow-up sent soon after. With it, whether that told by id whether it's
+   * the first turn of work yapd started: not when what yapd sent its thread
+   * couldn't be read, nor, with that work among what it may answer, which
+   * message began its run.
    */
   const asked = (to: Threads.Ref, finished: Finished) =>
     Effect.gen(function* () {
       const { prompted, arrivedAt } = finished
       const rows = yield* answerable(to, arrivedAt)
-      if (rows.length === 0) return Option.none()
+      if (rows.length === 0) return { answers: Option.none(), told: true }
+      const last = prompted === undefined ? ((yield* journal.byThread(to.machine, to.id, 1, ["update"]))[0]?.at ?? Number.NEGATIVE_INFINITY) : Number.NEGATIVE_INFINITY
+      const candidates = rows.filter(({ at }) => at > last)
+      // Which message its run began with, as T3 Code has it, read only when it may be the work yapd started that it answers.
+      const began =
+        finished.began !== undefined
+          ? Option.some(finished.began)
+          : options.began !== undefined && candidates.some(({ kind }) => kind === "start")
+            ? yield* options.began(to)
+            : Option.none()
+      /** Whether a row is the work yapd started, begun with the message its run began with, when T3 Code says which: none when it can't. */
+      const opened = ({ messageId }: { readonly messageId?: string | null }) =>
+        Option.map(began, (id) => Option.exists(id, (began) => began === messageId))
+      const told = Option.isSome(began) || !candidates.some(({ kind }) => kind === "start")
       if (prompted === undefined) {
-        const last = (yield* journal.byThread(to.machine, to.id, 1, ["update"]))[0]?.at ?? Number.NEGATIVE_INFINITY
-        const since = rows.filter(({ at }) => at > last)
-        const began = options.began !== undefined && since.some(({ kind }) => kind === "start") ? yield* options.began(to) : Option.none()
-        return answered(
-          since.filter(({ kind, messageId }) => kind !== "start" || Option.match(began, { onNone: () => true, onSome: (id) => Option.exists(id, (began) => began === messageId) })),
-        )
+        return { answers: answered(candidates.filter((row) => row.kind !== "start" || Option.getOrElse(opened(row), () => true))), told }
       }
       const words = prompted.text === undefined ? "" : Ledger.digest(prompted.text)
-      return answered(
-        rows.filter(
-          ({ at, digest, how }) => (words !== "" && digest === words) || (at >= prompted.at - sending && (at <= prompted.at || how !== "queued")),
+      const answers = answered(
+        candidates.filter((row) =>
+          Option.getOrElse(
+            row.kind === "start" ? opened(row) : Option.none(),
+            () => (words !== "" && row.digest === words) || (row.at >= prompted.at - sending && (row.at <= prompted.at || row.how !== "queued")),
+          ),
         ),
       )
-    }).pipe(Effect.catchAllCause((cause) => Effect.as(Effect.logWarning("Could not tell whether it answers what I sent it", cause), Option.none())))
+      return { answers, told }
+    }).pipe(
+      Effect.catchAllCause((cause) =>
+        Effect.as(Effect.logWarning("Could not tell whether it answers what I sent it", cause), { answers: Option.none<"start" | "sent">(), told: false }),
+      ),
+    )
 
   /**
    * Whether he heard since the entry of a turn kept quiet in its hook's
@@ -1026,6 +1058,19 @@ export const make = (
         )
       : Effect.succeed(false)
 
+  /**
+   * An update that couldn't be got ready, so nothing of it was said or kept:
+   * its Stop told of nothing, and a turn said in its hook's place is let go
+   * of, so T3 Code's word for either, heard again, tries it again, said once
+   * all the same under its run's key.
+   */
+  const unprepared = (finished: Finished) =>
+    Effect.sync(() => {
+      if (finished.stop !== undefined) finished.stop.skipped = "dropped"
+      const { fallback } = finished
+      if (fallback !== undefined && fallbacks.get(fallback.key) === fallback && !fallback.heard) fallbacks.delete(fallback.key)
+    })
+
   const prepare = (finished: Finished) => {
     const { session, turn, thread, arrivedAt, generation, hook, needsYou, turns } = finished
     if (hook !== undefined) summing.set(session, hook)
@@ -1057,9 +1102,10 @@ export const make = (
       )
       /** The thread it's from, here or, only for what's kept, shown and muted, on another machine. */
       const tied = Option.orElse(about, () => owner)
-      // What it answers of what yapd sent its thread for him, if anything: the first turn of work yapd started is what he asked for.
-      const answers = Option.isSome(tied) ? yield* asked(tied.value, finished) : Option.none()
-      const opening = finished.opening === true || Option.contains(answers, "start")
+      // What it answers of what yapd sent its thread for him, if anything: the first turn of work yapd started is what he asked for. And
+      // whether that was told by id, which it can't be with no thread found in time.
+      const { answers, told } = Option.isSome(tied) ? yield* asked(tied.value, finished) : { answers: Option.none<"start" | "sent">(), told: false }
+      const opening = Option.contains(answers, "start")
       // What he asked to hear once it finishes leads it, as one: then it's what he asked for, however slight, and never kept quiet or held.
       const reminders = Option.isSome(tied) && options.finishing !== undefined ? yield* options.finishing(tied.value, arrivedAt) : []
       const reminded = reminders.length > 0
@@ -1096,9 +1142,13 @@ export const make = (
         yield* quieten(finished.stop)
         return yield* Effect.logInfo("Skipped update, kept quiet already from T3 Code's word that it finished")
       }
-      // Even a reply to a follow-up, since yapd already said it passed that on.
+      // Even a reply to a follow-up, since yapd already said it passed that on. When it couldn't be told by id whether it's the first turn
+      // of work yapd started, its thread not found in time or what it was sent, or which message began its run, not read, its Stop told
+      // of nothing: T3 Code's word, which can tell, says a turn of work yapd sent in its place, as what he asked for when it is. Otherwise
+      // it's slight, and its Stop stands, so T3 Code's word leaves it to its hook.
       if (priority === "trivial") {
         yield* release(hook)
+        if (finished.stop !== undefined && !told) finished.stop.skipped = "dropped"
         return yield* Effect.logInfo("Skipped trivial update")
       }
 
@@ -1271,7 +1321,7 @@ export const make = (
       Effect.catchAllCause((cause) =>
         Effect.zipRight(
           release(hook),
-          Cause.isInterruptedOnly(cause) ? Effect.void : Effect.logError("Could not prepare update", cause),
+          Cause.isInterruptedOnly(cause) ? Effect.void : Effect.zipRight(unprepared(finished), Effect.logError("Could not prepare update", cause)),
         ),
       ),
       Effect.annotateLogs({ project: finished.project }),
@@ -1454,17 +1504,38 @@ export const make = (
    * said or skipped, or its thread started again or went. It's the thread's
    * own session to yapd, and a reply to it can only go through T3 Code. The
    * turn is its, or its Stop's, as decided with the event lock held, so
-   * neither is said once the other is.
+   * neither is said once the other is. For a turn of work yapd sent, a Stop
+   * of its own whose update is still being got ready may yet tell of
+   * nothing, which leaves it to T3 Code's word after all: what comes of it is
+   * waited for, without the lock, and it's decided again.
    */
-  const finished = (input: Notices.Finished) =>
+  const finished = (input: Notices.Finished): Effect.Effect<void> =>
+    Effect.flatMap(handing(input), (undecided) =>
+      undecided.length === 0 ? Effect.void : Effect.zipRight(Effect.forEach(undecided, Deferred.await, { discard: true }), finished(input)),
+    )
+
+  /** What `finished` does with the event lock held, giving the Stops it's left to whose updates are still being got ready, if any. */
+  const handing = (input: Notices.Finished) =>
     Effect.gen(function* () {
+      const none: ReadonlyArray<Deferred.Deferred<void>> = []
       // Not what notices about the thread go under, so neither takes the other's place.
       const session = `finished:${input.about.machine}:${input.about.id}`
-      if (!(yield* input.current)) return yield* Effect.logInfo("Not saying a turn no hook told of, since its thread started again")
-      // A Stop of its own came, said or skipped, even since T3 Code's word was looked into: what it said, or why it wasn't, stands.
-      if (Notices.hooked(stopsOf(input.run.natives), input.run, input.run.startedAt)) return yield* Effect.logInfo("Left to its hook")
+      if (!(yield* input.current)) return yield* Effect.as(Effect.logInfo("Not saying a turn no hook told of, since its thread started again"), none)
+      // A Stop of its own came, said or skipped, even since T3 Code's word was looked into: what it said, or why it wasn't, stands, once
+      // it's known for a turn of work yapd sent.
+      const hooks = Notices.hooking(stopsOf(input.run.natives), input.run, input.run.startedAt)
+      if (hooks.length > 0) {
+        const undecided = Notices.sent(input.run)
+          ? yield* Effect.filter(
+              hooks.flatMap((stop) => Option.toArray(Option.fromNullable(deciding.get(stop)))),
+              (decided) => Effect.negate(Deferred.isDone(decided)),
+            )
+          : none
+        if (undecided.length > 0) return undecided
+        return yield* Effect.as(Effect.logInfo("Left to its hook"), none)
+      }
       // Heard of twice, as after a reconnect, it's said the once, and the one on its way isn't put aside for it.
-      if (fallbacks.has(input.key)) return
+      if (fallbacks.has(input.key)) return none
       const at = yield* Clock.currentTimeMillis
       for (const [key, kept] of fallbacks) if (at - kept.at > forgotten) fallbacks.delete(key)
       const fallback: Fallback = {
@@ -1487,13 +1558,6 @@ export const make = (
           sentAt <= input.at &&
           input.run.natives.includes(current.update.thread.session),
       )
-      // The first turn of work yapd started, by the message it started with, is what he asked for, however slight.
-      const opening =
-        options.sent !== undefined &&
-        Option.isSome(input.run.userMessageId) &&
-        (yield* options.sent(input.about, input.at - lastDay)).some(
-          ({ kind, messageId }) => kind === "start" && messageId === Option.getOrUndefined(input.run.userMessageId),
-        )
       forsake(session)
       fallbacks.set(input.key, fallback)
       // A newer one for the thread takes the place of one waiting to be said, and a reply to that one is held back.
@@ -1527,11 +1591,13 @@ export const make = (
           known: input.about,
           fallback,
           answering: input.answering === true || followedUp,
-          opening,
+          // The message its run began with, which alone tells the first turn of work yapd started, by the message it started with.
+          began: input.run.userMessageId,
           // Its run's prompt and start, so a message yapd sent the thread for him, steered into it or begun in its words, is told as a hook's is.
           prompted: { text: Option.getOrUndefined(input.turn.prompt), at: input.run.startedAt },
         }),
       )
+      return none
     }).pipe(events.withPermits(1))
 
   /**
@@ -1547,8 +1613,10 @@ export const make = (
     }).pipe(events.withPermits(1))
 
   /** Returns the ticket of the session's Stop hook when it waits for a reply. */
-  const receive = (agent: Agent, payload: Payload, origin: Origin, wait: boolean) =>
-    Effect.gen(function* () {
+  const receive = (agent: Agent, payload: Payload, origin: Origin, wait: boolean) => {
+    /** A Stop's, until its update is being got ready, which then says what came of it: otherwise nothing will, so it's known at once. */
+    let undecided: Deferred.Deferred<void> | undefined
+    return Effect.gen(function* () {
       const session = key(agent, payload.session_id)
       const arrivedAt = yield* Clock.currentTimeMillis
       // Nothing heard of the session since yapd started, a Stop's turn began before, so what it answers can't be told.
@@ -1569,6 +1637,9 @@ export const make = (
         }
         case "Stop": {
           const stop: Notices.Stop = { at: arrivedAt, message: payload.last_assistant_message?.trim() ?? "" }
+          const decided = yield* Deferred.make<void>()
+          deciding.set(stop, decided)
+          undecided = decided
           // Every one, even one that's never said, so T3 Code's word that its thread finished leaves it to the hook.
           for (const [other, kept] of stops) {
             const recent = kept.filter(({ at }) => arrivedAt - at <= forgotten)
@@ -1620,35 +1691,42 @@ export const make = (
             yield* passedThrough(arrivedAt, thread, project, through, session)
             return hook
           }
-          yield* FiberMap.run(
-            preparing,
+          const summed = prepare({
             session,
-            prepare({
-              session,
-              project,
-              turn,
-              thread,
-              arrivedAt,
-              generation: currentGeneration,
-              hook: summaryHook,
-              hooked: hook !== undefined,
-              needsYou,
-              turns,
-              outside: scratched(payload.cwd, origin),
-              about: linking(payload.session_id, payload.cwd, origin),
-              owner: owning(payload.session_id, payload.cwd, origin),
-              answering: followedUp,
-              ...(prompt === undefined ? {} : { prompted: prompt }),
-              ...(through === undefined ? {} : { over: through }),
-              ...(replaced === undefined ? {} : { replaced }),
-              stop,
-              ...(prompt === undefined && first ? { unprompted: true } : {}),
+            project,
+            turn,
+            thread,
+            arrivedAt,
+            generation: currentGeneration,
+            hook: summaryHook,
+            hooked: hook !== undefined,
+            needsYou,
+            turns,
+            outside: scratched(payload.cwd, origin),
+            about: linking(payload.session_id, payload.cwd, origin),
+            owner: owning(payload.session_id, payload.cwd, origin),
+            answering: followedUp,
+            ...(prompt === undefined ? {} : { prompted: prompt }),
+            ...(through === undefined ? {} : { over: through }),
+            ...(replaced === undefined ? {} : { replaced }),
+            stop,
+            ...(prompt === undefined && first ? { unprompted: true } : {}),
+          })
+          // What came of it is known once that's done, however it ends, even stopped before it began.
+          yield* Effect.uninterruptible(
+            Effect.flatMap(FiberMap.run(preparing, session, summed), (fiber) => {
+              undecided = undefined
+              return Effect.forkIn(Effect.interruptible(Effect.zipRight(Fiber.await(fiber), Deferred.succeed(decided, undefined))), lifetime)
             }),
           )
           return hook
         }
       }
-    }).pipe(events.withPermits(1))
+    }).pipe(
+      Effect.ensuring(Effect.suspend(() => (undecided === undefined ? Effect.void : Deferred.succeed(undecided, undefined)))),
+      events.withPermits(1),
+    )
+  }
 
   /** The reply waits outside the lock, so other sessions' events keep coming in. */
   const handle: Handle = (agent, payload, origin, wait) =>
@@ -2332,8 +2410,21 @@ export const make = (
     }),
     /** Each time something said over an update is taken in, which takes the place of whatever yapd asked before. */
     replies: Stream.fromPubSub(replied),
-    /** The Stop hooks of these sessions in the last hour, when they came and what they said last, oldest first, by the agent's own ids for them, whether their updates were said or not. */
-    stopped: (sessions: ReadonlyArray<string>) => Effect.sync((): ReadonlyArray<Notices.Stop> => stopsOf(sessions)),
+    /**
+     * The Stop hooks of these sessions in the last hour, when they came and
+     * what they said last, oldest first, by the agent's own ids for them,
+     * whether their updates were said or not, once what came of each is
+     * known, so one that told of nothing says so.
+     */
+    stopped: (sessions: ReadonlyArray<string>) =>
+      Effect.suspend(() =>
+        Effect.zipRight(
+          Effect.forEach(stopsOf(sessions), (stop) => Option.match(Option.fromNullable(deciding.get(stop)), { onNone: () => Effect.void, onSome: Deferred.await }), {
+            discard: true,
+          }),
+          Effect.sync((): ReadonlyArray<Notices.Stop> => stopsOf(sessions)),
+        ),
+      ),
     /** A failure left to these Stops, said after all should what they told of be kept quiet, as his muting the thread does. */
     unheard: unheardFailure,
     finished,

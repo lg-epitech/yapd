@@ -1,4 +1,4 @@
-import { Cause, Clock, type Duration, Effect, FiberSet, Option, Schema, Stream } from "effect"
+import { Cause, Clock, type Duration, Effect, FiberSet, Option, Schedule, Schema, Stream } from "effect"
 import type * as Assistant from "./Assistant.ts"
 import * as Brain from "./Brain.ts"
 import { Condenser, english } from "./Condenser.ts"
@@ -6,6 +6,7 @@ import * as Hands from "./Hands.ts"
 import type { Notice } from "./Inbox.ts"
 import type { Entry, Journal } from "./Journal.ts"
 import type * as Modes from "./Modes.ts"
+import * as Payload from "./Payload.ts"
 import { addressed, type Lines, Persona } from "./Persona.ts"
 import * as Questions from "./Questions.ts"
 import * as Reminders from "./Reminders.ts"
@@ -89,6 +90,10 @@ const lasting = 5 * 60 * 60_000
 const longest = 7 * 24 * 60 * 60_000
 /** How far back work yapd started is looked for, for a first turn that ended while yapd couldn't hear it. */
 const lately = 24 * 60 * 60_000
+/** How often such a first turn that may still be to keep is looked into again, until what it tells is kept. */
+const again = "1 minute"
+/** How a first turn of that kind that couldn't be read is read again at once, as when T3 Code fails a moment: its run's key keeps it said once. */
+const rereading = { times: 3, schedule: Schedule.exponential("2 seconds") }
 
 /** When a limit said before resets, as it's kept with it, when that was known. */
 const Limit = Schema.Struct({ resets: Schema.String })
@@ -150,8 +155,15 @@ export const reason = (failure: Option.Option<{ readonly class: string; readonly
 export interface Stop {
   readonly at: number
   readonly message: string
-  /** Not said, as a turn he was likely watching, which a turn of work yapd sent never is: T3 Code's word says that one. */
-  skipped?: "quick"
+  /**
+   * Why it told of nothing, when it didn't: "quick", not said as a turn he
+   * was likely watching, which a turn of work yapd sent never is; "dropped",
+   * nothing of it said or kept, as a slight turn its hook couldn't tell by
+   * id was the first of work yapd started, its thread not found in time or
+   * what tells that not read, or one that couldn't be got ready. T3 Code's
+   * word says a turn of work yapd sent in its place.
+   */
+  skipped?: "quick" | "dropped"
 }
 
 /** Words as they're compared: case, punctuation and spacing aside. */
@@ -188,8 +200,8 @@ export const whose = (stop: Stop, run: Pick<T3Actions.Ran, "final" | "others">) 
  * which takes a moment to get going, and when none had come by the time this
  * one started, the first since, while it could still be that one's, is taken
  * for it. Any other is still left to as if it were this one's. Never one
- * skipped as quick, for a run a message of yapd's started: that never told
- * of what he asked for.
+ * that told of nothing, skipped as quick or dropped, for a run a message of
+ * yapd's started: that never told him what he asked for.
  */
 export const hooked = (stops: ReadonlyArray<Stop>, run: Pick<T3Actions.Ran, "status" | "final" | "others" | "previous" | "userMessageId">, startedAt: number) =>
   hooking(stops, run, startedAt).length > 0
@@ -205,7 +217,7 @@ export const hooking = (stops: ReadonlyArray<Stop>, run: Pick<T3Actions.Ran, "st
         )
   const asked = sent(run)
   return stops.filter((stop) => {
-    if (stop.message.trim() === "" || stop.at < since || (asked && stop.skipped === "quick")) return false
+    if (stop.message.trim() === "" || stop.at < since || (asked && stop.skipped !== undefined)) return false
     const owner = whose(stop, run)
     return owner === "own" || (owner === "unknown" && !Option.exists(theirs, (taken) => taken === stop))
   })
@@ -462,7 +474,8 @@ interface Along {
  * what failed and what finished with no hook to tell of it, unless yapd was
  * turned off since, as `tell` queues it. `stopped` is the Stop hooks
  * sessions had, oldest first, but those a turn said in their hook's place
- * took as its run's, `finished` says a finished turn as a hook's update, and
+ * took as its run's, once what comes of each is known, so one that told of
+ * nothing is known for it, `finished` says a finished turn as a hook's update, and
  * `mention` makes "it" the thread a notice is about as it starts being said.
  */
 export const make = (options: {
@@ -515,6 +528,34 @@ export const make = (options: {
     /** How many times each thread started again or went, so a turn of it looked into since knows it's no longer its latest. */
     const generations = new Map<string, number>()
     const generation = (ref: Threads.Ref) => generations.get(`${ref.machine}:${ref.id}`) ?? 0
+
+    /**
+     * Whether something was kept since `since` of a thread's turns on its
+     * machine: an update under T3 Code's id for the thread, or under the
+     * session of one of its agent's conversations, `natives`, as their hooks
+     * report them, which is where a hook's is kept when it couldn't be tied
+     * to the thread, as rig's often can't.
+     */
+    const keptSince = (ref: Threads.Ref, natives: ReadonlyArray<string>, since: number) =>
+      Effect.map(
+        Effect.forEach([ref.id, ...natives.flatMap((native) => Payload.Agent.literals.map((agent) => Payload.key(agent, native)))], (thread) =>
+          journal.byThread(ref.machine, thread, 1, ["update"]),
+        ),
+        (found) => found.flat().some(({ at }) => at >= since),
+      )
+
+    /**
+     * Whether a run is the first turn of work yapd started lately, begun with
+     * the message the ledger's `start` row has, and what it told was kept since.
+     */
+    const firstKept = (ref: Threads.Ref, run: Pick<T3Actions.Ran, "userMessageId" | "natives">) =>
+      Effect.gen(function* () {
+        const { started } = options
+        if (started === undefined || !sent(run)) return false
+        const starts = yield* started(ref.machine, (yield* Clock.currentTimeMillis) - lately)
+        const start = starts.find(({ thread, messageId }) => thread === ref.id && messageId !== null && Option.contains(run.userMessageId, messageId))
+        return start !== undefined && (yield* keptSince(ref, run.natives, start.at))
+      })
 
     /** What goes wrong looking into a change is only logged: nothing else waits on it. */
     const trouble = <A, E>(looking: Effect.Effect<A, E>) =>
@@ -802,18 +843,33 @@ export const make = (options: {
      * or hit a limit, or, when no hook told of a turn that went well, what it
      * said, as a hook's update would be, while it's still the thread's
      * `current` run. Nothing for a run he stopped. What he set on its
-     * finishing is what he set by when it `ended`.
+     * finishing is what he set by when it `ended`. Should something of it
+     * still be to keep, or it couldn't be read, the first turn of work yapd
+     * started in the thread is kept looking into.
      */
     const ran = (ref: Threads.Ref, runId: string, turns: number, at: number, current: Effect.Effect<boolean>, ended = at) =>
+      looking(ref, runId, turns, at, current, ended).pipe(
+        Effect.catchAll((error) => Effect.as(Effect.logWarning("Could not read how a run went", error), true)),
+        Effect.flatMap((left) => (left ? opening(ref) : Effect.void)),
+      )
+
+    /**
+     * What `ran` does, failing when the run can't be read, and telling
+     * whether something of it may still be to keep: what it said, handed on
+     * to be said, or a run that couldn't be seen. Not one left to its hook,
+     * as the first turn of work yapd started whose hook's update was kept is,
+     * failed, stopped, started again since, or that said nothing.
+     */
+    const looking = (ref: Threads.Ref, runId: string, turns: number, at: number, current: Effect.Effect<boolean>, ended = at) =>
       Effect.gen(function* () {
         yield* Effect.sleep(failing)
         const actions = threads.actions(ref.machine)
-        if (Option.isNone(actions)) return
+        if (Option.isNone(actions)) return true
         const run = yield* actions.value.ran(ref.id, runId)
-        if (Option.isNone(run)) return
+        if (Option.isNone(run)) return true
         const { status, natives } = run.value
         const startedAt = Option.getOrElse(run.value.startedAt, () => at)
-        if (!["failed", "completed", "waiting"].includes(status)) return
+        if (!["failed", "completed", "waiting"].includes(status)) return false
         if (status !== "failed") yield* Effect.sleep(finishing)
         /** That it failed, said of the thread as it's shown now. */
         const failure = Effect.gen(function* () {
@@ -829,15 +885,24 @@ export const make = (options: {
           if (status === "failed" && options.unheard !== undefined) {
             yield* options.unheard(hooks, failure.pipe(Effect.catchAll((error) => Effect.logWarning("Could not read how a run went", error))))
           }
-          // What he set on its finishing leads its hook's update, unless that was skipped as quick: then it's said on its own now.
+          // What he set on its finishing leads its hook's update, unless that told of nothing, skipped as quick or dropped: then it's said
+          // on its own now.
           const why = status === "failed" ? yield* Effect.map(threads.find(ref), Option.match({ onNone: () => "it ran into an error.", onSome: (thread) => stopped(run.value, thread) })) : undefined
-          yield* hooks.every(({ skipped }) => skipped === "quick") ? fired(ref, "finished", ended, why) : afterwards(ref, ended, why)
-          return yield* Effect.logInfo("Left to its hook")
+          yield* hooks.every(({ skipped }) => skipped !== undefined) ? fired(ref, "finished", ended, why) : afterwards(ref, ended, why)
+          return yield* Effect.as(Effect.logInfo("Left to its hook"), false)
         }
-        if (status === "failed") return yield* failure
+        if (status === "failed") return yield* Effect.as(failure, false)
+        // Left to its hook too, the first turn of work yapd started whose hook's update was kept, though its Stop came before yapd
+        // restarted, or so long ago it's forgotten: what he set on its finishing led that update, or is said on its own once it had time to.
+        if (yield* firstKept(ref, run.value)) {
+          yield* afterwards(ref, ended)
+          return yield* Effect.as(Effect.logInfo("Left to its hook, whose update was kept"), false)
+        }
         const thread = yield* threads.find(ref)
+        // Archived, he's done with it: nothing of it is said, or ever to keep.
+        if (Option.exists(thread, ({ archivedAt }) => archivedAt !== null)) return false
         const shown = yield* listed(ref)
-        if (Option.isNone(thread) || Option.isNone(shown)) return
+        if (Option.isNone(thread) || Option.isNone(shown)) return true
         // Outside his projects, it isn't named by a project at all.
         const project = shown.value.scratch ? "" : shown.value.project
         // Started again since, what it said then is no longer its latest, as a hook's update isn't once the next prompt comes, even when
@@ -845,13 +910,13 @@ export const make = (options: {
         const latest = thread.value.latestRunId === null || thread.value.latestRunId === runId
         if (!latest || !(yield* current)) {
           yield* fired(ref, "finished", ended)
-          return yield* Effect.logInfo("Not saying a turn no hook told of, since it started again")
+          return yield* Effect.as(Effect.logInfo("Not saying a turn no hook told of, since it started again"), false)
         }
         if (quick(run.value, at, options.shortest)) {
           yield* fired(ref, "finished", ended)
-          return yield* Effect.logInfo("Skipped quick turn, with no hook")
+          return yield* Effect.as(Effect.logInfo("Skipped quick turn, with no hook"), false)
         }
-        if (run.value.said === "") return yield* fired(ref, "finished", ended)
+        if (run.value.said === "") return yield* Effect.as(fired(ref, "finished", ended), false)
         yield* options.finished({
           about: ref,
           project,
@@ -865,7 +930,8 @@ export const make = (options: {
           answering: sent(run.value),
         })
         yield* afterwards(ref, ended)
-      }).pipe(Effect.catchAll((error) => Effect.logWarning("Could not read how a run went", error)))
+        return true
+      })
 
     /**
      * Whether a limit of this provider other than the one under `limit`,
@@ -1041,6 +1107,9 @@ export const make = (options: {
         }
         // Gone, what he set on it is dropped, and he's told so once.
         if (change._tag === "Removed") yield* FiberSet.run(running, dropping({ machine, id: change.thread.id }).pipe(trouble))
+        // A new thread of work yapd started has its first turn kept looking into from the start, even one that ended while T3 Code's word
+        // couldn't be heard, which then tells only that the thread is new.
+        if (change._tag === "Created") yield* FiberSet.run(running, opening({ machine, id: change.thread.id }).pipe(trouble))
         const news = verdict(change)
         if (Option.isNone(news)) return
         // Asking him something, what he set on that is said first, as he asked, an approval too, and kept unheard while yapd is off.
@@ -1089,41 +1158,146 @@ export const make = (options: {
         }
       })
 
-    /** The machines whose T3 Code caught up since yapd started: from then on, what it says tells of every turn that ends there. */
+    /** The machines whose T3 Code caught up since yapd started, with every first turn of work yapd started there that ended unheard dealt with. */
     const caughtUp = new Set<string>()
+    /** The machines those turns are being looked into on now, so catching up again meanwhile doesn't look twice. */
+    const recovering = new Set<string>()
+    /** The threads, by machine, whose first turn of work yapd started is being kept looking into, so it's looked into once at a time. */
+    const keptOn = new Set<string>()
+
+    /** Work yapd started on a machine, as the ledger's `start` row has it. */
+    type Start = { readonly at: number; readonly thread: string; readonly messageId: string | null }
+
+    /**
+     * Whether the first turn of work yapd started that the ledger's `start`
+     * row is of may still be to keep, looking into it as a turn no hook told
+     * of when it is: once it's over, while nothing of its turns was kept
+     * since it started, as `keptSince` tells, and only the turn its message
+     * began. Still at it, it may be too: it's heard of as it ends, but that
+     * can come to nothing, as when its hook drops it and T3 Code fails a
+     * moment as it's read, and its run's key keeps it said once. Not once
+     * its thread is gone or archived; but it may be while the machine's
+     * threads can't be seen. Failing when it can't be read.
+     */
+    const unkept = (
+      machine: string,
+      actions: T3Actions.Actions,
+      start: Start,
+      turns: number,
+      now: number,
+    ) =>
+      Effect.gen(function* () {
+        if (Option.isSome(yield* threads.unseen(machine))) return true
+        const ref = { machine, id: start.thread }
+        const thread = yield* threads.find(ref)
+        if (Option.isNone(thread) || start.messageId === null || thread.value.archivedAt !== null) return false
+        const { latestRunId, latestRunCompletedAt } = thread.value
+        const busy = T3Live.busy(thread.value)
+        const over = latestRunCompletedAt === null ? Number.NaN : Date.parse(latestRunCompletedAt)
+        if (latestRunId === null || (!busy && !(over > start.at))) return false
+        const run = yield* actions.ran(ref.id, latestRunId)
+        if (Option.isNone(run) || !Option.contains(run.value.userMessageId, start.messageId)) return false
+        if (yield* keptSince(ref, run.value.natives, start.at)) return false
+        // Looked into once it's over, should what's heard of it as it ends come to nothing.
+        if (busy) return true
+        yield* Effect.logInfo("Looking into the first turn of work I started, which ended while I couldn't hear it").pipe(Effect.annotateLogs({ thread: thread.value.title }))
+        const since = generation(ref)
+        const current = Effect.sync(() => generation(ref) === since)
+        return yield* looking(ref, latestRunId, turns, now, current, over).pipe(Effect.annotateLogs({ thread: thread.value.title }))
+      })
+
+    /**
+     * Looks into the first turns of the work yapd started that `starts` are
+     * of while each may still be to keep, as `unkept` tells, again every so
+     * often, until what each tells is kept in the journal or there's nothing
+     * of it to keep: read again at once a few times when it can't be. Not
+     * one already being looked into so; and each is said once, under its
+     * run's key, however often it's looked into.
+     */
+    const keeping = (machine: string, actions: T3Actions.Actions, starts: ReadonlyArray<Start>) =>
+      Effect.suspend(() => {
+        const name = (start: Start) => `${machine}:${start.thread}`
+        const mine = starts.filter((start) => !keptOn.has(name(start)))
+        /** The threads this still holds, and no other may look into meanwhile. */
+        const held = new Set(mine.map(name))
+        for (const thread of held) keptOn.add(thread)
+        /** Lets go of those it holds that aren't of `left`, each once, so it never lets go of one another has taken since. */
+        const release = (left: ReadonlyArray<Start>) => {
+          const still = new Set(left.map(name))
+          for (const thread of held) {
+            if (still.has(thread)) continue
+            held.delete(thread)
+            keptOn.delete(thread)
+          }
+        }
+        /** Those of `starts` that may still be to keep, letting go of the rest. */
+        const look = (starts: ReadonlyArray<Start>) =>
+          Effect.gen(function* () {
+            const now = yield* Clock.currentTimeMillis
+            const { turns } = yield* options.power
+            const left = yield* Effect.forEach(
+              starts,
+              (start) =>
+                now - start.at > lately
+                  ? Effect.succeed(false)
+                  : unkept(machine, actions, start, turns, now).pipe(
+                      Effect.retry(rereading),
+                      Effect.catchAll((error) => Effect.as(Effect.logWarning("Could not look into the first turn of work I started", error), true)),
+                    ),
+              { concurrency: "unbounded" },
+            )
+            const kept = starts.filter((_, index) => left[index] === true)
+            release(kept)
+            return kept
+          })
+        return Effect.gen(function* () {
+          let left = yield* look(mine)
+          while (left.length > 0) {
+            yield* Effect.sleep(again)
+            left = yield* look(left)
+          }
+        }).pipe(Effect.ensuring(Effect.sync(() => release([]))))
+      })
+
+    /**
+     * A thread was heard of as new, or a turn of it as it ended, which may
+     * still be to keep or couldn't be read: when the thread is of work yapd
+     * started lately, its first turn is kept looking into a while later, as
+     * one that ended while yapd restarted is, since what's handed on to be
+     * said can come to nothing, and T3 Code can fail a moment as it's read.
+     */
+    const opening = (ref: Threads.Ref) =>
+      Effect.gen(function* () {
+        const actions = threads.actions(ref.machine)
+        const { started } = options
+        if (started === undefined || Option.isNone(actions)) return
+        const starts = (yield* started(ref.machine, (yield* Clock.currentTimeMillis) - lately)).filter(({ thread }) => thread === ref.id)
+        if (starts.length === 0) return
+        yield* Effect.sleep(again)
+        yield* keeping(ref.machine, actions.value, starts)
+      })
+
     /**
      * The first turns of work yapd started on a machine lately that ended
      * while yapd couldn't hear they did, as while it restarted: T3 Code's
      * word came before its threads were followed, and its hook found nobody.
      * Each is looked into as a turn no hook told of, whether yapd is on or
-     * not, as off keeps what it would say, and said once, under its run's
-     * key. Only while nothing of its thread was kept since it started, and
-     * only the turn its message began, once that's over. Looked for the
-     * first time the machine's T3 Code catches up, until that's done.
+     * not, as off keeps what it would say, and kept looking into. Looked for
+     * the first time the machine's T3 Code catches up, in the background,
+     * and the next time it does should that stop short.
      */
     const opened = (machine: string) =>
-      Effect.gen(function* () {
+      Effect.suspend(() => {
         const actions = threads.actions(machine)
-        if (options.started === undefined || Option.isNone(actions) || caughtUp.has(machine)) return
-        const now = yield* Clock.currentTimeMillis
-        const { turns } = yield* options.power
-        for (const { at, thread: id, messageId } of yield* options.started(machine, now - lately)) {
-          const ref = { machine, id }
-          const thread = yield* threads.find(ref)
-          if (Option.isNone(thread) || messageId === null) continue
-          const { latestRunId, latestRunCompletedAt } = thread.value
-          const over = latestRunCompletedAt === null ? Number.NaN : Date.parse(latestRunCompletedAt)
-          if (latestRunId === null || T3Live.busy(thread.value) || !(over > at)) continue
-          if ((yield* journal.byThread(machine, id, 1, ["update"])).length > 0) continue
-          const run = yield* actions.value.ran(id, latestRunId)
-          if (!Option.exists(run, ({ userMessageId }) => Option.contains(userMessageId, messageId))) continue
-          yield* Effect.logInfo("Looking into the first turn of work I started, which ended while I couldn't hear it").pipe(Effect.annotateLogs({ thread: thread.value.title }))
-          const since = generation(ref)
-          const current = Effect.sync(() => generation(ref) === since)
-          yield* FiberSet.run(running, ran(ref, latestRunId, turns, now, current, over).pipe(trouble, Effect.annotateLogs({ thread: thread.value.title })))
-        }
-        caughtUp.add(machine)
-      }).pipe(Effect.catchAll((error) => Effect.logWarning("Could not look for the first turns of work I started", error)))
+        const { started } = options
+        if (started === undefined || Option.isNone(actions) || caughtUp.has(machine) || recovering.has(machine)) return Effect.void
+        recovering.add(machine)
+        const recovered = Effect.gen(function* () {
+          yield* keeping(machine, actions.value, yield* started(machine, (yield* Clock.currentTimeMillis) - lately))
+          caughtUp.add(machine)
+        }).pipe(Effect.ensuring(Effect.sync(() => recovering.delete(machine))), trouble)
+        return Effect.asVoid(FiberSet.run(running, recovered))
+      })
 
     /**
      * What he set on a machine's threads for when one finishes or asks him
