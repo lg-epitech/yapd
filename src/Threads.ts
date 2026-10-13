@@ -249,7 +249,7 @@ export interface Seen {
   readonly started: ReadonlyMap<string, Started>
   /** The latest line yapd said about each thread, by id. */
   readonly said: ReadonlyMap<string, { readonly at: number; readonly said: string }>
-  /** The folder behind its T3 Code's scratch project, once that's known. */
+  /** The folder behind its T3 Code's scratch project, as T3 Code gives it for that project, once that's known. */
   readonly scratch?: string | undefined
 }
 
@@ -277,7 +277,7 @@ export const shortlist = (input: {
   readonly started: ReadonlyMap<string, Started>
   /** The latest line yapd said about each thread, by id. */
   readonly said: ReadonlyMap<string, { readonly at: number; readonly said: string }>
-  /** The folder behind this machine's scratch project, once that's known. */
+  /** The folder behind this machine's scratch project, as T3 Code gives it for that project, once that's known. */
   readonly scratch?: string | undefined
   readonly others?: ReadonlyArray<Seen>
   readonly now: number
@@ -754,6 +754,25 @@ export const make = (options: {
         const known = scratches.get(link.machine)
         return known !== undefined ? Effect.succeedSome(known) : Effect.as(seek(link), Option.none<string>())
       })
+    /**
+     * The folder behind a machine's scratch project as its T3 Code gives it
+     * for that project, once that's known: the two are told apart by where
+     * each really is, as T3CodeLauncher tells them, since T3 Code may give
+     * them differently, like through a link. Each folder's looked at once.
+     */
+    const scratchIn = (link: Link, view: T3Live.View) =>
+      Effect.flatMap(
+        scratchOf(link),
+        Option.match({
+          onNone: () => Effect.succeed<string | undefined>(undefined),
+          onSome: (root) =>
+            Effect.gen(function* () {
+              const real = yield* resolved(link, root)
+              const found = yield* Effect.findFirst(view.projects.values(), ({ workspaceRoot }) => Effect.map(resolved(link, workspaceRoot), (folder) => folder === real))
+              return Option.match(found, { onNone: () => root, onSome: ({ workspaceRoot }) => workspaceRoot })
+            }),
+        }),
+      )
 
     /** When usage was last asked for, so a T3 Code that doesn't answer isn't asked on every request. */
     let tried = Number.NEGATIVE_INFINITY
@@ -787,7 +806,7 @@ export const make = (options: {
           }
           if (seen.length === 0) return { threads: [], away }
           const [started, entries] = [yield* startedWork, yield* journal.since(now - days(7), { most: 500 })]
-          const roots = new Map(yield* Effect.forEach(seen, ({ link }) => Effect.map(scratchOf(link), (root) => [link.machine, Option.getOrUndefined(root)] as const)))
+          const roots = new Map(yield* Effect.forEach(seen, ({ link, view }) => Effect.map(scratchIn(link, view), (root) => [link.machine, root] as const)))
           const noted = (name: string) => ({ started: started.get(name) ?? new Map<string, Started>(), said: latest(entries, name), scratch: roots.get(name) })
           const others = seen.filter(({ link }) => !link.here).map(({ link, view }): Seen => ({ machine: link.machine, here: false, view, ...noted(link.machine) }))
           // When this machine's can't be seen, only the others' are ranked.

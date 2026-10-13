@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test"
 import { Clock, Effect, Fiber, Option, Schema, Stream, TestClock, TestContext } from "effect"
+import { mkdir, mkdtemp, realpath, rm, symlink } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import * as Brain from "./Brain.ts"
 import * as Journal from "./Journal.ts"
 import * as Persona from "./Persona.ts"
@@ -450,6 +453,37 @@ describe("Threads on several machines", () => {
       return { first, later: yield* projects }
     }).pipe(Effect.scoped, Effect.provide(TestContext.TestContext), Effect.runPromise)
     expect(seen).toEqual({ first: ["Rosie: scratch", "rig: No project"], later: ["Rosie: scratch", "rig: scratch"] })
+  })
+
+  test("a scratch thread is said as scratch work when T3 Code gives where its scratch project is through a link to its project's folder", async () => {
+    const dir = await realpath(await mkdtemp(join(tmpdir(), "yapd-threads-")))
+    try {
+      await mkdir(join(dir, "t3", "scratch"), { recursive: true })
+      await symlink(join(dir, "t3"), join(dir, "linked"))
+      const view: T3Live.View = {
+        projects: new Map([["s", { id: "s", title: "No project", workspaceRoot: join(dir, "t3", "scratch") }]]),
+        threads: new Map([["glucose", thread("glucose", "Glucose sensors", "2026-10-08T21:00:00.000Z", { projectId: "s" })]]),
+        sequence: 1,
+        synced: true,
+      }
+      const seen = await Effect.gen(function* () {
+        yield* TestClock.setTime(now)
+        const store = yield* Store.make(":memory:")
+        const threads = yield* Threads.make({
+          machine: "Rosie",
+          live: live(Option.some(view)),
+          actions: Option.some({ scratchRoot: Effect.succeedSome(join(dir, "linked", "scratch")) } as unknown as T3Actions.Actions),
+          others: [],
+          journal: Journal.fromStore(store),
+          store,
+        })
+        yield* threads.warm("Rosie")
+        return (yield* threads.desk(Option.none(), [], 5)).threads.map(({ project, scratch }) => ({ project, scratch }))
+      }).pipe(Effect.scoped, Effect.provide(TestContext.TestContext), Effect.runPromise)
+      expect(seen).toEqual([{ project: "scratch", scratch: true }])
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
   })
 
   test("names this machine when its T3 Code isn't running while rig's threads can be seen, since rig's are his threads too", async () => {
