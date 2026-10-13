@@ -1882,18 +1882,33 @@ const nameSaid = (name: string, utterance: Pick<Assistant.Utterance, "heard" | "
   asSaid(name, utterance.whole ?? utterance.heard) && (utterance.whole === undefined || asSaid(name, utterance.heard))
 
 /**
+ * Whether the model wrote a routine's steps out as a message, as words
+ * compare, for what he said without its whole name, which they'd go for as
+ * if he had. Never words yapd holds, checked as they were first asked for:
+ * those of the question open, like "Again?" about them, nor those of an offer
+ * he set, which comes due with nothing heard.
+ */
+const unnamed = (choice: Decision, situation: Pick<Situation, "memories" | "utterance" | "open">) => {
+  const words = Ledger.digest(choice.text)
+  if (words === "" || situation.utterance.heard === "" || Option.exists(situation.open, ({ decision }) => Ledger.digest(decision.text) === words)) return false
+  return remembered(situation).some(({ kind, name, text }) => kind === "routine" && name !== undefined && Ledger.digest(text) === words && !nameSaid(name, situation.utterance))
+}
+
+/**
  * A message, or an offer, whose words the model gave as a routine's handle,
  * with the routine's steps in their place, exactly as they're kept, never as
  * the model would write them; none for a handle that's no routine, or for one
- * whose name he didn't say. Anything else is as it was.
+ * whose name he didn't say, nor for its steps written out without it.
+ * Anything else is as it was.
  */
-const routining = (choice: Decision, situation: Pick<Situation, "memories" | "utterance">): Option.Option<Decision> =>
-  (choice.act !== "send" && choice.act !== "offer") || !routineHandle(choice.text)
-    ? Option.some(choice)
-    : Option.map(
-        Option.filter(rememberedBy(choice.text, situation), ({ kind, name }) => kind === "routine" && name !== undefined && nameSaid(name, situation.utterance)),
-        ({ text }) => ({ ...choice, text }),
-      )
+const routining = (choice: Decision, situation: Pick<Situation, "memories" | "utterance" | "open">): Option.Option<Decision> => {
+  if (choice.act !== "send" && choice.act !== "offer") return Option.some(choice)
+  if (!routineHandle(choice.text)) return unnamed(choice, situation) ? Option.none() : Option.some(choice)
+  return Option.map(
+    Option.filter(rememberedBy(choice.text, situation), ({ kind, name }) => kind === "routine" && name !== undefined && nameSaid(name, situation.utterance)),
+    ({ text }) => ({ ...choice, text }),
+  )
+}
 
 /**
  * A decision with a routine's handle as its words read as the steps it stands
@@ -1901,7 +1916,8 @@ const routining = (choice: Decision, situation: Pick<Situation, "memories" | "ut
  * again to "Again?" about those steps; one that's no routine, or whose name he
  * didn't say, is as it was, which checking it turns down.
  */
-export const resolved = (choice: Decision, situation: Pick<Situation, "memories" | "utterance">): Decision => Option.getOrElse(routining(choice, situation), () => choice)
+export const resolved = (choice: Decision, situation: Pick<Situation, "memories" | "utterance" | "open">): Decision =>
+  Option.getOrElse(routining(choice, situation), () => choice)
 
 /** The most words, as words compare, a routine kept by voice is called. */
 const namedIn = 3

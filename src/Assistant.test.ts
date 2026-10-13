@@ -11947,6 +11947,38 @@ describe("Assistant memories", () => {
     expect(result).toEqual([{ threadId: tezos.id, text: "Ship." }])
   })
 
+  test("a routine's steps the model writes out as a message go only when he says its name, or says yes to them asked again", async () => {
+    const steps = "Merge the PR, then deploy."
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(
+          (situation) => {
+            const { heard } = situation.utterance
+            if (heard === "Yes.") return undefined
+            const act = heard.startsWith("Offer") ? "offer" : "send"
+            return Brain.decision({ act, target: handle(situation, tezos), text: steps, how: act === "offer" ? "finished" : "now" })
+          },
+          undefined,
+          { memories: true, routines: [{ name: "ship", steps }] },
+        )
+        const sent = () => made.dispatched.filter(({ type }) => type === "message.dispatch").map(({ text }) => text)
+        yield* made.dictate("Wrap the Tezos one up.")
+        const unnamed = { said: made.spoken().at(-1), sent: sent() }
+        yield* made.dictate("Offer to wrap the Tezos one up once it's done.")
+        const offered = made.spoken().at(-1)
+        yield* made.dictate("Ship the Tezos one.")
+        yield* made.dictate("Ship the Tezos one.")
+        const asked = made.spoken().at(-1)
+        yield* made.answer("Yes.")
+        return { unnamed, offered, asked, sent: sent() }
+      }),
+    )
+    expect(result.unnamed).toEqual({ said: "I couldn't tell which one you meant, sir.", sent: [] })
+    expect(result.offered).toBe("I couldn't tell which one you meant, sir.")
+    expect(result.asked).toBe("I sent that a minute ago, sir. Again?")
+    expect(result.sent).toEqual([steps, steps])
+  })
+
   test("a secret isn't remembered, nor kept in the journal, whatever else would turn it down", async () => {
     const result = await run(
       Effect.gen(function* () {
