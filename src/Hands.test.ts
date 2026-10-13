@@ -2904,6 +2904,27 @@ describe("Hands", () => {
     )
     expect(restarted).toEqual({ said: "I couldn't confirm it got your go-ahead before, sir, so I won't risk sending it again: it needs T3 Code.", dispatched: ["yapd:u1:0 accept"] })
   })
+
+  test("taking back a snooze of several says each the way it went back, never the first one's way for all of them", () => {
+    // Tuesday morning: the Tezos importer was snoozed till Friday at nine before, the Tezos fees not at all.
+    const tuesday = new Date(2026, 9, 13, 10, 0).getTime()
+    const friday = new Date(2026, 9, 16, 9, 0).toISOString()
+    const importer = { machine: "Rosie", id: "importer" }
+    const fees = { machine: "Rosie", id: "fees" }
+    const back = (to: Threads.Ref, called: string, command: Hands.TidyCommand, outcome: Hands.Went = { _tag: "Done", how: "now", to }): Hands.Tidy => ({ to, called, command, outcome })
+    const said = (each: ReadonlyArray<Hands.Tidy>) => Hands.tidied({ _tag: "Tidied", each, undone: true }, lines, tuesday)
+    expect(said([back(importer, "the Tezos importer", { _tag: "Snooze", until: friday }), back(fees, "the Tezos fees", { _tag: "Unsnooze" })])).toBe(
+      "Snoozed the Tezos importer until Friday at 9:00 AM again, sir. Unsnoozed the Tezos fees.",
+    )
+    expect(said([back(fees, "the Tezos fees", { _tag: "Unsnooze" }), back(importer, "the Tezos importer", { _tag: "Snooze", until: friday })])).toBe(
+      "Unsnoozed the Tezos fees, sir. Snoozed the Tezos importer until Friday at 9:00 AM again.",
+    )
+    // One that didn't go back is said by the way it was to.
+    const refused: Hands.Went = { _tag: "Refused", reason: "It's been archived." }
+    expect(said([back(importer, "the Tezos importer", { _tag: "Snooze", until: friday }), back(fees, "the Tezos fees", { _tag: "Unsnooze" }, refused)])).toBe(
+      "Snoozed the Tezos importer until Friday at 9:00 AM again, sir. I couldn't unsnooze the Tezos fees: it's been archived.",
+    )
+  })
 })
 
 describe("Hands on another machine", () => {

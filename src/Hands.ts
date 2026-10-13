@@ -1982,9 +1982,11 @@ const were = (names: ReadonlyArray<string>) => (names.length === 1 ? "was" : "we
 /**
  * What's said once threads are tidied, or a tidy taken back, naming the
  * thread, and with several, how many went, naming each that didn't and why:
- * what went, never more. A renamed title is said only when it can be read
- * aloud. An archive says what of his it dropped, and taking it back what
- * came back, that what it stopped stays stopped, and what else it put back.
+ * what went, never more, each named by the way it went when they didn't all
+ * go the same way, as taking back a snooze of several can. A renamed title
+ * is said only when it can be read aloud. An archive says what of his it
+ * dropped, and taking it back what came back, that what it stopped stays
+ * stopped, and what else it put back.
  */
 export const tidied = (outcome: Extract<Outcome, { readonly _tag: "Tidied" }>, lines: Lines, now: number) => {
   const sir = addressed(lines)
@@ -1992,7 +1994,7 @@ export const tidied = (outcome: Extract<Outcome, { readonly _tag: "Tidied" }>, l
   const went = each.filter(({ outcome }) => outcome._tag === "Done")
   const first = each[0]
   if (first === undefined) return `There was nothing to tidy${sir}.`
-  const { verb, past } = tidyWords[first.command._tag]
+  const { past } = tidyWords[first.command._tag]
   /** One thread's, done. */
   const one = ({ command, called }: Tidy) => {
     switch (command._tag) {
@@ -2011,15 +2013,32 @@ export const tidied = (outcome: Extract<Outcome, { readonly _tag: "Tidied" }>, l
     if (went.length === each.length) return `${capital(past)} ${each.length === 2 ? "both" : `all ${Brain.count(each.length)}`}${until}${sir}.`
     return `${capital(past)} ${Brain.count(went.length)} of the ${Brain.count(each.length)}${until}${sir}.`
   }
-  // What didn't go, by why, each named; with nothing done, the first of it addresses him.
+  /** What went to a thread, and till when for a snooze: taking back a snooze of several, one snoozed before is snoozed till then again, the rest unsnoozed. */
+  const way = ({ command }: Tidy) => (command._tag === "Snooze" ? `Snooze ${command.until}` : command._tag)
+  const ways = [...new Set(each.map(way))]
+  /** Those done each way, named, him addressed first, when they didn't all go the same way. */
+  const apart = () =>
+    ways.flatMap((key) => {
+      const some = went.filter((tidy) => way(tidy) === key)
+      const [like] = some
+      if (like === undefined) return []
+      const until = like.command._tag === "Snooze" ? ` until ${waking(like.command.until, now)}${undone ? " again" : ""}` : ""
+      return [`${capital(tidyWords[like.command._tag].past)} ${Brain.both(some.map(({ called }) => called))}${until}`]
+    }).map((line, index) => `${line}${index === 0 ? sir : ""}.`)
+  // What didn't go, by how and why, each named; with nothing done, the first of it addresses him.
   const failed = each.filter(({ outcome }) => outcome._tag !== "Done")
-  const reasons = [...new Set(failed.map(({ outcome }) => (outcome._tag === "Unknown" ? "" : "reason" in outcome ? outcome.reason : "")))]
-  const whys = reasons.map((reason, index) => {
-    const names = failed.filter(({ outcome }) => (outcome._tag === "Unknown" ? "" : "reason" in outcome ? outcome.reason : "") === reason).map(({ called }) => called)
-    const address = went.length === 0 && index === 0 ? sir : ""
-    return reason === "" ? `I couldn't confirm ${Brain.both(names)} ${were(names)} ${past}${address}.` : `I couldn't ${verb} ${Brain.both(names)}${address}: ${after(reason)}`
-  })
-  const done = went.length === 0 ? [] : [each.length === 1 ? one(first) : several()]
+  const why = ({ outcome }: Tidy) => (outcome._tag === "Unknown" ? "" : "reason" in outcome ? outcome.reason : "")
+  const likewise = (one: Tidy, other: Tidy) => one.command._tag === other.command._tag && why(one) === why(other)
+  const whys = failed
+    .filter((tidy, index) => failed.findIndex((other) => likewise(other, tidy)) === index)
+    .map((like, index) => {
+      const names = failed.filter((tidy) => likewise(tidy, like)).map(({ called }) => called)
+      const address = went.length === 0 && index === 0 ? sir : ""
+      const { verb, past } = tidyWords[like.command._tag]
+      const reason = why(like)
+      return reason === "" ? `I couldn't confirm ${Brain.both(names)} ${were(names)} ${past}${address}.` : `I couldn't ${verb} ${Brain.both(names)}${address}: ${after(reason)}`
+    })
+  const done = went.length === 0 ? [] : each.length === 1 ? [one(first)] : ways.length === 1 ? [several()] : apart()
   // What of his went with it, or came back.
   const reminders = went.reduce((sum, { reminders }) => sum + (reminders ?? 0), 0)
   const its = each.length === 1 ? "its" : "their"
