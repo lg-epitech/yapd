@@ -288,12 +288,14 @@ const fenced = (text: string) => `«${squash(text).replace(/[«»]/g, '"')}»`
 /**
  * What's known of your own voice in what they said, as they said it: what
  * came first may be yours, and what followed a pause is theirs, even naming
- * one of the projects you `offered`, when it's an answer to you.
+ * one of the projects you `offered`, when it's an answer to you. What you
+ * were saying is left out when it held a routine's steps, which this model
+ * never sees, nor the routine.
  */
-const overYou = ({ echo, afterPause }: Line, offered: boolean) =>
+const overYou = ({ echo, afterPause, echoRoutines }: Line, offered: boolean) =>
   echo === undefined
     ? ""
-    : `\nThey began that while your own voice could still get into their microphone, so what came first may be your own words, from around ${fenced(echo)}, misheard or not, and words that sound like yours there are yours.${
+    : `\nThey began that while your own voice could still get into their microphone, so what came first may be your own words${(echoRoutines ?? []).length > 0 ? "" : `, from around ${fenced(echo)}`}, misheard or not, and words that sound like yours there are yours.${
         afterPause === undefined || afterPause.trim() === ""
           ? ""
           : ` What they said after a pause, ${fenced(afterPause)}, is surely theirs, even where it repeats your words${offered ? ", like naming one of the projects you offered" : ""}.`

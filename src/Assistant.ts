@@ -49,6 +49,12 @@ export interface Utterance {
   /** With `echo`, what he said once he carried on after a pause, which is surely his, as yapd had stopped by then. */
   readonly afterPause?: string
   /**
+   * With `echo`, the routines whose steps what yapd was saying holds, as code
+   * put them in, like an offer of one read as it comes due: a model is only
+   * ever told of what it was saying by their names.
+   */
+  readonly echoRoutines?: ReadonlyArray<string>
+  /**
    * Said over a question yapd was asking, what it hadn't said of it yet a
    * moment before he began, as far as where it had got to tells, like its
    * options and its pick: none when all of it was said, or when that isn't
@@ -63,8 +69,12 @@ export interface Utterance {
   readonly whole?: string
 }
 
-/** What's known of yapd's own voice in what he said back: what it was saying around when he began, and only with that, what he said after a pause. */
-const overItself = (echo?: string, afterPause?: string): Pick<Utterance, "echo" | "afterPause"> => Brain.overheard({ echo, afterPause })
+/**
+ * What's known of yapd's own voice in what he said back: what it was saying
+ * around when he began, and only with that, what he said after a pause and
+ * the routines whose steps it was saying, by name.
+ */
+const overItself = (said: Brain.Overheard): Pick<Utterance, "echo" | "afterPause" | "echoRoutines"> => Brain.overheard(said)
 
 /**
  * His words as he said them, for a message or an answer whose words the
@@ -228,6 +238,8 @@ export interface Open {
   readonly echo?: string
   /** With `echo`, what he said once he carried on after a pause, which is surely his. */
   readonly afterPause?: string
+  /** With `echo`, the routines whose steps what yapd was saying holds, which a model is only told of by their names. */
+  readonly echoRoutines?: ReadonlyArray<string>
   /** What was understood, minus what's being asked. */
   readonly decision: Brain.Decision
   readonly candidates: ReadonlyArray<Threads.Ref>
@@ -1674,7 +1686,7 @@ export const make = (options: {
                 utterance: utterance.id,
                 heard: utterance.heard,
                 // With what may have been its own voice in it, for whatever reads it back.
-                ...overItself(utterance.echo, utterance.afterPause),
+                ...overItself(utterance),
                 decision: Brain.decision({ act: "start", text: utterance.heard }),
                 candidates: [],
                 asked: words,
@@ -1723,7 +1735,7 @@ export const make = (options: {
       Effect.gen(function* () {
         const { utterance } = thought
         // Said over yapd's first seconds, the writer is told what of it may be its own voice, as the brain was.
-        const ready = yield* written(utterance, [{ speaker: "user", text: utterance.heard, ...overItself(utterance.echo, utterance.afterPause) }])
+        const ready = yield* written(utterance, [{ speaker: "user", text: utterance.heard, ...overItself(utterance) }])
         if (Option.isNone(ready)) return quiet(thought.subject)
         const prompt = ready.value
         if (Either.isLeft(prompt)) return reply(prompt.left, thought.subject)
@@ -1744,7 +1756,7 @@ export const make = (options: {
         const { utterance } = thought
         const lines: ReadonlyArray<Line> = [
           { speaker: "yapd", text: open.asked },
-          { speaker: "user", text: utterance.heard, ...overItself(utterance.echo, utterance.afterPause) },
+          { speaker: "user", text: utterance.heard, ...overItself(utterance) },
         ]
         const ready = yield* written(utterance, lines, Option.getOrUndefined(open.material))
         if (Option.isNone(ready)) return quiet(thought.subject)
@@ -1962,7 +1974,7 @@ export const make = (options: {
         const base = {
           utterance: utterance.id,
           heard: utterance.heard,
-          ...overItself(utterance.echo, utterance.afterPause),
+          ...overItself(utterance),
           material: Option.none(),
           candidates: ref === undefined ? [] : [ref],
         }
@@ -2083,7 +2095,7 @@ export const make = (options: {
     const rest = (thought: Thought, first: Outcome, on: Option.Option<Threads.Ref>, step: number, said: Lines): Effect.Effect<Outcome> =>
       Effect.gen(function* () {
         // What he went on to say after, which yapd's own voice was never in.
-        const { echo: _, afterPause: __, ...before } = thought.utterance
+        const { echo: _, afterPause: __, echoRoutines: ___, ...before } = thought.utterance
         const utterance: Utterance = { ...before, heard: thought.decision.rest, whole: thought.utterance.whole ?? ownWords(thought.utterance) }
         yield* Effect.logInfo(`Then: ${logged(utterance.heard)}`)
         // Working it out has no effect, so it carries on whether or not what's said waits for it, until yapd is turned off, which stops it like the rest of the request.
@@ -2092,7 +2104,7 @@ export const make = (options: {
         const thinking = yield* job(
           think(utterance, along(thought, { _tag: "Answer", said: first.say, about: on, ...routinesOf(first.subject) }), [
             // All he said, still with what of it may have been yapd's own voice, so none of that is taken for more he asked.
-            { speaker: "user", text: thought.utterance.heard, ...overItself(thought.utterance.echo, thought.utterance.afterPause) },
+            { speaker: "user", text: thought.utterance.heard, ...overItself(thought.utterance) },
             // Nothing said of the step before, like a thanks, is nothing to show. One of his routines' steps in it, by its name alone.
             ...(first.say === "" ? [] : [{ speaker: "yapd", text: first.say, ...routinesOf(first.subject) } satisfies Line]),
           ]),
@@ -2632,7 +2644,7 @@ export const make = (options: {
             kind: asks._tag === "Approval" ? "approval" : "question",
             utterance: thought.utterance.id,
             heard: thought.utterance.heard,
-            ...overItself(thought.utterance.echo, thought.utterance.afterPause),
+            ...overItself(thought.utterance),
             decision: asks._tag === "Approval" ? Brain.decision({ act: "decide", how: "accept" }) : Brain.decision({ act: "reply" }),
             candidates: [waiting.ref],
             asked: words,
@@ -3643,6 +3655,9 @@ export const make = (options: {
       Effect.gen(function* () {
         const at = yield* Clock.currentTimeMillis
         const { turns } = yield* options.power
+        // Its words holding one of his routines' steps, a model is only told of them by the routine's name, as what he began over too.
+        const routines = askedRoutines(open)
+        const over = overItself({ echo, afterPause, echoRoutines: routines.routines })
         const utterance: Utterance = {
           id: mint(at, "u"),
           heard,
@@ -3650,7 +3665,7 @@ export const make = (options: {
           at,
           voiced,
           turns,
-          ...overItself(echo, afterPause),
+          ...over,
           ...(unsaid === undefined || unsaid === "" ? {} : { unsaid }),
         }
         /**
@@ -3666,13 +3681,11 @@ export const make = (options: {
             kind: "reply",
             ...(withheld ? {} : { text: heard }),
             utterance: utterance.id,
-            detail: { via: "reply", ...(withheld ? {} : overItself(echo, afterPause)), gone: open.asked, ...(withheld ? { withheld } : {}) },
+            detail: { via: "reply", ...(withheld ? {} : over), gone: open.asked, ...(withheld ? { withheld } : {}) },
           })
           yield* deliver(regarding(Brain.dealtWith(yield* persona.lines), askedAbout(open)), utterance)
         })
         if (gone.has(open.id)) return Option.some(late)
-        // Its words holding one of his routines' steps, a model is only told of them by the routine's name.
-        const routines = askedRoutines(open)
         const thought = yield* think(utterance, { _tag: "Answer", said: open.asked, about: askedAbout(open), question: open, ...routines }, [
           { speaker: "yapd", text: heardOf(open.asked, utterance.unsaid), ...routines },
         ])
@@ -3701,7 +3714,8 @@ export const make = (options: {
         Effect.gen(function* () {
           const at = yield* Clock.currentTimeMillis
           const { turns } = yield* options.power
-          const utterance: Utterance = { id: mint(at, "u"), heard, via: "reply", at, voiced, turns, ...overItself(echo, afterPause) }
+          // What he began over holding one of his routines' steps, a model is only told of it by the routine's name.
+          const utterance: Utterance = { id: mint(at, "u"), heard, via: "reply", at, voiced, turns, ...overItself({ echo, afterPause, echoRoutines: routinesOf(about).routines }) }
           const thought = yield* think(utterance, about, [{ speaker: "yapd", text: yield* line, ...routinesOf(about) }])
           if (thought.decision.act === "resume") return Option.none()
           if (Brain.murmured(thought.decision, utterance)) {
@@ -3972,7 +3986,7 @@ export const make = (options: {
             ...kept,
             via: utterance.via,
             // What may have been its own voice in his words, kept with them for whatever reads them back.
-            ...(withheld ? {} : overItself(utterance.echo, utterance.afterPause)),
+            ...(withheld ? {} : overItself(utterance)),
             source: thought.source,
             decision,
             ...(second === undefined ? {} : { second }),
@@ -4356,10 +4370,10 @@ export const make = (options: {
           // In case it's new work, or names the project asked about, the prompt is written while the model works out which.
           const asked = Option.filter(glanced.situation.open, ({ kind }) => kind === "project")
           const lines: ReadonlyArray<Line> = Option.match(asked, {
-            onNone: () => [{ speaker: "user", text: utterance.heard, ...overItself(utterance.echo, utterance.afterPause) }],
+            onNone: () => [{ speaker: "user", text: utterance.heard, ...overItself(utterance) }],
             onSome: (open) => [
               { speaker: "yapd", text: open.asked },
-              { speaker: "user", text: utterance.heard, ...overItself(utterance.echo, utterance.afterPause) },
+              { speaker: "user", text: utterance.heard, ...overItself(utterance) },
             ],
           })
           // Noted as it's begun, so it's stopped however this ends, even stopped while the model works it out.

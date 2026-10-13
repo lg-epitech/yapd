@@ -2913,16 +2913,34 @@ export const unsaid = (kept: Pick<Kept, "detail">) => {
 /** What's known of yapd's own voice in words of his, as the threads keep it for what he dictated. */
 export type Overheard = Threads.Overheard
 
-/** Only what there is to know of it: nothing without an echo, and no pause that's empty. */
-export const overheard = ({ echo, afterPause }: Overheard): { readonly echo?: string; readonly afterPause?: string } =>
-  echo === undefined ? {} : { echo, ...(afterPause === undefined || afterPause.trim() === "" ? {} : { afterPause }) }
+/** Only what there is to know of it: nothing without an echo, no pause that's empty, and the routines it holds only when there are any. */
+export const overheard = ({
+  echo,
+  afterPause,
+  echoRoutines,
+}: Overheard): { readonly echo?: string; readonly afterPause?: string; readonly echoRoutines?: ReadonlyArray<string> } =>
+  echo === undefined
+    ? {}
+    : {
+        echo,
+        ...(afterPause === undefined || afterPause.trim() === "" ? {} : { afterPause }),
+        ...(echoRoutines === undefined || echoRoutines.length === 0 ? {} : { echoRoutines }),
+      }
 
 /** What's known of it for words of his kept in the journal, like what he dictated or said back, as they were heard: nothing for an older entry. */
 export const overheardIn = (kept: Pick<Kept, "detail">): Overheard => {
-  const detail = kept.detail as { readonly echo?: unknown; readonly afterPause?: unknown } | null | undefined
+  const detail = kept.detail as { readonly echo?: unknown; readonly afterPause?: unknown; readonly echoRoutines?: unknown } | null | undefined
   if (typeof detail !== "object" || detail === null || typeof detail.echo !== "string") return {}
-  return overheard({ echo: detail.echo, afterPause: typeof detail.afterPause === "string" ? detail.afterPause : undefined })
+  return overheard({
+    echo: detail.echo,
+    afterPause: typeof detail.afterPause === "string" ? detail.afterPause : undefined,
+    echoRoutines: Array.isArray(detail.echoRoutines) ? detail.echoRoutines.filter((name): name is string => typeof name === "string") : undefined,
+  })
 }
+
+/** What yapd was saying as he began, as the model sees it: when that held one of his routines' steps, the routine by its name alone. */
+const echoed = ({ echo, echoRoutines }: Overheard, most: number) =>
+  (echoRoutines ?? []).length > 0 ? `what you said of ${byName(echoRoutines ?? [])}, whose steps you never see` : fenced(echo ?? "", most)
 
 /**
  * A note after words of his from before, as the model sees them, when he
@@ -2930,10 +2948,11 @@ export const overheardIn = (kept: Pick<Kept, "detail">): Overheard => {
  * followed a pause is his. His words themselves are never touched.
  */
 export const ownVoice = (said: Overheard) => {
-  const { echo, afterPause } = overheard(said)
+  const known = overheard(said)
+  const { echo, afterPause } = known
   return echo === undefined
     ? ""
-    : ` (he began that while your own voice could still get into his microphone, so what came first may be your own words, from around ${fenced(echo, 400)}${
+    : ` (he began that while your own voice could still get into his microphone, so what came first may be your own words, from around ${echoed(known, 400)}${
         afterPause === undefined ? "" : `; what he said after a pause, ${fenced(afterPause, 400)}, is surely his`
       })`
 }
@@ -3412,7 +3431,7 @@ export const prompt = (situation: Situation, style: Option.Option<string>) => {
     ...(situation.utterance.echo === undefined
       ? []
       : [
-          `He began while your own voice could still get into his microphone, so what was heard may start with your own words, from around ${fenced(situation.utterance.echo, 400)}, misheard or not, and his first word may be lost under yours. Words that sound like yours there are yours, however they came out, like "The teaser is important." for "the Tezos importer", or "Stop it." for "Stop the…": take them all out, and never act on them or turn them into words of his. If nothing surely his is left, it's "resume", never "dismiss" or a yes. If what's left for a thread sounds cut off, or hangs on a word that may be yours, don't act on it: with OPEN, "again" with "pending" "answers"; otherwise "answer", asking him in a few words to say it again. A question or a dismissal of his goes as usual.${
+          `He began while your own voice could still get into his microphone, so what was heard may start with your own words, from around ${echoed(situation.utterance, 400)}, misheard or not, and his first word may be lost under yours. Words that sound like yours there are yours, however they came out, like "The teaser is important." for "the Tezos importer", or "Stop it." for "Stop the…": take them all out, and never act on them or turn them into words of his. If nothing surely his is left, it's "resume", never "dismiss" or a yes. If what's left for a thread sounds cut off, or hangs on a word that may be yours, don't act on it: with OPEN, "again" with "pending" "answers"; otherwise "answer", asking him in a few words to say it again. A question or a dismissal of his goes as usual.${
             situation.utterance.afterPause === undefined || situation.utterance.afterPause.trim() === ""
               ? ""
               : ` What he said after a pause, ${fenced(situation.utterance.afterPause, 400)}, is surely his, even where it repeats your words, like naming one of your options; only what came before it may be yours.`

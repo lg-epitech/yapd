@@ -235,6 +235,12 @@ const subagent = (thread: T3Live.Thread) => thread.lineage?.relationshipToParent
 export interface Overheard {
   readonly echo?: string | undefined
   readonly afterPause?: string | undefined
+  /**
+   * With `echo`, the routines whose steps the line it came from holds, as
+   * code put them in, like an offer of one read as it comes due: a model is
+   * only ever told of what yapd was saying then by their names.
+   */
+  readonly echoRoutines?: ReadonlyArray<string> | undefined
 }
 
 /** What was noted about work yapd started, by thread id. */
@@ -248,9 +254,14 @@ export interface Started extends Overheard {
 const overheardIn = (detail: string | null): Overheard => {
   if (detail === null) return {}
   try {
-    const { dictated } = JSON.parse(detail) as { readonly dictated?: { readonly echo?: unknown; readonly afterPause?: unknown } }
+    const { dictated } = JSON.parse(detail) as { readonly dictated?: { readonly echo?: unknown; readonly afterPause?: unknown; readonly echoRoutines?: unknown } }
     if (typeof dictated?.echo !== "string") return {}
-    return { echo: dictated.echo, ...(typeof dictated.afterPause === "string" && dictated.afterPause.trim() !== "" ? { afterPause: dictated.afterPause } : {}) }
+    const routines = Array.isArray(dictated.echoRoutines) ? dictated.echoRoutines.filter((name): name is string => typeof name === "string") : []
+    return {
+      echo: dictated.echo,
+      ...(typeof dictated.afterPause === "string" && dictated.afterPause.trim() !== "" ? { afterPause: dictated.afterPause } : {}),
+      ...(routines.length === 0 ? {} : { echoRoutines: routines }),
+    }
   } catch {
     return {}
   }
@@ -355,11 +366,12 @@ export const shortlist = (input: {
         thread,
         state: doing,
         since: since(thread, doing),
-        started: Option.map(Option.fromNullable(own), ({ dictated, description, echo, afterPause }) => ({
+        started: Option.map(Option.fromNullable(own), ({ dictated, description, echo, afterPause, echoRoutines }) => ({
           dictated,
           description,
           ...(echo === undefined ? {} : { echo }),
           ...(afterPause === undefined ? {} : { afterPause }),
+          ...(echoRoutines === undefined ? {} : { echoRoutines }),
         })),
         last: Option.fromNullable(said.get(thread.id)),
         brief: index >= most,

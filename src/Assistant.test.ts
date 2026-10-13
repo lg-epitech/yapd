@@ -12612,6 +12612,50 @@ describe("Assistant memories", () => {
       expect(result.due).toContain(`What a yes does: "send" with his routine «review it»`)
     })
 
+    test("said over an offer of it as it comes due, what yapd was saying is shown by its name alone, then and in LATELY", async () => {
+      const later = Math.floor((now + 3 * 60 * 60_000) / 60_000) * 60_000
+      // What yapd was saying as he began, its own voice still able to get into his microphone.
+      const echo = `Open Mina SSV2 Bug Tickets: ${steps}, sir?`
+      const over = "Hold off on that one for today."
+      const result = await run(
+        Effect.gen(function* () {
+          const prompts: Array<string> = []
+          const made = yield* assistant(
+            (situation) => {
+              const { heard } = situation.utterance
+              if (heard === defining) return Brain.decision({ act: "remember", how: "routine", text: `review it: ${steps}` })
+              if (heard === "Later, offer to review it on the Mina one.") {
+                return Brain.decision({ act: "offer", how: "at", when: local(later), target: handle(situation, mina), text: routine(situation) })
+              }
+              if (heard === over) {
+                prompts.push(Brain.prompt(situation, Option.none()))
+                return Brain.decision({ act: "dismiss", pending: "answers" })
+              }
+              return Brain.decision({ act: "answer", spoken: "Yes, sir." })
+            },
+            undefined,
+            { memories: true, reminders: true },
+          )
+          yield* made.dictate(defining)
+          yield* made.dictate("Later, offer to review it on the Mina one.")
+          for (const reminder of yield* made.reminders!.due(later)) {
+            const kept = yield* made.reminders!.fire(reminder, { at: later, kind: "notice", said: "offer", detail: { reminder: reminder.id } })
+            yield* made.offered(reminder, Option.flatten(kept))
+          }
+          yield* made.flush
+          yield* made.answer(over, undefined, echo)
+          yield* made.dictate("Anything else?")
+          return { prompts: [...prompts, told(made)], messages: made.dispatched.filter(({ type }) => type === "message.dispatch") }
+        }),
+      )
+      const named = "from around what you said of his routine «review it», whose steps you never see"
+      expect(result.prompts).toHaveLength(2)
+      for (const prompt of result.prompts) expect(prompt).not.toContain(steps)
+      expect(result.prompts[0]).toContain(`what was heard may start with your own words, ${named}, misheard or not`)
+      expect(result.prompts[1]).toContain(`he said over it: «${over}» (he began that while your own voice could still get into his microphone, so what came first may be your own words, ${named})`)
+      expect(result.messages).toEqual([])
+    })
+
     test("offered as it came due while yapd was off, then read word for word in a catch-up, it's shown by its name alone after", async () => {
       // Kept unheard in words while yapd was off, as Notices keeps an offer that comes due, noted as the routine it holds.
       const due = `At 9:58 PM you wanted me to offer to tell Open Mina SSV2 Bug Tickets: ${steps}, sir.`
