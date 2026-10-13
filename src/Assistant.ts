@@ -2959,18 +2959,24 @@ export const make = (options: {
       })
       const project = decision.text.trim()
       const machine = decision.machine.trim()
-      // What a thread's subagents said, which a subagent's own update means too, by the thread it's part of.
+      // A time to come, as when the model took his clock for another's, is no window at all: everything is gathered rather than nothing.
+      const at = decision.when.trim() === "" ? Number.NaN : Brain.instant(decision.when)
+      const since = at > situation.now ? Number.NaN : at
+      // What a thread's subagents said, which a subagent's own update means too, by the thread it's part of, since when he said too.
       if (decision.how === "subagents") {
         const { subject } = situation
         const head = Option.match(target, {
           onNone: () => (subject._tag === "Session" ? subject.update.subagent?.head : undefined),
           onSome: ({ ref, called }) => ({ ref, called }),
         })
-        if (head !== undefined) return { subagents: head.ref, named: head.called === undefined ? "its subagents" : `the subagents of ${head.called}` }
+        if (head !== undefined) {
+          return {
+            subagents: head.ref,
+            ...(Number.isNaN(since) ? {} : { since }),
+            named: head.called === undefined ? "its subagents" : `the subagents of ${head.called}`,
+          }
+        }
       }
-      // A time to come, as when the model took his clock for another's, is no window at all: everything is gathered rather than nothing.
-      const at = decision.when.trim() === "" ? Number.NaN : Brain.instant(decision.when)
-      const since = at > situation.now ? Number.NaN : at
       const named =
         Option.getOrUndefined(Option.map(target, ({ called }) => called)) ??
         (group === undefined ? undefined : Brain.missedName(group)) ??

@@ -11037,6 +11037,23 @@ describe("Assistant catching up", () => {
     }
   })
 
+  test("a catch-up of a thread's subagents since when he said tells only what they kept since then", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, spoken, journal } = yield* assistant(
+          (situation) => Brain.decision({ act: "catchup", how: "subagents", target: handle(situation, tezos), when: new Date(now - 15 * 60_000).toISOString() }),
+          undefined,
+          { briefs: (rows) => rows.map(({ said }) => said).join(" ") },
+        )
+        yield* kept(journal, 30, "t-review", "The review is on pass 6.", { priority: "done", session: "codex:s-review", subagent: true, head: tezos.id, muted: true })
+        yield* kept(journal, 10, "t-lint", "Lint is clean.", { priority: "done", session: "codex:s-lint", subagent: true, head: tezos.id, muted: true })
+        yield* dictate("What did the Tezos migration's subagents say in the last fifteen minutes?")
+        return spoken()
+      }),
+    )
+    expect(result).toEqual(["Lint is clean."])
+  })
+
   test("a since the model put in the future, as when it took his clock for another's, gathers everything rather than nothing", async () => {
     const result = await run(
       Effect.gen(function* () {
