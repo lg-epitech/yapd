@@ -222,6 +222,7 @@ const make = (says?: string, options: {
           listened.push(terms)
           return transcripts.shift() ?? says ?? ""
         }),
+      ready: Effect.succeed(true),
     }),
     Layer.succeed(Responder, {
       respond: (interruption) => {

@@ -96,7 +96,7 @@ const patience = "40 seconds"
  * milliseconds, even said again and again, and heard out once he's stopped:
  * what goes on longer, like a TV, is no reason to keep listening for it. Nor
  * is anything listened for longer than that once the moment after a line
- * played through for "Mute." alone is over.
+ * played through for "Mute." alone is over, nor Whisper waited for longer.
  */
 const outburst = 4_000
 /**
@@ -447,9 +447,10 @@ export const make = (options: {
      * say for a TV. Nothing else said over it stops it or turns it down, so
      * talk in the room, a TV or a video never keeps it low, and nothing else
      * of what's said is kept or logged: what's longer than "Mute." could be
-     * isn't even transcribed. The moment after it is over after the pause
-     * between lines once something's `queued` to be said next, which listens
-     * for "Mute." itself. Only what
+     * isn't even transcribed, nor anything while Whisper isn't ready, and
+     * Whisper is never waited on longer than "Mute." could be heard out. The
+     * moment after it is over after the pause between lines once something's
+     * `queued` to be said next, which listens for "Mute." itself. Only what
      * he'd begun by its end, in the pause between lines or just before it, is
      * heard out then, for as long as it could be "Mute.", and what he begins a
      * beat after, or right after he's stopped saying something else, so his
@@ -536,12 +537,16 @@ export const make = (options: {
               const echo = echoing ? between(text, playback.duration, begun - reach, Math.max(at, begun) + reach) : undefined
               onset = undefined
               echoing = false
-              // Longer than "Mute." could be, it isn't, so Whisper isn't asked, and nothing waits on it.
-              if (options.off !== undefined && voiced(signal.audio) <= curt && halted(yield* unlogged(signal.audio), echo)) {
-                // Its voice ends at once, never waiting on all turning off does first. Should yapd stay on, it's a stop.
-                yield* playback.stop
-                yield* options.off
-                return { _tag: "Finished" } satisfies Outcome
+              // Longer than "Mute." could be, it isn't, so Whisper isn't asked, and nothing waits on it; nor while Whisper can't hear yet,
+              // as while its model loads. What it takes longer to make out than "Mute." could be heard out in is taken for something else.
+              if (options.off !== undefined && voiced(signal.audio) <= curt && (yield* transcriber.ready)) {
+                const heard = yield* unlogged(signal.audio).pipe(Effect.timeout(outburst), Effect.orElseSucceed(() => ""))
+                if (halted(heard, echo)) {
+                  // Its voice ends at once, never waiting on all turning off does first. Should yapd stay on, it's a stop.
+                  yield* playback.stop
+                  yield* options.off
+                  return { _tag: "Finished" } satisfies Outcome
+                }
               }
               break
             }

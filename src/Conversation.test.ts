@@ -119,6 +119,7 @@ const conversation = (
             glossaries.push(terms ?? [])
             return transcripts.shift() ?? ""
           }),
+        ready: Effect.succeed(true),
       }),
       given.model === undefined
         ? Layer.succeed(Responder.Responder, {
@@ -840,6 +841,8 @@ const overHelper = (
     readonly off?: boolean
     /** How long Whisper takes on each thing it's given, in seconds: at once unless said. */
     readonly transcribing?: number
+    /** Whether Whisper can't hear yet, its model still loading, though it hears what it's given as ever. */
+    readonly unready?: boolean
     /** With `tell`, it says a notice in the same words instead, like a failure, which nothing else said over it is for. */
     readonly tell?: boolean
     /** Whether something always waits to be said next. */
@@ -956,6 +959,7 @@ const overHelper = (
             transcribed.push(heard)
             return heard
           }).pipe((heard) => (options.transcribing === undefined ? heard : Effect.delay(heard, `${options.transcribing} seconds`))),
+        ready: Effect.succeed(options.unready !== true),
       }),
       Layer.succeed(Responder.Responder, {
         respond: (interruption) =>
@@ -1780,6 +1784,24 @@ describe("Over its first seconds, while yapd's own voice can still get into the 
       }),
     )
     expect(result).toBe(1)
+  })
+
+  test.each([
+    ["while Whisper can't hear yet, its model still loading, it isn't asked", { unready: true, transcribing: 30 }, 0.6],
+    ["Whisper taking longer than 'Mute.' could be heard out in, it's taken for other talk", { transcribing: 10 }, 4.6],
+  ] as const)("over a notice, %s, so what's next is held up no longer", async (_, given, after) => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        const helper = yield* overHelper([[0.95, "Mute."]], { off: true, tell: true, queued: true, ...given })
+        yield* helper.wait(4)
+        yield* helper.talk(0.95, 10)
+        yield* helper.quiet
+        yield* helper.finish
+        yield* helper.wait(after)
+        return { done: Option.isSome(yield* Fiber.poll(helper.fiber)), offs: helper.offs() }
+      }),
+    )
+    expect(result).toEqual({ done: true, offs: 0 })
   })
 
   /** What's said as a line ends, `at` seconds into its `duration`, `frames` long, and what came of it. */
