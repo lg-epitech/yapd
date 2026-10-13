@@ -10330,6 +10330,47 @@ describe("Assistant muting", () => {
     expect(result.dispatched).toBe(0)
   })
 
+  test("what he asks over a subagent's update, answered about the thread it's part of, leaves 'mute it' muting the subagent alone, never that thread", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { reading, ended, wait, dictate, followUp, spoken, mutes, dispatched } = yield* assistant(
+          (situation) =>
+            Brain.decision({
+              act: "answer",
+              spoken: "The fee rounding test still fails, sir.",
+              target: handle(situation, tezos),
+              rest: situation.utterance.heard.includes("mute") ? "mute it for an hour" : "",
+            }),
+          undefined,
+          { muting: true },
+        )
+        // T3 Code's review of the Tezos migration, run as its subagent, read to him to the end.
+        const subagent = { child: { machine: "Rosie", id: "t-review" }, called: "Sol review", head: { ref: { machine: "Rosie", id: tezos.id }, called: "Migrate Tezos Integration" } }
+        yield* reading("integration", "For Migrate Tezos Integration: one release blocker is left.", undefined, { session: "codex:s-review", subagent })
+        yield* ended
+        yield* wait(1)
+        const steps: Array<ReadonlyArray<string>> = []
+        yield* dictate("What's the blocker?")
+        yield* dictate("Mute it.")
+        steps.push(yield* keys(mutes))
+        yield* followUp("Unmute it.")
+        steps.push(yield* keys(mutes))
+        // In one breath, the rest of it is about the subagent too.
+        yield* dictate("What's the blocker, and mute it for an hour?")
+        steps.push(yield* keys(mutes))
+        return { spoken: spoken(), steps, dispatched: dispatched.length }
+      }),
+    )
+    expect(result.spoken).toEqual([
+      "The fee rounding test still fails, sir.",
+      "Muted it, sir. I'll still tell you if it needs you.",
+      "Unmuted it, sir.",
+      `The fee rounding test still fails, sir. Muted it until ${Brain.time(now + 60 * 60_000 + 1000)}. I'll still tell you if it needs you.`,
+    ])
+    expect(result.steps).toEqual([["t3:Rosie:t-review"], [], [`t3:Rosie:t-review until ${new Date(now + 1000 + 60 * 60_000).toISOString()}`]])
+    expect(result.dispatched).toBe(0)
+  })
+
   test("a thread named to the model is muted by name, and 'it' is that thread from then on", async () => {
     const result = await run(
       Effect.gen(function* () {

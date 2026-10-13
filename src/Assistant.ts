@@ -481,6 +481,19 @@ const reply = (say: string, subject: Subject): Outcome => ({ say, subject: { _ta
 /** Something said back about a thread, which "it" then means. */
 const regarding = (say: string, about: Option.Option<Threads.Ref>): Outcome => ({ say, subject: { _tag: "Answer", said: say, about }, kind: say === "" ? "none" : "answer" })
 
+/**
+ * What "it" means once yapd says `said` over one of a thread's subagents'
+ * update, about no other thread than the one it's part of, the only one the
+ * model can name for it: still that subagent, by its own handle, so "mute it"
+ * next mutes it alone, never its thread. None over anything else.
+ */
+const overSubagent = (subject: Subject, about: Option.Option<Threads.Ref>, said: string): Subject | undefined => {
+  if (subject._tag !== "Session" || subject.update.subagent === undefined) return undefined
+  const head = subject.update.subagent.head?.ref
+  const its = Option.isNone(about) || (head !== undefined && Threads.same(about.value, head))
+  return its ? { _tag: "Session", update: subject.update, said } : undefined
+}
+
 /** What's said once what waits on him is put by till its machine's threads can be seen again, to be asked then. */
 const onceBack = "I'll ask you again once I can."
 
@@ -1541,7 +1554,7 @@ export const make = (options: {
         const ref = Option.map(about, ({ ref }) => ref)
         const told = {
           say: text,
-          subject: { _tag: "Answer", said: text, about: ref },
+          subject: overSubagent(thought.subject, ref, text) ?? { _tag: "Answer", said: text, about: ref },
           kind: "answer",
           ...(second === undefined ? {} : { second }),
           ...(aside === undefined ? {} : { card: aside.card, unreadable: true }),
@@ -2126,9 +2139,10 @@ export const make = (options: {
         yield* Effect.logInfo(`Then: ${logged(utterance.heard)}`)
         // Working it out has no effect, so it carries on whether or not what's said waits for it, until yapd is turned off, which stops it like the rest of the request.
         // "It" is the step before as it'll be said, part of catching up when that is, so what the rest comes to is too, however late it's said,
-        // and one of his routines' steps in it by its name alone.
+        // and one of his routines' steps in it by its name alone. Said over one of a thread's subagents' update, it's still that subagent.
+        const it = overSubagent(first.subject, on, first.say) ?? { _tag: "Answer", said: first.say, about: on }
         const thinking = yield* job(
-          think(utterance, along(thought, { _tag: "Answer", said: first.say, about: on, ...routinesOf(first.subject) }), [
+          think(utterance, along(thought, { ...it, ...routinesOf(first.subject) }), [
             // All he said, still with what of it may have been yapd's own voice, so none of that is taken for more he asked.
             { speaker: "user", text: thought.utterance.heard, ...overItself(thought.utterance) },
             // Nothing said of the step before, like a thanks, is nothing to show. One of his routines' steps in it, by its name alone.
