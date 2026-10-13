@@ -11654,6 +11654,43 @@ describe("Assistant memories", () => {
     expect(result.again.messages).toEqual([{ threadId: tezos.id, text: steps }])
   })
 
+  test("a routine's name said again to 'Again?' about its steps is a yes to them, by the shortcut or as his answer", async () => {
+    const steps = "Have Sol review it until it's clean."
+    const again = (answering: boolean) =>
+      run(
+        Effect.gen(function* () {
+          const made = yield* assistant(
+            (situation) => {
+              const routine = Brain.remembered(situation).find(({ name }) => name === "review it")
+              const pending = Option.isNone(situation.open) ? "" : answering ? "answers" : "replaces"
+              return Brain.decision({ act: "send", text: routine?.handle ?? "", target: handle(situation, tezos), how: "now", pending })
+            },
+            undefined,
+            { memories: true, routines: [{ name: "review it", steps }] },
+          )
+          yield* made.dictate("Review it.")
+          yield* made.dictate("Review it.")
+          if (answering) yield* made.answer("Review it.")
+          else yield* made.dictate("Review it.")
+          return {
+            spoken: made.spoken(),
+            questions: made.questions().length,
+            messages: made.dispatched.filter(({ type }) => type === "message.dispatch").map(({ threadId, text }) => ({ threadId, text })),
+          }
+        }),
+      )
+    const sentTwice = [
+      { threadId: tezos.id, text: steps },
+      { threadId: tezos.id, text: steps },
+    ]
+    for (const answering of [false, true]) {
+      const result = await again(answering)
+      expect(result.questions).toBe(1)
+      expect(result.spoken.slice(1)).toEqual(["I sent that a minute ago, sir. Again?", "On it, sir."])
+      expect(result.messages).toEqual(sentTwice)
+    }
+  })
+
   test("a routine whose steps aren't his words as heard isn't saved, nor one that may be yapd's own voice", async () => {
     const asked = "When I say review it, have Sol review it until it's clean."
     const result = await run(

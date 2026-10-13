@@ -2171,8 +2171,10 @@ export const make = (options: {
           Option.flatMap((ref) => Option.fromNullable(situation.desk.threads.find((listed) => Threads.same(listed.ref, ref)))),
         )
         const handle = Option.match(target, { onNone: () => "", onSome: ({ handle }) => handle })
+        // A routine's name is the steps it sends, which is what was asked about when they're what went.
+        const given = Brain.resolved(thought.decision, situation)
         // What he left out is what was asked about: its words, as for "no, the Mina one", and its thread, as for "no, stop it instead".
-        const answered = filled(thought.decision, open)
+        const answered = filled(given, open)
         if (answered === undefined) {
           yield* forgo(open, "Its words may have been my own voice.")
           return yield* unworded(open, thought, said)
@@ -2187,7 +2189,7 @@ export const make = (options: {
           handle !== "" &&
           instead.target === handle &&
           Ledger.digest(instead.text) === Ledger.digest(open.decision.text)
-        const agreed = Brain.agrees(open, thought.decision, situation.desk)
+        const agreed = Brain.agrees(open, given, situation.desk)
         if (!agreed && !timed) {
           yield* forgo(open, "He asked for something else instead.")
           const checked = Brain.check(instead, situation, said)
@@ -3353,7 +3355,9 @@ export const make = (options: {
         }
         // Saying again just what was asked about, like the same message to the same thread, is a yes to it. To sending one again, whatever
         // time the words say: it's asked about at the time it first went, which may not be theirs, like at once to a turn stopped for it.
-        const same = open.kind === "resend" ? { ...decision, how: "" } : decision
+        // A routine's name is the steps it sends, so saying it again to "Again?" about them is a yes too.
+        const resolved = Brain.resolved(decision, decided.situation)
+        const same = open.kind === "resend" ? { ...resolved, how: "" } : resolved
         const repeated = Brain.yesNo(open.kind) && decision.target !== "" && Brain.agrees(open, same, decided.situation.desk)
         // What a thread waits on him for is only answered for that thread: naming another, like "approve the Mina one instead", is
         // something new, which the model's pick of thread stands for, and leaves the one asked about waiting.

@@ -1838,6 +1838,14 @@ const routining = (choice: Decision, situation: Pick<Situation, "memories">): Op
         ({ text }) => ({ ...choice, text }),
       )
 
+/**
+ * A decision with a routine's handle as its words read as the steps it stands
+ * for, so it's compared as what it sends, like his saying a routine's name
+ * again to "Again?" about those steps; one that's no routine is as it was,
+ * which checking it turns down.
+ */
+export const resolved = (choice: Decision, situation: Pick<Situation, "memories">): Decision => Option.getOrElse(routining(choice, situation), () => choice)
+
 /** A routine as the model gives it to be kept, "name: steps": none without both. */
 export const routineOf = (text: string) => {
   const at = text.indexOf(":")
