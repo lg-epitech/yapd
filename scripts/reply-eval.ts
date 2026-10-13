@@ -1,5 +1,6 @@
 import { Database } from "bun:sqlite"
-import { ConfigProvider, Console, Context, Effect, Either, Layer, Option, Schema } from "effect"
+import { ConfigProvider, Console, Context, Effect, Either, Layer, Logger, Option, Schema } from "effect"
+import { appendFileSync, mkdirSync } from "node:fs"
 import { mkdir } from "node:fs/promises"
 import { homedir, hostname } from "node:os"
 import { join } from "node:path"
@@ -25,7 +26,8 @@ import * as Baseline from "./eval/baseline-responder.ts"
 // Hands, no relay, nothing written to the journal; yapd's database and T3
 // Code's are only read. What it reads and writes stays under ~/.yapd/eval/,
 // since it's his own words and work, and isn't to be committed. It prints
-// counts and ids only.
+// counts and ids only: yapd's own logs as it works, which may say what the
+// model said, go to reply-eval.log there.
 //
 //   bun scripts/reply-eval.ts fixture
 //     Writes replies.json from what he said over updates: the log's replies
@@ -55,6 +57,7 @@ const labelsFile = join(folder, "reply-labels.json")
 /** brain-eval's copy of his threads, for the threads beside the update's own. */
 const viewFile = join(folder, "view.json")
 const casesFile = join(import.meta.dir, "eval", "replies.cases.json")
+const logsFile = join(folder, "reply-eval.log")
 const logFile = join(homedir(), "Library", "Logs", "yapd.log")
 /** T3 Code's databases: the first stops at 10-07 19:47, the second carries on from it. */
 const t3 = [join(homedir(), ".t3", "userdata", "state.sqlite"), join(homedir(), ".t3", "userdata", "statev2.sqlite")]
@@ -535,6 +538,27 @@ const updateOf = (updates: ReadonlyArray<Kept>, reply: Kept) =>
     (row) => row.at <= reply.at && reply.at - row.at <= hour && row.machine === reply.machine && (row.thread === reply.thread || detailOf(row).session === reply.thread),
   )
 
+/**
+ * yapd's line as he heard it when he spoke over it, the way Conversation cuts
+ * it: as many of its last words as the reply row keeps as `left`, from batch 1
+ * on, dropped for "…" where it stopped. Said to its end, it's whole. Stopped
+ * short with nothing kept as unheard, or from before batch 1, where it was cut
+ * isn't known: flagged, and kept whole unless it's known to be cut.
+ */
+const heardOf = (said: string, reply: Kept): { readonly text: string; readonly flags: ReadonlyArray<string> } => {
+  const detail = detailOf(reply)
+  const left = text(detail.left)
+  if (left !== undefined && left !== "") {
+    const words = said.split(/\s+/)
+    const unheard = left.split(/\s+/).length
+    // The line kept may not be the one he spoke over, like the update's own picked up again after a mute: then it doesn't end on them.
+    const exact = words.slice(-unheard).join(" ") === left
+    return { text: `${words.slice(0, Math.max(1, words.length - unheard)).join(" ")}…`, flags: exact ? [] : ["cut-approximate"] }
+  }
+  if (detail.after === true) return { text: said, flags: [] }
+  return { text: detail.after === false ? `${said}…` : said, flags: ["cut-unknown"] }
+}
+
 const toldOf = (update: Kept, threads: ReadonlyMap<string, Titled>, view: Option.Option<T3Live.View>): Told => {
   const detail = detailOf(update)
   const tied = typeof detail.session === "string"
@@ -631,6 +655,8 @@ const fixture = Effect.gen(function* () {
       logged: { intent: exchange.intent, ...(exchange.spoken === undefined ? {} : { spoken: exchange.spoken }), ...(exchange.message === undefined ? {} : { message: exchange.message }) },
       flags: [
         "needsYou-guessed",
+        // The log never said where he cut yapd off, so each line is whole.
+        "cut-unknown",
         ...(source === undefined ? ["message-from-summary"] : []),
         ...(checked === undefined || checked.matched === 0 ? ["day-unverified"] : checked.shift !== 0 ? ["day-shifted"] : []),
         ...(exchange.lines.some(({ text }) => text === "…") ? ["answer-unlogged"] : []),
@@ -658,14 +684,17 @@ const fixture = Effect.gen(function* () {
     // Kept under its session, the reply was over an update only known to be from its thread.
     const told = { ...toldOf(update, threads, shell), ...(update.thread === reply.thread ? {} : { owner: true }) }
     const earlier = (responders.get(`${reply.machine}\n${reply.thread}`) ?? []).filter((row) => row.at > update.at && row.at < reply.at && row.text !== undefined)
+    // Each line as he heard it when he spoke over it, cut where he did, as the Responder was shown it.
     const lines: Array<Line> = []
     let said = told.spoken
     for (const row of earlier) {
       const intent = detailOf(row).intent
       if (intent !== "answer" && intent !== "send" && intent !== "mute") continue
-      lines.push({ speaker: "yapd", text: said }, { speaker: "user", text: row.text ?? "" })
-      said = row.said ?? (intent === "send" ? Persona.plain.onIt : "")
+      lines.push({ speaker: "yapd", text: heardOf(said, row).text }, { speaker: "user", text: row.text ?? "" })
+      // A send's said is kept empty when yapd only said it was on it.
+      said = row.said === undefined || row.said === "" ? (intent === "send" ? Persona.plain.onIt : "") : row.said
     }
+    const last = heardOf(said, reply)
     // Sent through T3 Code's own hand, or its waiting hook or the relay, as what was kept of the send tells.
     const sent =
       detail.intent === "send"
@@ -683,7 +712,7 @@ const fixture = Effect.gen(function* () {
       by: "responder",
       at: reply.at,
       update: { ...told, ...(sent === undefined ? {} : { steered: typeof detailOf(sent).commandId === "string" }) },
-      lines: [...lines, { speaker: "yapd", text: said }],
+      lines: [...lines, { speaker: "yapd", text: last.text }],
       heard: reply.text,
       ...(echo === undefined ? {} : { echo, ...(afterPause === undefined ? {} : { afterPause }) }),
       ...(left === undefined ? {} : { left }),
@@ -691,7 +720,7 @@ const fixture = Effect.gen(function* () {
       ...(typeof detail.voiced === "number" ? { voiced: detail.voiced } : {}),
       lately: latelyBefore(journal, reply.at),
       logged: { intent: String(detail.intent), ...(reply.said === undefined || reply.said === "" ? {} : { spoken: reply.said }), ...(message === undefined ? {} : { message }) },
-      flags: [],
+      flags: last.flags,
     })
   }
 
@@ -736,7 +765,7 @@ const fixture = Effect.gen(function* () {
       heard: exchange.heard,
       ...(update === undefined ? {} : { lately: latelyBefore(journal, exchange.reply.at) }),
       logged: { intent: "resume" },
-      flags: ["from-log", ...(update === undefined ? ["message-from-summary", "needsYou-guessed"] : [])],
+      flags: ["from-log", "cut-unknown", ...(update === undefined ? ["message-from-summary", "needsYou-guessed"] : [])],
     })
   }
 
@@ -1163,7 +1192,9 @@ const report = (cases: ReadonlyArray<Case>, done: ReadonlyArray<Result>, paths: 
         (wanted === "send" && result.intent === "elsewhere")
       )
     })
-    lines.push(`  Hard fails: ${hard.length}${hard.length === 0 ? "" : `: ${ids(hard)}`}.`)
+    // Those over a line kept whole as where he cut it off isn't known, which may be the replay's doing, like a question he hadn't heard.
+    const uncut = hard.filter((result) => byId.get(result.id)!.flags.includes("cut-unknown"))
+    lines.push(`  Hard fails: ${hard.length}${hard.length === 0 ? "" : `: ${ids(hard)}`}${uncut.length === 0 ? "" : `; where he cut in isn't known for ${ids(uncut)}`}.`)
     const ms = logged.filter(({ failed }) => failed === undefined).map(({ ms }) => ms)
     const model = logged.filter(({ source }) => source === "model")
     lines.push(
@@ -1207,4 +1238,7 @@ if (chosen === undefined) {
   console.error("usage: bun scripts/reply-eval.ts fixture | run [--path baseline,brain] [--era log|journal|synthetic|all] [--only ids] [--limit N] [--out folder]")
   process.exit(1)
 }
-await Effect.runPromise(Effect.flatMap(settled(), (provider) => chosen.pipe(Effect.withConfigProvider(provider))))
+// yapd's logs, like the translation of a line the model said that wasn't in English, are his: kept with the rest, never printed.
+mkdirSync(folder, { recursive: true })
+const toFile = Logger.replace(Logger.defaultLogger, Logger.map(Logger.logfmtLogger, (line) => appendFileSync(logsFile, `${line}\n`)))
+await Effect.runPromise(Effect.flatMap(settled(), (provider) => chosen.pipe(Effect.withConfigProvider(provider))).pipe(Effect.provide(toFile)))
