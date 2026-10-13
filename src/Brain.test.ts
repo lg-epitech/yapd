@@ -2132,5 +2132,13 @@ describe("memories", () => {
     expect(prompt).toContain("- user: his routine «review it»")
     const brief = Brain.briefPrompt({ kind: "catchup", groups, left: { threads: 0, rows: 0 } }, on, now, Option.none())
     expect(brief).not.toContain(steps)
+    // Sent before LATELY reaches, what yapd last sent the thread still tells it by the routine's name.
+    const since = Brain.prompt(
+      situation("What's it doing?", { sent: [sent], subject: { _tag: "Session", update, said: update.spoken }, second: Option.some({ ref: ref(mina), detail }) }),
+      Option.none(),
+    )
+    expect(since).not.toContain(steps)
+    expect(since).toContain("What it was asked: his routine «review it»")
+    expect(since).toContain("- user: his routine «review it»")
   })
 })

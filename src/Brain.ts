@@ -147,6 +147,12 @@ export interface Situation {
   /** The last few things heard, said or done, from the last three hours. */
   readonly lately: ReadonlyArray<Kept>
   /**
+   * What yapd sent the thread "it" or a second look is about that was one of
+   * his routines' steps, of the thread's last twenty sent, so the words it
+   * was asked are its name however long ago they went, past LATELY.
+   */
+  readonly sent?: ReadonlyArray<Kept>
+  /**
    * What he hasn't heard, a thread at a time, what needs him first: what was
    * never read out, held, kept quiet or kept while yapd was off, and what was
    * cut off since he last spoke, but not what's waiting to be read.
@@ -3096,11 +3102,11 @@ const updateAbout = (project: string) => (project.trim() === "" ? "work outside 
 
 /**
  * Words a thread was sent, as the model sees them, at most `most` long: one
- * of his routines' steps, which yapd sent it, as LATELY has them, by the
- * routine's name alone.
+ * of his routines' steps, which yapd sent it, as LATELY or what it last sent
+ * the thread has them, by the routine's name alone.
  */
-const sentAs = (text: string, about: Threads.Ref | undefined, lately: ReadonlyArray<Kept>, most: number) => {
-  const sent = lately.find(
+const sentAs = (text: string, about: Threads.Ref | undefined, situation: Pick<Situation, "lately" | "sent">, most: number) => {
+  const sent = [...situation.lately, ...(situation.sent ?? [])].find(
     (kept) =>
       kept.kind === "sent" &&
       routinesIn(kept).length > 0 &&
@@ -3131,7 +3137,7 @@ const focus = (situation: Situation) => {
         ...(subject.said === update.spoken
           ? []
           : [`What you said last, over it: ${(subject.routines ?? []).length > 0 ? `of ${byName(subject.routines ?? [])}, whose steps you never see` : fenced(subject.said, 400)}`]),
-        ...Option.match(update.turn.prompt, { onNone: () => [], onSome: (prompt) => [`What it was asked: ${sentAs(prompt, update.about, situation.lately, 300)}`] }),
+        ...Option.match(update.turn.prompt, { onNone: () => [], onSome: (prompt) => [`What it was asked: ${sentAs(prompt, update.about, situation, 300)}`] }),
         `What it wrote: ${fenced(update.turn.message, 700)}`,
       ].join("\n")
     }
@@ -3156,7 +3162,7 @@ const focus = (situation: Situation) => {
   }
 }
 
-const detail = (desk: Threads.Desk, second: NonNullable<Option.Option.Value<Situation["second"]>>, lately: ReadonlyArray<Kept>) => {
+const detail = (desk: Threads.Desk, second: NonNullable<Option.Option.Value<Situation["second"]>>, situation: Pick<Situation, "lately" | "sent">) => {
   if ("found" in second) {
     return `FOUND, what a search turned up, for this second look:\n${second.found.length === 0 ? "Nothing." : second.found.map((found) => `- ${found}`).join("\n")}`
   }
@@ -3164,7 +3170,7 @@ const detail = (desk: Threads.Desk, second: NonNullable<Option.Option.Value<Situ
   const { messages, runs, request, plan } = second.detail
   return [
     `DETAIL of ${handle}, read just now, for this second look:`,
-    `Latest messages, oldest first:\n${messages.map(({ role, text }) => `- ${role}: ${role === "user" ? sentAs(text, second.ref, lately, 600) : fenced(text, 600)}`).join("\n")}`,
+    `Latest messages, oldest first:\n${messages.map(({ role, text }) => `- ${role}: ${role === "user" ? sentAs(text, second.ref, situation, 600) : fenced(text, 600)}`).join("\n")}`,
     `Runs: ${runs.toSorted((a, b) => b.ordinal - a.ordinal).slice(0, 3).map(({ status }) => status).join(", ") || "none"}`,
     ...Option.match(request, {
       onNone: () => [],
@@ -3373,7 +3379,7 @@ export const prompt = (situation: Situation, style: Option.Option<string>) => {
     }),
     ...Option.match(second, {
       onNone: () => [],
-      onSome: (second) => [`${detail(desk, second, situation.lately)}\nThis is your second look: answer now, with "answer". Don't look or find again.`],
+      onSome: (second) => [`${detail(desk, second, situation)}\nThis is your second look: answer now, with "answer". Don't look or find again.`],
     }),
     ...(situation.utterance.echo === undefined
       ? []

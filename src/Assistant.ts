@@ -5,7 +5,7 @@ import type * as Conversation from "./Conversation.ts"
 import type * as Drafts from "./Drafts.ts"
 import * as Hands from "./Hands.ts"
 import type { Notice } from "./Inbox.ts"
-import { type Entry, type Journal, type Kept, routinesNamed, unroutined } from "./Journal.ts"
+import { type Entry, type Journal, type Kept, routinesIn, routinesNamed, unroutined } from "./Journal.ts"
 import * as Ledger from "./Ledger.ts"
 import * as Memory from "./Memory.ts"
 import * as Missed from "./Missed.ts"
@@ -1051,6 +1051,14 @@ export const make = (options: {
         Effect.orElseSucceed((): ReadonlyArray<Threads.Ref> => []),
       )
 
+    /**
+     * What yapd sent a thread that was one of his routines' steps, of the
+     * last twenty it sent it, as an update's turn is told of, so what it was
+     * asked is shown by the routine's name however long ago it went.
+     */
+    const routinesSent = (ref: Threads.Ref) =>
+      Effect.map(journal.byThread(ref.machine, ref.id, 20, ["sent"]), (sent) => sent.filter((kept) => routinesIn(kept).length > 0))
+
     /** What the brain goes by, from memory: the desk, the journal and what's known of usage. */
     const situate = (utterance: Utterance, meant: Subject, lines: ReadonlyArray<Line>) =>
       Effect.gen(function* () {
@@ -1088,6 +1096,7 @@ export const make = (options: {
         const missed = yield* Missed.gather(journal, { now, spoke: since, coming: [...coming, ...(yield* options.telling ?? Effect.succeed([]))], desk: shortlist })
         // What was done, like a stop, even what he was never told of since he turned yapd off, but not the bookkeeping of questions closed, which says nothing.
         const done = recent.filter((kept) => kept.kind !== "action" || kept.said !== undefined || Brain.unsaid(kept) !== undefined).slice(-lately.most)
+        const sent = about._tag === "Session" && about.update.about !== undefined ? yield* routinesSent(about.update.about) : []
         const seen = yield* options.show.seen
         return {
           utterance,
@@ -1096,6 +1105,7 @@ export const make = (options: {
           open,
           desk: shortlist,
           lately: [...done, ...starting.values()].toSorted((one, other) => one.at - other.at),
+          ...(sent.length === 0 ? {} : { sent }),
           missed,
           ...Option.match(mode, { onNone: () => ({}), onSome: (mode) => ({ mode }) }),
           mutes,
@@ -1511,7 +1521,8 @@ export const make = (options: {
           yield* Effect.logWarning(`Could not read ${target.called}`, detail.left)
           return reply(`I couldn't read ${target.called} just now${addressed(said)}. ${detail.left.reason}`, thought.subject)
         }
-        const second = { ...thought.situation, second: Option.some({ ref: target.ref, detail: detail.right }) }
+        const sent = [...(thought.situation.sent ?? []), ...(yield* routinesSent(target.ref))]
+        const second = { ...thought.situation, ...(sent.length === 0 ? {} : { sent }), second: Option.some({ ref: target.ref, detail: detail.right }) }
         const decided = yield* brain.decide(second).pipe(Effect.either)
         if (Either.isLeft(decided) || decided.right.spoken.trim() === "") {
           if (Either.isLeft(decided)) yield* Effect.logWarning("Could not answer from what I read", decided.left)
@@ -2912,6 +2923,9 @@ export const make = (options: {
           .flatMap(({ rows }) => rows.filter((kept) => Missed.audible(kept) && (kept.said ?? "").trim() !== "" && (kind !== "detail" || kept.heardAt === undefined)))
           .toSorted((one, other) => Number(Missed.needs(other)) - Number(Missed.needs(one)) || one.at - other.at || one.id - other.id)
         const read = needing.slice(0, inFull)
+        // Read word for word, what holds one of his routines' steps, like an offer of one that came due while yapd was off, is told the model
+        // by the routine's name alone; the brief is only ever shown it so.
+        const routines = [...new Set(read.flatMap(routinesIn))]
         const unread = new Set(needing.slice(inFull).map(({ id }) => id))
         const reading = new Set(read.map(({ id }) => id))
         const others = groups.flatMap((group) => Option.toArray(Option.fromNullable(Missed.only(group, ({ id }) => !reading.has(id) && !unread.has(id)))))
@@ -2963,7 +2977,12 @@ export const make = (options: {
             ...(group.machine === undefined || group.thread === undefined ? {} : { ref: { machine: group.machine, id: group.thread } }),
           })),
         }
-        return { say, subject: { _tag: "Answer", said: say, about, missed: told, catchingUp: true, catchup }, kind: "answer", missed: told } satisfies Outcome
+        return {
+          say,
+          subject: { _tag: "Answer", said: say, about, missed: told, catchingUp: true, catchup, ...(routines.length === 0 ? {} : { routines }) },
+          kind: "answer",
+          missed: told,
+        } satisfies Outcome
       })
 
     /** What the model decided he wants to catch up on, more of the catch-up he just heard when that's what it said, or else what it named. */

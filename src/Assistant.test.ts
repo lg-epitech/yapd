@@ -12579,5 +12579,34 @@ describe("Assistant memories", () => {
       expect(result.due).toContain(`OPEN, your question: «Shall I tell Open Mina SSV2 Bug Tickets: his routine "review it", sir?»`)
       expect(result.due).toContain(`What a yes does: "send" with his routine «review it»`)
     })
+
+    test("offered as it came due while yapd was off, then read word for word in a catch-up, it's shown by its name alone after", async () => {
+      // Kept unheard in words while yapd was off, as Notices keeps an offer that comes due, noted as the routine it holds.
+      const due = `At 9:58 PM you wanted me to offer to tell Open Mina SSV2 Bug Tickets: ${steps}, sir.`
+      const result = await run(
+        Effect.gen(function* () {
+          const made = yield* assistant(
+            (situation) => {
+              const { heard } = situation.utterance
+              if (heard === defining) return Brain.decision({ act: "remember", how: "routine", text: `review it: ${steps}` })
+              if (heard === "What did I miss?") return Brain.decision({ act: "catchup" })
+              return Brain.decision({ act: "answer", spoken: "Yes, sir." })
+            },
+            undefined,
+            { memories: true },
+          )
+          yield* made.dictate(defining)
+          yield* made.journal.write({ at: now, kind: "notice", machine: "Rosie", thread: mina.id, said: due, detail: { reminder: 1, held: "off", routines: ["review it"] } })
+          yield* made.dictate("What did I miss?")
+          const caught = made.spoken().at(-1)
+          yield* made.dictate("Anything else?")
+          return { caught, prompt: told(made) }
+        }),
+      )
+      // He hears it as it was kept.
+      expect(result.caught).toContain(due)
+      expect(result.prompt).not.toContain(steps)
+      expect(result.prompt).toContain("What you just told him about t1 was of his routine «review it», whose steps you never see.")
+    })
   })
 })
