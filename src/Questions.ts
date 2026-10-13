@@ -2,9 +2,9 @@ import { Either, Option } from "effect"
 import * as Brain from "./Brain.ts"
 import { english } from "./Condenser.ts"
 import { addressed, type Lines } from "./Persona.ts"
-import { enough, gist } from "./Responder.ts"
 import * as T3Actions from "./T3Actions.ts"
 import type * as Threads from "./Threads.ts"
+import { enough, gist } from "./Words.ts"
 
 // How a thread's question is put to the user by voice, and what he says back
 // comes to. It's read in the agent's own words whenever they can be said, so

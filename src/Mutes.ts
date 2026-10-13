@@ -3,9 +3,9 @@ import { Clock, Effect, Option, PubSub, Stream } from "effect"
 import { hostname } from "node:os"
 import type * as Conversation from "./Conversation.ts"
 import type { Journal, Kept, Naming } from "./Journal.ts"
-import { gist } from "./Responder.ts"
 import type * as Store from "./Store.ts"
 import type * as Threads from "./Threads.ts"
+import { gist } from "./Words.ts"
 
 // The threads the user muted because they're noisy. A muted thread's progress
 // and finished work are summed up and kept, but never said; whatever needs

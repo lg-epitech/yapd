@@ -15,10 +15,10 @@ import { addressed, type Lines, Persona, unaddressed } from "./Persona.ts"
 import type * as Preferences from "./Preferences.ts"
 import * as Questions from "./Questions.ts"
 import * as Reminders from "./Reminders.ts"
-import { enough, type Line, once, switches } from "./Responder.ts"
 import * as Show from "./Show.ts"
 import * as T3Actions from "./T3Actions.ts"
 import * as Threads from "./Threads.ts"
+import { enough, type Line, once, switches } from "./Words.ts"
 import { ago, type Material } from "./Writer.ts"
 
 // Whatever the user says to yapd itself, by the shortcut or typed, goes through

@@ -35,6 +35,7 @@ import { ProcessError } from "./Process.ts"
 import * as Settings from "./Settings.ts"
 import * as Store from "./Store.ts"
 import { Voice, Warmth } from "./Voice.ts"
+import * as Words from "./Words.ts"
 
 const update: Conversation.Update = {
   session: "s",
@@ -130,11 +131,12 @@ const conversation = (
             respond: ({ heard: text }) =>
               Effect.sync(() => heard.push(text)).pipe(
                 Effect.zipRight(Effect.sleep("5 seconds")),
-                Effect.as(
-                  text.startsWith("Sam,")
+                Effect.as({
+                  reply: text.startsWith("Sam,")
                     ? { intent: "resume" as const, spoken: "", message: "" }
                     : { intent: "send" as const, spoken: text.startsWith("Just") ? "" : "Okay.", message: text },
-                ),
+                  source: "model" as const,
+                }),
               ),
           })
         : Responder.ProviderResponder.pipe(Layer.provide(Layer.merge(given.model, persona))),
@@ -211,6 +213,8 @@ const conversation = (
       disconnect: Queue.shutdown(microphone),
       replies: () => replies,
       glossaries: () => glossaries,
+      /** All the journal kept. */
+      journal: Effect.flatMap(Journal.Journal, (journal) => journal.since(0)).pipe(Effect.provide(context)),
     }
   })
 
@@ -568,6 +572,51 @@ describe("Follow-ups", () => {
     expect(result.afterNew).toEqual({ old: true, fresh: false, session: true })
     expect(result.sending).toBe(false)
     expect(result.sent).toEqual(["Explain the new update.", "Explain the old update."])
+  })
+
+  test("a reply row keeps how it was decided, how long that took and what he hadn't heard, and never reads as noise or catching up", async () => {
+    // A model that takes two seconds to answer.
+    const model = Layer.succeed(Model, {
+      ask: (schema) =>
+        Effect.sleep("2 seconds").pipe(
+          Effect.zipRight(Schema.decodeUnknown(schema)({ intent: "answer", spoken: "The auth one, sir.", message: "" })),
+          Effect.mapError((cause) => new ModelError({ cause })),
+        ),
+    })
+    /** What's kept of what he said, and what's logged of how long it took, talking `late` seconds after the update has played to the end, or over it. */
+    const replied = (said: string, late?: number) => {
+      const logged: Array<string> = []
+      const logger = Logger.make(({ message }) => {
+        logged.push((Array.isArray(message) ? message : [message]).join(" "))
+      })
+      return scoped(
+        Effect.gen(function* () {
+          const { fiber, frames, wait, journal } = yield* conversation([said], 0, [], "sent", { model })
+          if (late !== undefined) yield* wait(10 + late)
+          // Over a second of speech, as the endpointer keeps it.
+          yield* frames(0.9, 47)
+          yield* frames(0, defaults.silence)
+          yield* wait(20)
+          yield* Fiber.join(fiber)
+          return { kept: (yield* journal).map(({ kind, detail }) => ({ kind, detail })), timing: logged.filter((line) => line.startsWith("Timing:")) }
+        }).pipe(Effect.provide(Logger.replace(Logger.defaultLogger, logger))),
+      )
+    }
+    // Over the line, which stops at two seconds of its ten: worked out by the model, with what yapd hadn't said yet.
+    const over = await replied("Which PR?")
+    expect(over.kept).toEqual([
+      {
+        kind: "reply",
+        detail: { intent: "answer", source: "model", ms: 2000, modelMs: 2000, left: "PR is ready.", after: false, lateBy: 0, needsYou: false, voiced: 1.18 },
+      },
+    ])
+    expect(over.timing).toEqual(["Timing: 2.0 s to work out a reply, 2.0 s of it the model's"])
+    // A second and a half after it ended: taken in at once, with nothing it hadn't said.
+    const after = await replied("Thanks.", 1.5)
+    expect(after.kept).toEqual([
+      { kind: "reply", detail: { intent: "dismiss", source: "quick", ms: 0, after: true, lateBy: 1.5, needsYou: false, voiced: 1.18 } },
+    ])
+    expect(after.timing).toEqual(["Timing: 0.0 s to work out a reply, without the model"])
   })
 })
 
@@ -971,7 +1020,7 @@ const overHelper = (
         respond: (interruption) =>
           Effect.sync(() => void responded.push(interruption)).pipe(
             Effect.zipRight(Effect.sleep(`${options.responding ?? 0} seconds`)),
-            Effect.as(options.reply?.(interruption) ?? { intent: "send" as const, spoken: "Okay.", message: interruption.heard }),
+            Effect.as({ reply: options.reply?.(interruption) ?? { intent: "send" as const, spoken: "Okay.", message: interruption.heard }, source: "model" as const }),
           ),
       }),
       Layer.succeed(Voice, { render: (text) => Effect.sync(() => void rendered.push(text)) }),
@@ -1169,19 +1218,28 @@ describe("Over its first seconds, while yapd's own voice can still get into the 
 
   test("keeps and logs none of a secret said over it, whatever the model makes of it, like a remember he's told to ask with his shortcut", async () => {
     const secret = "Remember that the staging key is sk-live-4f9a8b7c6d5e."
-    /** What's logged and kept of his secret when the model answers it with `spoken`. */
-    const answered = async (spoken: string) => {
+    /** What's logged and kept of his secret when the model answers it with `spoken`, and he says `over` halfway through that, which it lets be. */
+    const answered = async (spoken: string, over?: string) => {
       const lines: Array<string> = []
       const logger = Logger.make(({ message }) => {
         lines.push((Array.isArray(message) ? message : [message]).join(" "))
       })
       const result = await overHelperScoped(
         Effect.gen(function* () {
-          const helper = yield* overHelper([[0.9, secret]], { reply: () => ({ intent: "answer", spoken, message: "" }) })
+          const helper = yield* overHelper([[0.9, secret], ...(over === undefined ? [] : [[0.8, over] as const])], {
+            reply: ({ heard }) => (heard === secret ? { intent: "answer", spoken, message: "" } : { intent: "dismiss", spoken: "", message: "" }),
+          })
           yield* helper.wait(1)
           yield* helper.talk(0.9, 15)
           yield* helper.quiet
           yield* helper.wait(1)
+          if (over !== undefined) {
+            // Five seconds into the answer's ten, long past when its own voice could get into the microphone.
+            yield* helper.wait(4)
+            yield* helper.talk(0.8, 47)
+            yield* helper.quiet
+            yield* helper.wait(1)
+          }
           return { responded: helper.responded.map(({ heard, echo }) => ({ heard, told: echo !== undefined })), journal: yield* helper.journal }
         }).pipe(Effect.provide(Logger.replace(Logger.defaultLogger, logger))),
       )
@@ -1190,9 +1248,10 @@ describe("Over its first seconds, while yapd's own voice can still get into the 
     const plain = await answered("Ask me that with your shortcut, sir.")
     // Over its first second, with what may have been its own voice, which isn't kept with it either.
     expect(plain.responded).toEqual([{ heard: secret, told: true }])
-    // Nor what the model answered to it, which may give it away in words nothing takes for a secret.
+    // Nor what the model answered to it, which may give it away in words nothing takes for a secret, nor what yapd hadn't said yet.
+    const worked = { source: "model", ms: 0, after: false, lateBy: 0, needsYou: false, voiced: 0.16 }
     expect(plain.journal.map(({ kind, text, said, detail }) => ({ kind, text, said, detail }))).toEqual([
-      { kind: "reply", text: undefined, said: undefined, detail: { intent: "answer", withheld: true } },
+      { kind: "reply", text: undefined, said: undefined, detail: { intent: "answer", withheld: true, ...worked } },
     ])
     expect(plain.lines.filter((line) => line.includes("sk-live"))).toEqual([])
     expect(plain.lines).toContain("Heard something that could give a secret away, so it's held back")
@@ -1200,11 +1259,19 @@ describe("Over its first seconds, while yapd's own voice can still get into the 
     // The model's answer saying it back is said, but neither logged nor kept.
     const echoed = await answered("I won't keep sk-live-4f9a8b7c6d5e, sir. Ask me that with your shortcut.")
     expect(echoed.journal.map(({ kind, text, said, detail }) => ({ kind, text, said, detail }))).toEqual([
-      { kind: "reply", text: undefined, said: undefined, detail: { intent: "answer", withheld: true } },
+      { kind: "reply", text: undefined, said: undefined, detail: { intent: "answer", withheld: true, ...worked } },
     ])
     expect(JSON.stringify(echoed.journal)).not.toContain("4f9a8b7c6d5e")
     expect(echoed.lines.filter((line) => line.includes("4f9a8b7c6d5e"))).toEqual([])
     expect(echoed.lines).toContain("Reply: answer")
+    // Nor what he hadn't heard of that answer when he talks over it, which a few words of may not show to be one, like the last
+    // digits of a code.
+    const talkedOver = await answered("I won't keep the key ending four eight one five nine two, sir. Ask me that with your shortcut.", "What?")
+    expect(talkedOver.journal.map(({ kind, text, said, detail }) => ({ kind, text, said, detail }))).toEqual([
+      { kind: "reply", text: undefined, said: undefined, detail: { intent: "answer", withheld: true, ...worked } },
+      { kind: "reply", text: "What?", said: "", detail: { intent: "dismiss", ...worked, voiced: 1.18 } },
+    ])
+    expect(JSON.stringify(talkedOver.journal)).not.toContain("nine two")
   })
 
   test.each([
@@ -2599,7 +2666,7 @@ describe("Responder", () => {
   })
 
   test("tells the model what of what he said earlier on may have been yapd's own voice, and what after a pause was his, only for what he began over it", () => {
-    const told = (line: Partial<Responder.Line>) =>
+    const told = (line: Partial<Words.Line>) =>
       Responder.prompt(
         {
           project: "yapd",
@@ -2776,7 +2843,7 @@ describe("Language check", () => {
       { intent: "send", spoken: "C'est noté, monsieur.", message: "Fusionne la branche." },
       { spoken: "Noted, sir." },
     ])
-    const reply = await Effect.runPromise(
+    const { reply } = await Effect.runPromise(
       Effect.flatMap(Responder.Responder, ({ respond }) =>
         respond({ project: "yapd", turn: { prompt: Option.none(), message: "C'est prêt." }, needsYou: false, lines: [], heard: "Fusionne la branche." }),
       ).pipe(Effect.provide(Responder.ProviderResponder.pipe(Layer.provide(Layer.merge(layer, Persona.Plain))))),
@@ -2807,7 +2874,7 @@ describe("more, and how yapd talks, over an update", () => {
     expect(quickly(over("More."))).toBeUndefined()
     expect(quickly(over("More tests, please.", rest))).toBeUndefined()
     // "Go on" stays a yes, never the rest.
-    expect(Responder.agreed.has("go on")).toBe(true)
+    expect(Words.agreed.has("go on")).toBe(true)
   })
 
   test("the model is given the rest to say if he asks for more, and told how yapd talks is never for the agent", () => {
@@ -3000,10 +3067,10 @@ describe("quick replies", () => {
 
 describe("Transcriber", () => {
   test("only 'Mute.' on its own, however often Whisper heard it, is his emergency off, and only so many words turn yapd back on", () => {
-    for (const heard of ["Mute.", "mute mute", "Mute, mute, mute.", "Jarvis, mute.", "Mute, sir!"]) expect(Responder.halts(heard)).toBe(true)
-    for (const heard of ["Mute it.", "Mute that for an hour.", "Mute the Tezos one.", "What's muted?", "Unmute.", "Mute it, mute it.", "Mute?", "Mute, mute?", ""]) expect(Responder.halts(heard)).toBe(false)
-    for (const heard of ["Unmute.", "Un-mute.", "Turn on.", "Turn it on, please.", "Jarvis, turn yourself on.", "Turn back on.", "Unmute, unmute."]) expect(Responder.wakes(heard)).toBe(true)
-    for (const heard of ["Unmute it.", "Unmute the Tezos one.", "Turn on the lights.", "Turn it off.", "Mute.", "Unmute?", "Turn on?", ""]) expect(Responder.wakes(heard)).toBe(false)
+    for (const heard of ["Mute.", "mute mute", "Mute, mute, mute.", "Jarvis, mute.", "Mute, sir!"]) expect(Words.halts(heard)).toBe(true)
+    for (const heard of ["Mute it.", "Mute that for an hour.", "Mute the Tezos one.", "What's muted?", "Unmute.", "Mute it, mute it.", "Mute?", "Mute, mute?", ""]) expect(Words.halts(heard)).toBe(false)
+    for (const heard of ["Unmute.", "Un-mute.", "Turn on.", "Turn it on, please.", "Jarvis, turn yourself on.", "Turn back on.", "Unmute, unmute."]) expect(Words.wakes(heard)).toBe(true)
+    for (const heard of ["Unmute it.", "Unmute the Tezos one.", "Turn on the lights.", "Turn it off.", "Mute.", "Unmute?", "Turn on?", ""]) expect(Words.wakes(heard)).toBe(false)
   })
 
   test("drops what Whisper writes for sounds that aren't words", () => {

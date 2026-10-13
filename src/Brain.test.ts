@@ -12,10 +12,10 @@ import * as Missed from "./Missed.ts"
 import * as Mutes from "./Mutes.ts"
 import * as Persona from "./Persona.ts"
 import * as Questions from "./Questions.ts"
-import type { Line } from "./Responder.ts"
 import type * as T3Actions from "./T3Actions.ts"
 import * as T3Live from "./T3Live.ts"
 import * as Threads from "./Threads.ts"
+import type { Line } from "./Words.ts"
 
 const now = Date.parse("2026-10-08T22:00:00.000Z")
 

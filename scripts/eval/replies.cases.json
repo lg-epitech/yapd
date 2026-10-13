@@ -1,0 +1,460 @@
+{
+  "view": {
+    "at": 1791626400000,
+    "projects": [
+      { "id": "p-integration", "title": "integration", "workspaceRoot": "/code/integration" },
+      { "id": "p-yapd", "title": "yapd", "workspaceRoot": "/code/yapd" }
+    ],
+    "threads": [
+      {
+        "id": "t-yapd",
+        "projectId": "p-yapd",
+        "title": "Fix the replay bug",
+        "modelSelection": { "instanceId": "claudeAgent", "model": "claude-opus-5-5" },
+        "activeRunId": null,
+        "status": "completed",
+        "latestRunCompletedAt": "2026-10-09T09:58:00.000Z",
+        "pendingRuntimeRequest": null,
+        "branchPullRequest": { "number": 41, "url": "https://example.com/yapd/pull/41", "repository": "example/yapd" },
+        "createdAt": "2026-10-09T08:10:00.000Z",
+        "updatedAt": "2026-10-09T09:58:00.000Z"
+      },
+      {
+        "id": "t-tezos",
+        "projectId": "p-integration",
+        "title": "Migrate the Tezos integration",
+        "modelSelection": { "instanceId": "claudeAgent", "model": "claude-opus-5-5" },
+        "activeRunId": null,
+        "status": "completed",
+        "latestRunCompletedAt": "2026-10-09T09:57:00.000Z",
+        "pendingRuntimeRequest": null,
+        "createdAt": "2026-10-09T08:00:00.000Z",
+        "updatedAt": "2026-10-09T09:57:00.000Z"
+      },
+      {
+        "id": "t-mina",
+        "projectId": "p-integration",
+        "title": "Open the Mina SSV2 bug tickets",
+        "modelSelection": { "instanceId": "claudeAgent", "model": "claude-opus-5-5" },
+        "activeRunId": "run-2",
+        "activityRunStatus": "running",
+        "status": "running",
+        "latestRunStartedAt": "2026-10-09T09:40:00.000Z",
+        "pendingRuntimeRequest": null,
+        "createdAt": "2026-10-09T08:30:00.000Z",
+        "updatedAt": "2026-10-09T09:52:00.000Z"
+      },
+      {
+        "id": "t-deploy",
+        "projectId": "p-yapd",
+        "title": "Ship the staging deploy",
+        "modelSelection": { "instanceId": "claudeAgent", "model": "claude-opus-5-5" },
+        "activeRunId": "run-5",
+        "activityRunStatus": "running",
+        "status": "running",
+        "latestRunStartedAt": "2026-10-09T09:45:00.000Z",
+        "pendingRuntimeRequest": { "id": "q-deploy", "kind": "user_input", "createdAt": "2026-10-09T09:59:00.000Z" },
+        "createdAt": "2026-10-09T09:00:00.000Z",
+        "updatedAt": "2026-10-09T09:59:00.000Z"
+      }
+    ]
+  },
+  "updates": {
+    "replay": {
+      "project": "yapd",
+      "spoken": "Over in yapd, the replay fix is in and the tests pass, sir.",
+      "message": "Fixed the replay bug: the menu now replays the last update. All 212 tests pass. The branch is two commits behind master.",
+      "needsYou": false,
+      "session": "s-replay",
+      "thread": "t-yapd"
+    },
+    "rig": {
+      "project": "yapd",
+      "spoken": "Over in yapd on rig, the replay fix is in and the tests pass, sir.",
+      "message": "Fixed the replay bug on rig: the menu now replays the last update. All 212 tests pass. The branch is two commits behind master.",
+      "needsYou": false,
+      "session": "s-rig",
+      "thread": "t-rig"
+    },
+    "tezos": {
+      "project": "integration",
+      "spoken": "The Tezos migration finished, sir: all forty tests pass.",
+      "message": "The Tezos migration is done. All 40 tests pass and the fee rounding now matches TzKT.",
+      "needsYou": false,
+      "session": "s-tezos",
+      "thread": "t-tezos"
+    },
+    "repeat": {
+      "project": "integration",
+      "spoken": "The Tezos migration stopped halfway, sir. Shall I repeat the migration or skip it?",
+      "message": "The migration stopped halfway through the fee tables. Shall I repeat the migration from the start, or skip it and move on to the tests?",
+      "needsYou": true,
+      "session": "s-tezos",
+      "thread": "t-tezos"
+    },
+    "deploy": {
+      "project": "yapd",
+      "spoken": "The staging deploy needs you, sir: cancel the run, or keep going?",
+      "message": "The staging deploy hit a schema drift warning. Which should I do?\n1. Cancel the run\n2. Keep going",
+      "needsYou": true,
+      "session": "s-deploy",
+      "thread": "t-deploy"
+    },
+    "merge": {
+      "project": "yapd",
+      "spoken": "Over in yapd, the PR is up. Shall I merge it, sir?",
+      "message": "The pull request is up and green. Shall I merge it?",
+      "needsYou": true,
+      "session": "s-replay",
+      "thread": "t-yapd"
+    },
+    "redirect": {
+      "project": "yapd",
+      "spoken": "Codex on yapd fixed the login redirect and the tests pass, sir. Should it merge the pull request now, sir?",
+      "message": "Fixed the login redirect; all tests pass. Should I merge the pull request now?",
+      "needsYou": true,
+      "session": "s-redirect",
+      "thread": "t-yapd"
+    },
+    "auth": {
+      "project": "yapd",
+      "spoken": "Over in yapd, the auth migration is done. Should I merge the auth migration PR now, sir? I also cleared the CI cache, which was stale.",
+      "message": "The auth migration is done and reviewed. Should I merge the PR now? I also cleared the CI cache, which was stale.",
+      "needsYou": true,
+      "session": "s-auth",
+      "thread": "t-yapd"
+    },
+    "statement": {
+      "project": "yapd",
+      "spoken": "Over in yapd, it wants your go-ahead to merge the pull request. Meanwhile the docs build is green and the changelog is updated, sir.",
+      "message": "Ready to merge the pull request once you give the go-ahead. The docs build is green and the changelog is updated.",
+      "needsYou": true,
+      "session": "s-statement",
+      "thread": "t-yapd"
+    },
+    "progress": {
+      "project": "yapd",
+      "spoken": "Over in yapd, the loader rewrite is a third of the way through, sir, with the cache layer next.",
+      "message": "Progress: the loader rewrite is about a third done. Next up is the cache layer.",
+      "needsYou": false,
+      "session": "s-progress",
+      "thread": "t-yapd"
+    },
+    "failure": {
+      "project": "integration",
+      "spoken": "The Tezos migration failed, sir: the fee tests broke after the rounding change, and nothing was merged.",
+      "message": "The migration failed: the fee tests broke after the rounding change. Nothing was merged.",
+      "needsYou": true,
+      "session": "s-tezos",
+      "thread": "t-tezos"
+    },
+    "release": {
+      "project": "yapd",
+      "spoken": "Over in yapd, the release is tagged. Should it merge the release pull request now, sir? And should it delete the release branch after?",
+      "message": "The release is tagged. Should I merge the release pull request now? And should I delete the release branch afterwards?",
+      "needsYou": true,
+      "session": "s-release",
+      "thread": "t-yapd"
+    },
+    "claude": {
+      "project": "yapd",
+      "spoken": "Claude on yapd says the PR is ready, sir.",
+      "message": "The pull request is ready for review.",
+      "needsYou": false,
+      "session": "s-claude",
+      "thread": "t-yapd"
+    }
+  },
+  "cases": [
+    {
+      "id": "S01",
+      "note": "an update tied to its thread: a send to its own thread, through pass",
+      "update": "replay",
+      "how": "tied",
+      "heard": "Tell it to rebase.",
+      "expect": { "intent": "send", "act": ["send"], "target": "own" }
+    },
+    {
+      "id": "S02",
+      "note": "a hooked update: a send to its own session, through pass and its waiting hook",
+      "update": "replay",
+      "how": "hooked",
+      "heard": "Tell it to rebase.",
+      "expect": { "intent": "send", "act": ["send"], "target": "own" }
+    },
+    {
+      "id": "S03",
+      "note": "a rig update with only its owner: a send to its own session, through pass",
+      "update": "rig",
+      "how": "owner",
+      "machine": "rig",
+      "heard": "Tell it to rebase.",
+      "expect": { "intent": "send", "act": ["send"], "target": "own" }
+    },
+    {
+      "id": "S04",
+      "note": "an untied session: a send to its own session, through pass",
+      "update": "replay",
+      "how": "untied",
+      "heard": "Tell it to rebase.",
+      "expect": { "intent": "send", "act": ["send"], "target": "own" }
+    },
+    {
+      "id": "S05",
+      "note": "over an untied update: the rebase through pass, the Mina one's through Hands, never its own thread through Hands",
+      "update": "replay",
+      "how": "untied",
+      "heard": "Tell it to rebase and tell the Mina one to wait.",
+      "expect": { "act": ["send"], "target": "own", "rest": "Mina" }
+    },
+    {
+      "id": "S06",
+      "note": "over a hooked update: the rebase through pass, the Mina one's through Hands, never its own thread through Hands",
+      "update": "replay",
+      "how": "hooked",
+      "heard": "Tell it to rebase and tell the Mina one to wait.",
+      "expect": { "act": ["send"], "target": "own", "rest": "Mina" }
+    },
+    {
+      "id": "S07",
+      "note": "the other order over an untied update: the Mina one's through Hands, the rebase left and said",
+      "update": "replay",
+      "how": "untied",
+      "heard": "Tell the Mina one to wait and tell it to rebase.",
+      "expect": { "act": ["send"], "target": "Mina" }
+    },
+    {
+      "id": "S08",
+      "note": "another thread over a Tezos update: a send to the Mina one, never the Tezos agent",
+      "update": "tezos",
+      "how": "tied",
+      "heard": "Tell the Mina one to wait.",
+      "expect": { "act": ["send"], "target": "Mina", "neverIntent": ["send"] }
+    },
+    {
+      "id": "S09",
+      "note": "the same said three times, as a Whisper loop: the same send, never resume",
+      "update": "tezos",
+      "how": "tied",
+      "heard": "Tell the Mina one to wait. Tell the Mina one to wait. Tell the Mina one to wait.",
+      "expect": { "act": ["send"], "target": "Mina", "never": ["resume"], "neverIntent": ["send", "resume"] }
+    },
+    {
+      "id": "S10",
+      "note": "show me that: shown, never sent to the agent",
+      "update": "replay",
+      "how": "tied",
+      "heard": "Show me that.",
+      "expect": { "act": ["show"], "neverIntent": ["send"] }
+    },
+    {
+      "id": "S11",
+      "note": "say that again: played again with no model",
+      "update": "replay",
+      "how": "tied",
+      "heard": "Say that again.",
+      "expect": { "intent": "answer", "act": ["again"] }
+    },
+    {
+      "id": "S12",
+      "note": "muting another thread over an update: muted in one model call, the Brain's, never sent",
+      "update": "replay",
+      "how": "tied",
+      "heard": "Mute the Tezos one.",
+      "expect": { "act": ["mute"], "target": "Tezos", "neverIntent": ["send"] }
+    },
+    {
+      "id": "S13",
+      "note": "catching up over an update: the catch-up, never sent",
+      "update": "replay",
+      "how": "tied",
+      "heard": "Catch me up.",
+      "expect": { "act": ["catchup"], "neverIntent": ["send"] }
+    },
+    {
+      "id": "S14",
+      "note": "repeat it to an update that asks whether to repeat: the Responder's, never said again",
+      "update": "repeat",
+      "how": "tied",
+      "heard": "Repeat it.",
+      "expect": { "intent": "send", "never": ["again"] }
+    },
+    {
+      "id": "S15",
+      "note": "an option's name over an update whose thread waits on that question: never stops the run",
+      "update": "deploy",
+      "how": "tied",
+      "heard": "Cancel the run.",
+      "expect": { "intent": "send", "never": ["stop"] }
+    },
+    {
+      "id": "S16",
+      "note": "a yes two seconds after an update that asked: quick's send at once",
+      "update": "merge",
+      "how": "tied",
+      "heard": "Yes.",
+      "lateBy": 2,
+      "expect": { "intent": "send" }
+    },
+    {
+      "id": "S17",
+      "note": "a yes five seconds after an update that asked: from batch 2, worked out by the model, never sent at once",
+      "update": "merge",
+      "how": "tied",
+      "heard": "Yes.",
+      "lateBy": 5,
+      "expect": { "intent": "send" }
+    },
+    {
+      "id": "S18",
+      "note": "interrupt v5: an okay before the question, which he hasn't heard",
+      "update": "redirect",
+      "how": "tied",
+      "said": "Codex on yapd fixed the login redirect and…",
+      "left": "the tests pass, sir. Should it merge the pull request now, sir?",
+      "heard": "Okay.",
+      "expect": { "intent": "resume" }
+    },
+    {
+      "id": "S19",
+      "note": "interrupt v5: a yeah before the question, which he hasn't heard",
+      "update": "redirect",
+      "how": "tied",
+      "said": "Codex on yapd fixed the login redirect and…",
+      "left": "the tests pass, sir. Should it merge the pull request now, sir?",
+      "heard": "Yeah.",
+      "expect": { "intent": "resume" }
+    },
+    {
+      "id": "S20",
+      "note": "interrupt v5: an okay once the question was said, cut in the news after it",
+      "update": "auth",
+      "how": "tied",
+      "said": "Over in yapd, the auth migration is done. Should I merge the auth migration PR now, sir? I also cleared the CI cache…",
+      "left": "which was stale.",
+      "heard": "Okay.",
+      "expect": { "intent": "send" }
+    },
+    {
+      "id": "S21",
+      "note": "interrupt v5: thanks once the question was said, cut in the news after it",
+      "update": "auth",
+      "how": "tied",
+      "said": "Over in yapd, the auth migration is done. Should I merge the auth migration PR now, sir? I also cleared the CI cache…",
+      "left": "which was stale.",
+      "heard": "Thanks.",
+      "expect": { "intent": "dismiss" }
+    },
+    {
+      "id": "S22",
+      "note": "interrupt v5: an okay cut just before the question's end",
+      "update": "redirect",
+      "how": "tied",
+      "said": "Codex on yapd fixed the login redirect and the tests pass, sir. Should it merge the pull request now,…",
+      "left": "sir?",
+      "heard": "Okay.",
+      "expect": { "intent": "send" }
+    },
+    {
+      "id": "S23",
+      "note": "interrupt v5: sounds good after the whole question",
+      "update": "auth",
+      "how": "tied",
+      "heard": "Sounds good.",
+      "expect": { "intent": "send" }
+    },
+    {
+      "id": "S24",
+      "note": "interrupt v5: got it to a progress update, cut at a quarter",
+      "update": "progress",
+      "how": "tied",
+      "said": "Over in yapd, the loader rewrite…",
+      "left": "is a third of the way through, sir, with the cache layer next.",
+      "heard": "Got it.",
+      "expect": { "intent": "dismiss" }
+    },
+    {
+      "id": "S25",
+      "note": "interrupt v5: okay, thanks to a failure cut near its end",
+      "update": "failure",
+      "how": "tied",
+      "said": "The Tezos migration failed, sir: the fee tests broke after the rounding change, and nothing was…",
+      "left": "merged.",
+      "heard": "Okay, thanks.",
+      "expect": { "intent": "dismiss" }
+    },
+    {
+      "id": "S26",
+      "note": "interrupt v5: a question put as a statement, an okay in the news after it",
+      "update": "statement",
+      "how": "tied",
+      "said": "Over in yapd, it wants your go-ahead to merge the pull request. Meanwhile the docs build is green…",
+      "left": "and the changelog is updated, sir.",
+      "heard": "Okay.",
+      "expect": { "intent": "send" }
+    },
+    {
+      "id": "S27",
+      "note": "interrupt v5: the question as the last words, its end unsaid, okay",
+      "update": "redirect",
+      "how": "tied",
+      "said": "Codex on yapd fixed the login redirect and the tests pass, sir. Should it merge the pull request…",
+      "left": "now, sir?",
+      "heard": "Okay.",
+      "expect": { "intent": "send" }
+    },
+    {
+      "id": "S28",
+      "note": "interrupt v5: the question as the last words, its end unsaid, thanks",
+      "update": "redirect",
+      "how": "tied",
+      "said": "Codex on yapd fixed the login redirect and the tests pass, sir. Should it merge the pull request…",
+      "left": "now, sir?",
+      "heard": "Thanks.",
+      "expect": { "intent": "dismiss" }
+    },
+    {
+      "id": "S29",
+      "note": "interrupt v5: a failure cut early, okay",
+      "update": "failure",
+      "how": "tied",
+      "said": "The Tezos migration failed,…",
+      "left": "sir: the fee tests broke after the rounding change, and nothing was merged.",
+      "heard": "Okay.",
+      "expect": { "intent": "dismiss" }
+    },
+    {
+      "id": "S30",
+      "note": "interrupt v5: two questions, the second unsaid, okay: only the first is answered",
+      "update": "release",
+      "how": "tied",
+      "said": "Over in yapd, the release is tagged. Should it merge the release pull request now, sir?…",
+      "left": "And should it delete the release branch after?",
+      "heard": "Okay.",
+      "expect": { "intent": "send" }
+    },
+    {
+      "id": "S31",
+      "note": "its own voice over its first second, heard as other words: nothing of his, so it picks up again",
+      "update": "claude",
+      "how": "tied",
+      "said": "Claude on…",
+      "left": "yapd says the PR is ready, sir.",
+      "echo": "Claude on yapd says",
+      "heard": "Code up.",
+      "expect": { "intent": "resume", "act": ["resume"] }
+    },
+    {
+      "id": "S32",
+      "note": "its own voice, then his words after a pause, which are surely his",
+      "update": "merge",
+      "how": "tied",
+      "said": "Over in yapd, the PR is up…",
+      "left": "Shall I merge it, sir?",
+      "echo": "Over in yapd, the PR is up",
+      "afterPause": "Merge it.",
+      "heard": "the PR is up. Merge it.",
+      "expect": { "intent": "send", "act": ["send"], "target": "own" }
+    }
+  ]
+}
