@@ -4009,8 +4009,9 @@ export const make = (options: {
         const picked = filled(decision, open)
         if (picked === undefined) return yield* unworded(open, decided, said)
         const checked = Brain.routined(Brain.check(picked, decided.situation, said), sends(open, decision, picked, decided.situation))
-        // At most one question: one the answer doesn't settle is let go.
-        if (checked._tag === "Ask") {
+        // At most one question: one the answer doesn't settle is let go. Tidying the threads he picked, which it settles, what's asked
+        // before they're tidied, like whether to archive one that's busy, is asked.
+        if (checked._tag === "Ask" && checked.open.tidying === undefined) {
           yield* Effect.logInfo("Leaving it, since the answer didn't settle which one")
           return unfinished(reply(said.leaving, decided.subject), picked.rest, said)
         }

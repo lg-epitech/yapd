@@ -13721,6 +13721,30 @@ describe("Assistant tidying", () => {
     expect(result.sent).toEqual([importer, wallets].map((one, index) => ({ type: "thread.archive", commandId: `0:${index + 1}`, threadId: one.id })))
   })
 
+  test("a busy thread he picks to archive, asked which he meant, is asked about as archiving it stops it, and only his yes to that archives it", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant((situation) => {
+          const { heard } = situation.utterance
+          if (heard === "Archive the migration one.") return Brain.decision({ act: "tidy", how: "archive", target: handle(situation, tezos), others: handle(situation, mina), sure: "low" })
+          if (heard === "The Tezos one.") return Brain.decision({ act: "tidy", how: "archive", target: handle(situation, tezos), sure: "high", pending: "answers" })
+          return undefined
+        })
+        yield* made.dictate("Archive the migration one.")
+        const which = made.spoken().at(-1)
+        yield* made.answer("The Tezos one.")
+        const asked = { said: made.spoken().at(-1), sent: tidied(made.dispatched).length }
+        yield* made.answer("Yes.")
+        return { which, asked, said: made.spoken().at(-1), sent: tidied(made.dispatched) }
+      }),
+    )
+    expect(result.which).toBe("Migrate Tezos Integration or Open Mina SSV2 Bug Tickets, sir?")
+    // Never let go as an answer that didn't settle which, nor archived without asking.
+    expect(result.asked).toEqual({ said: "Migrate Tezos Integration is still working, sir, and archiving it stops what it's doing. Archive it anyway?", sent: 0 })
+    expect(result.said).toBe("Archived, sir: Migrate Tezos Integration.")
+    expect(result.sent).toEqual([{ type: "thread.archive", commandId: "0", threadId: tezos.id }])
+  })
+
   test("a thread that gets busy while what he said is worked out isn't archived, alone or one of several he said yes to", async () => {
     /** What happens as the model works out what he said. */
     let meanwhile: Effect.Effect<void> = Effect.void
