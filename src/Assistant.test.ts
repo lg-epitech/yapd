@@ -11936,6 +11936,45 @@ describe("Assistant tidying", () => {
     expect(some.sent).toEqual([importer, wallets, docs].map((one, index) => ({ type: "thread.archive", commandId: `0:${index + 1}`, threadId: one.id })))
   })
 
+  test("taking back one thread of several archived, by its handle in ARCHIVED, unarchives only that one, and a handle that's nowhere none of them", async () => {
+    /** A thread's handle in ARCHIVED, as the model is shown it. */
+    const archivedAs = (situation: Brain.Situation, of: T3Live.Thread) => {
+      const index = (situation.archived ?? []).findIndex(({ ref }) => ref.id === of.id)
+      return index < 0 ? "" : Brain.archivedHandle(index)
+    }
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(
+          (situation) => {
+            const { heard } = situation.utterance
+            if (heard.startsWith("Archive")) {
+              return Brain.decision({ act: "tidy", how: "archive", target: [importer, fees, wallets].map((one) => handle(situation, one)).join(", "), sure: "high" })
+            }
+            if (heard === "Undo archiving the Tezos fees.") return Brain.decision({ act: "undo", how: "tidy", target: archivedAs(situation, fees), sure: "high" })
+            if (heard === "Undo archiving the Tezos docs.") return Brain.decision({ act: "undo", how: "tidy", target: "a9", sure: "high" })
+            return undefined
+          },
+          undefined,
+          { others: tezosThreads },
+        )
+        yield* made.dictate("Archive the Tezos importer, fees and wallets.")
+        yield* made.answer("Yes.")
+        const archived = made.spoken().at(-1)
+        // T3 Code archived them, which the shell then shows them as.
+        for (const one of [importer, fees, wallets]) yield* made.becomes({ ...one, archivedAt: "2026-10-01T02:18:01.000Z" })
+        // Never taken for none named, which would take back all three.
+        yield* made.dictate("Undo archiving the Tezos docs.")
+        const nowhere = { said: made.spoken().at(-1), sent: tidied(made.dispatched).length }
+        yield* made.dictate("Undo archiving the Tezos fees.")
+        return { archived, nowhere, said: made.spoken().at(-1), sent: tidied(made.dispatched).slice(3) }
+      }),
+    )
+    expect(result.archived).toBe("Archived all three, sir.")
+    expect(result.nowhere).toEqual({ said: "I couldn't tell which one you meant, sir.", sent: 3 })
+    expect(result.said).toBe("Unarchived, sir: Tezos fees.")
+    expect(result.sent).toEqual([{ type: "thread.unarchive", commandId: "0:1", threadId: fees.id }])
+  })
+
   test("a busy thread isn't archived without his yes, nor one that got busy before it", async () => {
     const result = await run(
       Effect.gen(function* () {

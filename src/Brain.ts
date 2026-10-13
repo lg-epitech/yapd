@@ -2281,8 +2281,16 @@ const writing = (
   // for it can only be the one he was hearing about.
   const unthreaded =
     undoes(choice.how) === "memory" || (undoes(choice.how) === "reminder" && !Option.exists(situation.noted ?? Option.none(), ({ about }) => Option.isSome(about)))
-  if (choice.act === "undo" && (Option.isNone(target) || undoes(choice.how) === "last" || unthreaded)) {
+  if (choice.act === "undo" && (undoes(choice.how) === "last" || unthreaded || (Option.isNone(target) && (choice.target.trim() === "" || undoes(choice.how) !== "thread")))) {
     return { _tag: "Do", plan: { decision: { ...choice, target: "" }, target: Option.none() } }
+  }
+  // Taking back what was done to a thread he names that yapd archived, by its handle in ARCHIVED, is of that thread alone, as of one on
+  // the desk: a handle that's neither is never taken for none, which would take back every thread of the tidy.
+  if (choice.act === "undo" && Option.isNone(target)) {
+    const archived = archivedBy(choice.target, situation)
+    const on = Option.exists(archived, ({ ref }) => Option.exists(about(situation.subject), (focus) => Threads.same(focus, ref)))
+    if (Option.isSome(archived) && (choice.sure === "high" || (choice.sure === "medium" && on))) return { _tag: "Do", plan: { decision: choice, target: Option.none() } }
+    return Option.isNone(archived) && candidates.length >= 2 ? ask(candidates) : { _tag: "Say", spoken: lines.cantTell }
   }
   if (Option.isNone(target)) return candidates.length >= 2 ? ask(candidates) : { _tag: "Say", spoken: lines.cantTell }
   const listed = target.value

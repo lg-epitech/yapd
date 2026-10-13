@@ -1757,7 +1757,10 @@ export const make = (options: {
       asks?: Asks,
       situation: Pick<Brain.Situation, "desk" | "archived"> = { desk: nowhere },
     ): Hands.Act | undefined => {
-      const to = Option.map(target, ({ ref }) => ref)
+      // Taking back what was done to a thread yapd archived, it's named by its handle in ARCHIVED, never on the desk.
+      const to = Option.orElse(Option.map(target, ({ ref }) => ref), () =>
+        decision.act === "undo" ? Option.map(Brain.archivedBy(decision.target, situation), ({ ref }) => ref) : Option.none(),
+      )
       // Taking back a stop is letting it carry on, unless he means a message.
       const stopped = Option.exists(
         last,
@@ -3464,7 +3467,9 @@ export const make = (options: {
         // question, is taken back out of it. That was all he took back, since it never went: he's told so, and the question's asked again
         // after, from the part it answered. Let go with "scratch that", it's let go without it. Never when the model took him to mean a reminder or a memory.
         const undone = decided.situation.desk.threads.find(({ handle }) => handle === decision.target)
-        const ours = undone === undefined || opened.open.candidates.some((ref) => Threads.same(ref, undone.ref))
+        // One yapd archived, by its handle in ARCHIVED, is never the question's.
+        const ours =
+          undone === undefined ? Option.isNone(Brain.archivedBy(decision.target, decided.situation)) : opened.open.candidates.some((ref) => Threads.same(ref, undone.ref))
         const takenBack =
           ours && ((decision.act === "undo" && decision.how !== "reminder" && decision.how !== "memory") || (decision.act === "dismiss" && Brain.takesBack(utterance.heard)))
         const open = takenBack ? withdrawing(opened.open) : opened.open
