@@ -60,6 +60,7 @@ const hooks = (handle: Server.Handle): Server.Api => ({
   replayThread: () => Effect.succeed("unknown"),
   details: () => Effect.succeedNone,
   icon: () => Effect.succeedNone,
+  clearCatchup: Effect.succeed(0),
 })
 
 /**
@@ -130,6 +131,7 @@ const stateful = Effect.gen(function* () {
         Effect.sync(() => void watching++),
         () => Effect.sync(() => void watching--),
       ),
+      clearCatchup: Effect.succeed(0),
     } satisfies Server.Api,
   }
 })

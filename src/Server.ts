@@ -240,6 +240,8 @@ export interface Api {
   readonly details: (key: string) => Effect.Effect<Option.Option<Details>>
   /** A project's image, by its machine and id. */
   readonly icon: (machine: string, project: string) => Effect.Effect<Option.Option<Icons.Image>>
+  /** Sets aside, unheard, all a catch-up would tell him now, as `unheard` counts it, without saying any of it, while yapd is off too: how many. */
+  readonly clearCatchup: Effect.Effect<number>
 }
 
 const decodeChange = Schema.decodeUnknownOption(
@@ -412,6 +414,8 @@ export const serve = (port: number, api: Api) =>
             onSome: (card) => Response.json(card),
           })
         }
+        // Only marks what a catch-up would tell as heard, so it's done while yapd is off too.
+        if (route === "POST /catchup/clear") return Response.json({ cleared: yield* api.clearCatchup })
         if (route === "GET /threads") return Response.json(yield* api.threads)
         if (route === "GET /journal") {
           const asked = paging(url.searchParams)
