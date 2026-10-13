@@ -142,8 +142,14 @@ export const reason = (failure: Option.Option<{ readonly class: string; readonly
 export interface Stop {
   readonly at: number
   readonly message: string
-  /** Not said, as a turn he was likely watching, which a turn of work yapd sent never is: T3 Code's word says that one. */
-  skipped?: "quick"
+  /**
+   * Why it told of nothing, when it didn't: "quick", not said as a turn he
+   * was likely watching, which a turn of work yapd sent never is; "dropped",
+   * nothing of it said or kept, as a slight turn whose thread its hook
+   * couldn't find in time to tell it answers him, or one that couldn't be got
+   * ready. T3 Code's word says a turn of work yapd sent in its place.
+   */
+  skipped?: "quick" | "dropped"
 }
 
 /** Words as they're compared: case, punctuation and spacing aside. */
@@ -180,8 +186,8 @@ export const whose = (stop: Stop, run: Pick<T3Actions.Ran, "final" | "others">) 
  * which takes a moment to get going, and when none had come by the time this
  * one started, the first since, while it could still be that one's, is taken
  * for it. Any other is still left to as if it were this one's. Never one
- * skipped as quick, for a run a message of yapd's started: that never told
- * of what he asked for.
+ * that told of nothing, skipped as quick or dropped, for a run a message of
+ * yapd's started: that never told him what he asked for.
  */
 export const hooked = (stops: ReadonlyArray<Stop>, run: Pick<T3Actions.Ran, "status" | "final" | "others" | "previous" | "userMessageId">, startedAt: number) =>
   hooking(stops, run, startedAt).length > 0
@@ -197,7 +203,7 @@ export const hooking = (stops: ReadonlyArray<Stop>, run: Pick<T3Actions.Ran, "st
         )
   const asked = sent(run)
   return stops.filter((stop) => {
-    if (stop.message.trim() === "" || stop.at < since || (asked && stop.skipped === "quick")) return false
+    if (stop.message.trim() === "" || stop.at < since || (asked && stop.skipped !== undefined)) return false
     const owner = whose(stop, run)
     return owner === "own" || (owner === "unknown" && !Option.exists(theirs, (taken) => taken === stop))
   })
@@ -440,7 +446,8 @@ export interface Finished {
  * what failed and what finished with no hook to tell of it, unless yapd was
  * turned off since, as `tell` queues it. `stopped` is the Stop hooks
  * sessions had, oldest first, but those a turn said in their hook's place
- * took as its run's, `finished` says a finished turn as a hook's update, and
+ * took as its run's, once what comes of each is known, so one that told of
+ * nothing is known for it, `finished` says a finished turn as a hook's update, and
  * `mention` makes "it" the thread a notice is about as it starts being said.
  */
 export const make = (options: {

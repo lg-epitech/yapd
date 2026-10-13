@@ -1,4 +1,4 @@
-import { Cause, Clock, Effect, FiberMap, Option, PubSub, STM, Stream, SubscriptionRef, TRef } from "effect"
+import { Cause, Clock, Deferred, Effect, Fiber, FiberMap, Option, PubSub, STM, Stream, SubscriptionRef, TRef } from "effect"
 import { mkdtemp, rm } from "node:fs/promises"
 import { hostname, tmpdir } from "node:os"
 import { join } from "node:path"
@@ -252,6 +252,12 @@ export const make = (
   const stops = new Map<string, ReadonlyArray<Notices.Stop>>()
   /** Stops not said since a turn said in their hook's place was theirs, which makes them that run's and no other's. */
   const taken = new WeakSet<Notices.Stop>()
+  /**
+   * Each Stop's, done once what comes of its update is known: said, kept, or
+   * dropped, which it then says. T3 Code's word for its turn waits on it, so
+   * a turn of work yapd sent whose hook told of nothing is said in its place.
+   */
+  const deciding = new WeakMap<Notices.Stop, Deferred.Deferred<void>>()
   /**
    * A turn T3 Code said finished that no hook had told of, said in its hook's
    * place, under the session `finished:<machine>:<thread>`: what tells a Stop
@@ -1014,6 +1020,12 @@ export const make = (
         )
       : Effect.succeed(false)
 
+  /** An update that couldn't be got ready, so nothing of it was said or kept: its Stop told of nothing. */
+  const unprepared = (finished: Finished) =>
+    Effect.sync(() => {
+      if (finished.stop !== undefined) finished.stop.skipped = "dropped"
+    })
+
   const prepare = (finished: Finished) => {
     const { session, turn, thread, arrivedAt, generation, hook, needsYou, turns } = finished
     if (hook !== undefined) summing.set(session, hook)
@@ -1078,9 +1090,11 @@ export const make = (
         yield* quieten(finished.stop)
         return yield* Effect.logInfo("Skipped update, kept quiet already from T3 Code's word that it finished")
       }
-      // Even a reply to a follow-up, since yapd already said it passed that on.
+      // Even a reply to a follow-up, since yapd already said it passed that on. Its Stop told of nothing, so T3 Code's word says a turn of
+      // work yapd sent in its place, as what he asked for, when its thread couldn't be found in time to tell that here.
       if (priority === "trivial") {
         yield* release(hook)
+        if (finished.stop !== undefined) finished.stop.skipped = "dropped"
         return yield* Effect.logInfo("Skipped trivial update")
       }
 
@@ -1210,7 +1224,7 @@ export const make = (
       Effect.catchAllCause((cause) =>
         Effect.zipRight(
           release(hook),
-          Cause.isInterruptedOnly(cause) ? Effect.void : Effect.logError("Could not prepare update", cause),
+          Cause.isInterruptedOnly(cause) ? Effect.void : Effect.zipRight(unprepared(finished), Effect.logError("Could not prepare update", cause)),
         ),
       ),
       Effect.annotateLogs({ project: finished.project }),
@@ -1478,8 +1492,10 @@ export const make = (
     }).pipe(events.withPermits(1))
 
   /** Returns the ticket of the session's Stop hook when it waits for a reply. */
-  const receive = (agent: Agent, payload: Payload, origin: Origin, wait: boolean) =>
-    Effect.gen(function* () {
+  const receive = (agent: Agent, payload: Payload, origin: Origin, wait: boolean) => {
+    /** A Stop's, until its update is being got ready, which then says what came of it: otherwise nothing will, so it's known at once. */
+    let undecided: Deferred.Deferred<void> | undefined
+    return Effect.gen(function* () {
       const session = key(agent, payload.session_id)
       const arrivedAt = yield* Clock.currentTimeMillis
       // Nothing heard of the session since yapd started, a Stop's turn began before, so what it answers can't be told.
@@ -1500,6 +1516,9 @@ export const make = (
         }
         case "Stop": {
           const stop: Notices.Stop = { at: arrivedAt, message: payload.last_assistant_message?.trim() ?? "" }
+          const decided = yield* Deferred.make<void>()
+          deciding.set(stop, decided)
+          undecided = decided
           // Every one, even one that's never said, so T3 Code's word that its thread finished leaves it to the hook.
           for (const [other, kept] of stops) {
             const recent = kept.filter(({ at }) => arrivedAt - at <= forgotten)
@@ -1551,35 +1570,42 @@ export const make = (
             yield* passedThrough(arrivedAt, thread, project, through, session)
             return hook
           }
-          yield* FiberMap.run(
-            preparing,
+          const summed = prepare({
             session,
-            prepare({
-              session,
-              project,
-              turn,
-              thread,
-              arrivedAt,
-              generation: currentGeneration,
-              hook: summaryHook,
-              hooked: hook !== undefined,
-              needsYou,
-              turns,
-              outside: scratched(payload.cwd, origin),
-              about: linking(payload.session_id, payload.cwd, origin),
-              owner: owning(payload.session_id, payload.cwd, origin),
-              answering: followedUp,
-              ...(prompt === undefined ? {} : { prompted: prompt }),
-              ...(through === undefined ? {} : { over: through }),
-              ...(replaced === undefined ? {} : { replaced }),
-              stop,
-              ...(prompt === undefined && first ? { unprompted: true } : {}),
+            project,
+            turn,
+            thread,
+            arrivedAt,
+            generation: currentGeneration,
+            hook: summaryHook,
+            hooked: hook !== undefined,
+            needsYou,
+            turns,
+            outside: scratched(payload.cwd, origin),
+            about: linking(payload.session_id, payload.cwd, origin),
+            owner: owning(payload.session_id, payload.cwd, origin),
+            answering: followedUp,
+            ...(prompt === undefined ? {} : { prompted: prompt }),
+            ...(through === undefined ? {} : { over: through }),
+            ...(replaced === undefined ? {} : { replaced }),
+            stop,
+            ...(prompt === undefined && first ? { unprompted: true } : {}),
+          })
+          // What came of it is known once that's done, however it ends, even stopped before it began.
+          yield* Effect.uninterruptible(
+            Effect.flatMap(FiberMap.run(preparing, session, summed), (fiber) => {
+              undecided = undefined
+              return Effect.forkIn(Effect.interruptible(Effect.zipRight(Fiber.await(fiber), Deferred.succeed(decided, undefined))), lifetime)
             }),
           )
           return hook
         }
       }
-    }).pipe(events.withPermits(1))
+    }).pipe(
+      Effect.ensuring(Effect.suspend(() => (undecided === undefined ? Effect.void : Deferred.succeed(undecided, undefined)))),
+      events.withPermits(1),
+    )
+  }
 
   /** The reply waits outside the lock, so other sessions' events keep coming in. */
   const handle: Handle = (agent, payload, origin, wait) =>
@@ -2251,8 +2277,21 @@ export const make = (
     }),
     /** Each time something said over an update is taken in, which takes the place of whatever yapd asked before. */
     replies: Stream.fromPubSub(replied),
-    /** The Stop hooks of these sessions in the last hour, when they came and what they said last, oldest first, by the agent's own ids for them, whether their updates were said or not. */
-    stopped: (sessions: ReadonlyArray<string>) => Effect.sync((): ReadonlyArray<Notices.Stop> => stopsOf(sessions)),
+    /**
+     * The Stop hooks of these sessions in the last hour, when they came and
+     * what they said last, oldest first, by the agent's own ids for them,
+     * whether their updates were said or not, once what came of each is
+     * known, so one that told of nothing says so.
+     */
+    stopped: (sessions: ReadonlyArray<string>) =>
+      Effect.suspend(() =>
+        Effect.zipRight(
+          Effect.forEach(stopsOf(sessions), (stop) => Option.match(Option.fromNullable(deciding.get(stop)), { onNone: () => Effect.void, onSome: Deferred.await }), {
+            discard: true,
+          }),
+          Effect.sync((): ReadonlyArray<Notices.Stop> => stopsOf(sessions)),
+        ),
+      ),
     /** A failure left to these Stops, said after all should what they told of be kept quiet, as his muting the thread does. */
     unheard: unheardFailure,
     finished,

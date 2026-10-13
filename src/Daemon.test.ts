@@ -4678,6 +4678,54 @@ describe("Daemon with threads muted", () => {
     expect(await said(Option.none())).toEqual([`yapd. ${answer}`])
   })
 
+  test("the first turn of work yapd started whose hook couldn't find its thread in time, and took it for slight, is said from T3 Code's word", async () => {
+    const asked = "Find out whether Apple shipped an API for glucose sensors."
+    const answer = "Apple hasn't shipped one."
+    const glucose = { machine: "Rosie", id: "t-glucose" }
+    const start = { at: 0, digest: Ledger.digest(asked), kind: "start" as const, messageId: "yapd:u1:0:m" }
+    const result = await run(
+      Effect.gen(function* () {
+        const { handle, made, wait, played, flush } = yield* make(undefined, {
+          // Just restarted, T3 Code takes too long to say which thread the hook is of.
+          link: () => Effect.as(Effect.sleep("5 seconds"), Option.some(glucose)),
+          sent: (to, since) => Effect.succeed(Threads.same(to, glucose) ? [start].filter(({ at }) => at >= since) : []),
+          trivialMessages: [answer],
+        })
+        yield* wait(600)
+        const at = yield* Clock.currentTimeMillis
+        // With no prompt seen, as after a restart.
+        yield* stopHere(handle, "s-glucose", answer)
+        // T3 Code's word asks what came of its Stop before that's known, and waits for it.
+        const asking = yield* Effect.fork(made.stopped(["s-glucose"]))
+        yield* flush
+        const waited = Option.isNone(yield* Fiber.poll(asking))
+        yield* wait(4)
+        const ran: Notices.Finished["run"] = {
+          status: "completed",
+          final: answer,
+          others: [],
+          natives: ["s-glucose"],
+          previous: Option.none(),
+          userMessageId: Option.some(start.messageId),
+          startedAt: at - 30_000,
+        }
+        const hooked = Notices.hooked(yield* Fiber.join(asking), ran, ran.startedAt)
+        yield* made.finished({
+          ...unhooked(answer, "run-1", (yield* made.power).turns),
+          about: glucose,
+          project: "",
+          turn: { prompt: Option.some(asked), message: answer },
+          at,
+          run: ran,
+          answering: true,
+        })
+        yield* wait(11)
+        return { waited, hooked, played: [...played] }
+      }),
+    )
+    expect(result).toEqual({ waited: true, hooked: false, played: [answer] })
+  })
+
   test("a follow-up sent soon after work yapd started isn't taken for its first turn when T3 Code says which message began its run", async () => {
     const asked = "Find out whether Apple shipped an API for glucose sensors."
     const followUp = "Also compare Dexcom."
