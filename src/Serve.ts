@@ -142,6 +142,17 @@ export const serve = Effect.gen(function* () {
     naming,
     // What went to a thread for him and may have got there: what answers it is his to hear, however he muted the thread.
     sent: (to, since) => ledger.steps(since, { kinds: ["message", "reply", "start"], states: ["prepared", "sent", "unknown"], machine: to.machine, thread: to.id }),
+    // Which message a thread's latest run began with, so after a restart a later turn isn't taken for the first of work yapd started.
+    began: (to) =>
+      Option.match(threads.actions(to.machine), {
+        onNone: () => Effect.succeedNone,
+        onSome: (actions) =>
+          Effect.gen(function* () {
+            const latest = Option.flatMap(yield* threads.find(to), ({ latestRunId }) => Option.fromNullable(latestRunId))
+            if (Option.isNone(latest)) return Option.none<Option.Option<string>>()
+            return Option.map(yield* actions.ran(to.id, latest.value), ({ userMessageId }) => userMessageId)
+          }).pipe(Effect.catchAll((error) => Effect.as(Effect.logWarning("Could not read which message its latest run began with", error), Option.none()))),
+      }),
     holding: modes.holding,
     detail: modes.detail,
     // "Focus", "talk shorter" or "I'm back" said over an update, in so many words: done here, never sent to the agent. Back, what was

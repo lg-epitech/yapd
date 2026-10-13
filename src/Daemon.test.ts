@@ -82,6 +82,8 @@ const make = (says?: string, options: {
   readonly unsummarizable?: ReadonlyArray<string>
   /** What yapd sent each thread for him, as the ledger has it. */
   readonly sent?: (to: Threads.Ref, since: number) => Effect.Effect<ReadonlyArray<{ readonly at: number; readonly digest: string | null }>>
+  /** The message each thread's latest run began with, as T3 Code has it. */
+  readonly began?: (to: Threads.Ref) => Effect.Effect<Option.Option<Option.Option<string>>>
   /** Messages the summary reads as only how work that carries on is going. */
   readonly progressMessages?: ReadonlyArray<string>
   /** What the summary keeps for "more" of each message, beside its headline, which is the message. */
@@ -254,6 +256,7 @@ const make = (says?: string, options: {
     ...(options.mutes === undefined ? {} : { mutes: options.mutes }),
     ...(options.owner === undefined ? {} : { owner: options.owner }),
     ...(options.sent === undefined ? {} : { sent: options.sent }),
+    ...(options.began === undefined ? {} : { began: options.began }),
     ...(options.holding === undefined ? {} : { holding: options.holding }),
     ...(options.detail === undefined ? {} : { detail: options.detail }),
     ...(options.command === undefined ? {} : { command: options.command }),
@@ -4637,6 +4640,36 @@ describe("Daemon with threads muted", () => {
       }),
     )
     expect(restarted).toEqual([`yapd. ${answer}`])
+  })
+
+  test("after a restart, a later turn of work yapd started isn't taken for its first when T3 Code says its run began with another message", async () => {
+    const answer = "Apple hasn't shipped one."
+    const glucose = { machine: "Rosie", id: "t-glucose" }
+    const start = { at: 0, digest: Ledger.digest("Find out whether Apple shipped an API for glucose sensors."), kind: "start" as const, messageId: "yapd:u1:0:m" }
+    /** What's said of a turn with no prompt seen, as after a restart, whose run began with `message`, in a thread he muted. */
+    const said = (message: Option.Option<Option.Option<string>>) =>
+      run(
+        Effect.gen(function* () {
+          const mutes = yield* muting
+          yield* mutes.mute({ key: Mutes.key.thread(glucose), called: "the glucose question" })
+          const { handle, wait, played } = yield* make(undefined, {
+            mutes,
+            link: () => Effect.succeedSome(glucose),
+            sent: (to, since) => Effect.succeed(Threads.same(to, glucose) ? [start].filter(({ at }) => at >= since) : []),
+            began: () => Effect.succeed(message),
+          })
+          yield* wait(600)
+          yield* stopHere(handle, "s-glucose", answer)
+          yield* wait(11)
+          return [...played]
+        }),
+      )
+    // Its first turn was stopped, and he typed the next himself: that one is muted like any other.
+    expect(await said(Option.some(Option.some("t3:typed")))).toEqual([])
+    expect(await said(Option.some(Option.none()))).toEqual([])
+    // Its first turn, or one T3 Code can't say of, is his answer.
+    expect(await said(Option.some(Option.some(start.messageId)))).toEqual([`yapd. ${answer}`])
+    expect(await said(Option.none())).toEqual([`yapd. ${answer}`])
   })
 
   test("a research answer that comes in quiet is held for the morning, and said at once in focus", async () => {

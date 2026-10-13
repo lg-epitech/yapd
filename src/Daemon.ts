@@ -151,6 +151,12 @@ export const make = (
         readonly messageId?: string | null
       }>
     >
+    /**
+     * The id of the message a thread's latest run began with, none when it
+     * began with none, as its machine's T3 Code has it: none at all when that
+     * can't be read, as without a T3 Code token.
+     */
+    readonly began?: (to: Threads.Ref) => Effect.Effect<Option.Option<Option.Option<string>>>
     /** Focus or quiet, while one is on, which holds for later what a mute would keep quiet: none without modes. */
     readonly holding?: Effect.Effect<Option.Option<Modes.Hold>>
     /** How much of an update is said: its headline, or all of it once he asked for everything. The headline without modes. */
@@ -909,7 +915,10 @@ export const make = (
    * T3 Code has them. A hook's turn whose prompt never came through the
    * hooks, as when it began before yapd restarted, goes by what's kept:
    * the work yapd started, while nothing of the thread was kept since, or what
-   * it sent after the last that was.
+   * it sent after the last that was. The work yapd started only when the
+   * thread's latest run began with the message it started with, where T3
+   * Code can say: a first turn that was stopped, or left nothing kept, isn't
+   * answered by the next.
    */
   const asked = (to: Threads.Ref, finished: Finished) =>
     Effect.gen(function* () {
@@ -918,7 +927,11 @@ export const make = (
       if (rows.length === 0) return Option.none()
       if (prompted === undefined) {
         const last = (yield* journal.byThread(to.machine, to.id, 1, ["update"]))[0]?.at ?? Number.NEGATIVE_INFINITY
-        return answered(rows.filter(({ at }) => at > last))
+        const since = rows.filter(({ at }) => at > last)
+        const began = options.began !== undefined && since.some(({ kind }) => kind === "start") ? yield* options.began(to) : Option.none()
+        return answered(
+          since.filter(({ kind, messageId }) => kind !== "start" || Option.match(began, { onNone: () => true, onSome: (id) => Option.exists(id, (began) => began === messageId) })),
+        )
       }
       const words = prompted.text === undefined ? "" : Ledger.digest(prompted.text)
       return answered(
