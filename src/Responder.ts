@@ -1,4 +1,4 @@
-import { Context, Data, Effect, Layer, Option, Schema } from "effect"
+import { Clock, Context, Data, Effect, Layer, Option, Schema } from "effect"
 import { aloud, inEnglish, styled, type Turn } from "./Condenser.ts"
 import * as Config from "./Config.ts"
 import { Model } from "./Model.ts"
@@ -43,9 +43,16 @@ export interface Interruption {
 
 export class RespondError extends Data.TaggedError("RespondError")<{ readonly cause: unknown }> {}
 
+/** A reply, and how it was worked out: by code at once, or by the model, with how long its call took, in milliseconds. */
+export interface Responded {
+  readonly reply: Reply
+  readonly source: "quick" | "model"
+  readonly modelMs?: number
+}
+
 export class Responder extends Context.Tag("yapd/Responder")<
   Responder,
-  { readonly respond: (interruption: Interruption) => Effect.Effect<Reply, RespondError> }
+  { readonly respond: (interruption: Interruption) => Effect.Effect<Responded, RespondError> }
 >() {}
 
 const instructions = `You're yapd, the voice that tells a developer how the work they gave their coding agents went. They interrupted you while you read them an update, or spoke right after you finished. Work out what they want from what they said.
@@ -173,14 +180,20 @@ export const ProviderResponder = Layer.effect(
       respond: (interruption) =>
         Effect.gen(function* () {
           const fast = yield* quick(interruption, persona.onIt())
-          if (fast !== undefined) return fast
+          if (fast !== undefined) return { reply: fast, source: "quick" } satisfies Responded
+          const began = yield* Clock.currentTimeMillis
           const reply = yield* model.ask(Reply, prompt(interruption, style)).pipe(Effect.mapError((cause) => new RespondError({ cause })))
+          const modelMs = (yield* Clock.currentTimeMillis) - began
           // Going ahead, an "On it" the model wrote anyway gives way to a line of yapd's own: picked as it's passed on
           // when that was all of it, or put in its place now, with the rest after it.
           const said = reply.spoken.trim()
           const rest = reply.intent === "send" ? afterOnIt(said, yield* persona.lines) : said
           const spoken = yield* inEnglish(model, rest)
-          return { ...reply, spoken: rest === said || spoken === "" ? spoken : withOnIt(yield* persona.onIt(), spoken) }
+          return {
+            reply: { ...reply, spoken: rest === said || spoken === "" ? spoken : withOnIt(yield* persona.onIt(), spoken) },
+            source: "model",
+            modelMs,
+          } satisfies Responded
         }),
     }
   }),

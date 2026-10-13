@@ -231,18 +231,20 @@ const make = (says?: string, options: {
         const { heard } = interruption
         const fast = options.quickly === true ? Effect.runSync(quick(interruption, Effect.succeed("On it."))) : undefined
         return fast !== undefined
-          ? Effect.succeed(fast)
+          ? Effect.succeed({ reply: fast, source: "quick" as const })
           : says === undefined
           ? Effect.die("nothing to respond to")
           : Effect.sync(() => void responded.push(heard)).pipe(
               Effect.zipRight(Effect.sleep(`${options.thinking ?? 0} seconds`)),
-              Effect.as(
-                options.dismiss === true
-                  ? { intent: "dismiss" as const, spoken: "", message: "" }
-                  : options.answer === undefined
-                    ? { intent: "send" as const, spoken: "Okay, passed on.", message: heard }
-                    : { intent: "answer" as const, spoken: options.answer, message: "" },
-              ),
+              Effect.as({
+                reply:
+                  options.dismiss === true
+                    ? { intent: "dismiss" as const, spoken: "", message: "" }
+                    : options.answer === undefined
+                      ? { intent: "send" as const, spoken: "Okay, passed on.", message: heard }
+                      : { intent: "answer" as const, spoken: options.answer, message: "" },
+                source: "model" as const,
+              }),
             )
       },
     }),
