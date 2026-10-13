@@ -236,6 +236,7 @@ export const serve = Effect.gen(function* () {
   const drafts = yield* Drafts.make({
     machines: everywhere,
     rules: Preferences.load(preferences),
+    memories: memories.list,
     recent: daemon.recent,
     expect: (yield* Vocabulary).expect,
     ledger,

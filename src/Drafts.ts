@@ -1,6 +1,7 @@
 import { Clock, type Duration, Effect, Either, Fiber, Option } from "effect"
 import { type Catalog, LaunchError, type Launcher, type Request, type Started } from "./Launcher.ts"
 import * as Ledger from "./Ledger.ts"
+import type * as Memory from "./Memory.ts"
 import { afterOnIt, type Lines, Persona, withOnIt } from "./Persona.ts"
 import type { Heard } from "./Recent.ts"
 import type { Line } from "./Responder.ts"
@@ -237,6 +238,8 @@ export const make = (options: {
   readonly machines: ReadonlyArray<Machine>
   /** The user's rules, read as they are now. */
   readonly rules: Effect.Effect<Option.Option<string>>
+  /** What they asked yapd to keep in mind by voice, as it is now. */
+  readonly memories?: Effect.Effect<ReadonlyArray<Memory.Memory>>
   /** What the user was told lately, newest first. */
   readonly recent: Effect.Effect<ReadonlyArray<Heard>>
   /** Says which names there are, for what transcribes the dictation that's under way. */
@@ -449,6 +452,7 @@ export const make = (options: {
               ? {
                   listings: yield* listings,
                   rules: yield* options.rules,
+                  memories: yield* options.memories ?? Effect.succeed([]),
                   recent: yield* options.recent,
                   earlier: [],
                   lines,
