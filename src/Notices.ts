@@ -1030,23 +1030,32 @@ export const make = (options: {
             const detail = { usage: { provider: who, window: id, level }, ...(window.resetsAt === undefined ? {} : { resets: window.resetsAt }) }
             const hour = Number.isNaN(reset) ? new Date(now).toISOString().slice(0, 13) : new Date(reset).toISOString().slice(0, 13)
             const entry = { at: now, kind: "notice" as const, said: spoken, key: key.used(who, id, level, hour) }
-            const quiet = level === 95 && Option.contains(yield* (options.holding ?? Effect.succeedNone), "quiet")
-            if (level === 80 || quiet) {
-              // Kept for the digest, or for the morning in quiet: not something that needs him. While yapd is off, it's kept as what came in
-              // then is, for a catch-up alone, never brought up by the digest or the rundown once it's on.
+            const quiet = Effect.map(options.holding ?? Effect.succeedNone, Option.contains<Modes.Hold>("quiet"))
+            // Kept for the digest, or for the morning in quiet: not something that needs him. While yapd is off, it's kept as what came in
+            // then is, for a catch-up alone, never brought up by the digest or the rundown once it's on.
+            const hold = Effect.gen(function* () {
               const { on } = yield* options.power
               const held = !on ? "off" : level === 80 ? "progress" : "quiet"
               const claimed = yield* journal.claim({ ...entry, detail: { ...detail, held, priority: "done" } })
               if (Option.isSome(claimed)) yield* Effect.logInfo(`Kept for later: ${spoken}`)
-            } else {
-              // Only while it's still as high, in the same window, by the time it's said.
-              const still = Effect.map(threads.usage, (now) =>
+            })
+            if (level === 80 || (yield* quiet)) yield* hold
+            else {
+              // Only while it's still as high, in the same window, by the time it's said; and should quiet have begun while it waited, it's
+              // kept for the morning instead.
+              const high = Effect.map(threads.usage, (now) =>
                 Option.exists(now, ({ providers }) =>
                   providers.some(
                     (each) => provider(each.provider) === who && each.windows.some((other) => (other.id ?? `${other.kind}:${other.label}`) === id && other.usedPercent >= 95 && sameWindow(other.resetsAt, window.resetsAt)),
                   ),
                 ),
               )
+              const still = Effect.gen(function* () {
+                if (!(yield* high)) return false
+                if (!(yield* quiet)) return true
+                yield* hold
+                return false
+              })
               const { turns } = yield* options.power
               yield* notify(undefined, spoken, { ...entry, detail }, still, now, turns, entry.key)
             }

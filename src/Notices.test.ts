@@ -1740,6 +1740,38 @@ describe("Notices of usage", () => {
     expect(result.next).toHaveLength(1)
   })
 
+  test("a 95 percent warning waiting to be said as quiet begins is kept for the morning, never said that night", async () => {
+    const usage = () => [
+      {
+        instanceId: "claudeAgent",
+        displayName: "Claude",
+        enabled: true,
+        status: "ready",
+        usageLimits: {
+          checkedAt: new Date(now).toISOString(),
+          windows: [{ id: "claude-weekly", kind: "weekly", label: "Weekly", usedPercent: 96, resetsAt: new Date(now + 3 * 24 * 60 * 60_000).toISOString() }],
+        },
+      },
+    ]
+    let mode = Option.none<"focus" | "quiet">()
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* notices({ view: [], bounded: {}, usage, queueing: true, holding: () => mode })
+        yield* made.usage
+        // It waits behind something being said, and he says goodnight.
+        mode = Option.some("quiet")
+        yield* made.speak
+        // Read again later that night.
+        yield* made.wait(16 * 60)
+        yield* made.usage
+        yield* made.speak
+        return { told: made.told, morning: (yield* made.journal.held(0, 200, { only: ["quiet"] })).map(({ said }) => said) }
+      }),
+    )
+    expect(result.told).toEqual([])
+    expect(result.morning).toEqual([expect.stringMatching(/^Claude's weekly limit is at 96 percent, sir\. It resets .*\.$/)])
+  })
+
   test("a threshold passed while yapd is off is kept for a catch-up alone, never for the digest or the morning", async () => {
     const usage = () => [
       {
