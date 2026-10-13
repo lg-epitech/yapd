@@ -2719,6 +2719,12 @@ export const make = (options: {
         const mute = by.value
         return Option.some({ key: mute.key, called: Brain.mutedName(mute, situation.desk), project: mute.project, it: false })
       }
+      // The subagent he's on about by its own handle in FOCUS, which is never on the desk: muted by itself, never the thread it's part of.
+      const subagent = Brain.subagentBy(plan.decision.target, situation)
+      if (Option.isSome(subagent) && subagent.value.subagent !== undefined) {
+        const { child, called } = subagent.value.subagent
+        return Option.some({ key: Mutes.key.thread(child), called, project: subagent.value.project, it: true })
+      }
       // Only "mute it", worked out without the model, means what he's on about with nothing named.
       if (thought.source !== "fast") return Option.none()
       const { subject } = situation

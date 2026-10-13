@@ -1618,23 +1618,24 @@ describe("Brain", () => {
       expect(checked._tag === "Do" ? checked.plan.decision.how : checked).toBe("clear")
     })
 
+    // An update from T3 Code's review of the Tezos migration, run as its subagent.
+    const subagent: Assistant.Subject = {
+      _tag: "Session",
+      update: {
+        session: "codex:s-review",
+        project: "integration",
+        turn: { prompt: Option.none(), message: "One blocker." },
+        needsYou: false,
+        spoken: "For Migrate Tezos Integration: one blocker.",
+        audio: "/tmp/update.wav",
+        thread: { agent: "codex", session: "s-review", cwd: "/code/integration", message: "One blocker.", origin: {} },
+        at: now - 20_000,
+        subagent: { child: { machine: "Rosie", id: "t-review" }, called: "Sol review", head: { ref: ref(tezos), called: "Migrate Tezos Integration" } },
+      },
+      said: "For Migrate Tezos Integration: one blocker.",
+    }
+
     test("'read its subagents' or 'stop reading their subagents' are the thread he's on about, or the one a subagent's update is part of, with no model, and any other way is the model's", () => {
-      // An update from T3 Code's review of the Tezos migration, run as its subagent.
-      const subagent: Assistant.Subject = {
-        _tag: "Session",
-        update: {
-          session: "codex:s-review",
-          project: "integration",
-          turn: { prompt: Option.none(), message: "One blocker." },
-          needsYou: false,
-          spoken: "For Migrate Tezos Integration: one blocker.",
-          audio: "/tmp/update.wav",
-          thread: { agent: "codex", session: "s-review", cwd: "/code/integration", message: "One blocker.", origin: {} },
-          at: now - 20_000,
-          subagent: { child: { machine: "Rosie", id: "t-review" }, called: "Sol review", head: { ref: ref(tezos), called: "Migrate Tezos Integration" } },
-        },
-        said: "For Migrate Tezos Integration: one blocker.",
-      }
       expect(mute("Read me its subagents.")).toMatchObject({ act: "mute", how: "subagents", target: tezosHandle(), when: "" })
       expect(mute("Stop reading their subagents.")).toMatchObject({ act: "mute", how: "nosubagents", target: tezosHandle(), when: "" })
       expect(mute("Don't read its subagents.", { subject: subagent })).toMatchObject({ act: "mute", how: "nosubagents", target: "" })
@@ -1647,6 +1648,24 @@ describe("Brain", () => {
       // "What's muted?" ends with whose subagents are read.
       const reading = [{ key: `t3:Rosie:${tezos.id}`, at: now - 60_000 }]
       expect(mute("What's muted?", { reading })?.spoken).toBe("Nothing's muted, sir. I'm reading you the subagents of Migrate Tezos Integration.")
+    })
+
+    test("the model mutes a subagent he's on about by its own handle, for as long as he says, and 'read me <thread>'s subagents' is them read from now on, never only what they said", () => {
+      // FOCUS gives the subagent a handle of its own, beside the thread it's part of, which a mute takes as it takes one of MUTED.
+      expect(Brain.prompt(situation("Mute it until tomorrow.", { subject: subagent }), Option.none())).toContain(
+        `s1, «Sol review», one of the subagents of ${tezosHandle()}. Your update from it`,
+      )
+      const timed = Brain.check(Brain.decision({ act: "mute", how: "mute", target: "s1", when: "2026-10-09T09:00" }), situation("Mute it until tomorrow.", { subject: subagent }), lines)
+      expect(timed._tag === "Do" ? timed.plan.decision : timed).toMatchObject({ act: "mute", how: "mute", target: "s1", when: "2026-10-09T09:00" })
+      const read = (heard: string) => Brain.check(Brain.decision({ act: "catchup", how: "subagents", target: tezosHandle() }), situation(heard), lines)
+      for (const heard of ["Read me the Tezos migration's subagents.", "Read me the subagents of the Tezos migration.", "Can you read me its subagents from now on?"]) {
+        const checked = read(heard)
+        expect([heard, checked._tag === "Do" ? checked.plan.decision : checked]).toMatchObject([heard, { act: "mute", how: "subagents", target: tezosHandle(), when: "" }])
+      }
+      for (const heard of ["What did the Tezos migration's subagents say?", "Read me what the Tezos migration's subagents said.", "Read me the Tezos migration's subagents' findings."]) {
+        const checked = read(heard)
+        expect([heard, checked._tag === "Do" ? checked.plan.decision : checked]).toMatchObject([heard, { act: "catchup", how: "subagents" }])
+      }
     })
 
     test("the model is told which threads' subagents are read, only while any are, and that reading them lasts until he says otherwise", () => {

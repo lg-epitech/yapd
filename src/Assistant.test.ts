@@ -592,11 +592,11 @@ const assistant = (
       questions,
       flush,
       until,
-      /** An update starts being read to him, only its headline when it has `more`. */
-      reading: (project: string, spoken: string, more?: string) =>
+      /** An update starts being read to him, only its headline when it has `more`, and with `also`, like the subagent it's from. */
+      reading: (project: string, spoken: string, more?: string, also: Partial<Conversation.Update> = {}) =>
         Effect.flatMap(TestClock.currentTimeMillis, (at) =>
           Effect.sync(() => {
-            listening = Option.some({ update: update(project, spoken, at, more), said: spoken, at, playing: true, turns: power.turns })
+            listening = Option.some({ update: { ...update(project, spoken, at, more), ...also }, said: spoken, at, playing: true, turns: power.turns })
           }),
         ),
       /** The update being read was said to the end. */
@@ -10290,6 +10290,37 @@ describe("Assistant muting", () => {
       "Nothing's muted, sir. I'm reading you the subagents of Open Mina SSV2 Bug Tickets and Migrate Tezos Integration.",
     ])
     expect(result.reading.toSorted()).toEqual([`t3:Rosie:${tezos.id}`, `t3:Rosie:${mina.id}`].toSorted())
+    expect(result.dispatched).toBe(0)
+  })
+
+  test("a subagent he's on about, muted by the model for as long as he says, is muted alone by its own handle, and the thread it's part of only by name", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { reading, dictate, spoken, mutes, dispatched } = yield* assistant(
+          (situation) =>
+            situation.utterance.heard.includes("Tezos")
+              ? Brain.decision({ act: "mute", how: "mute", target: handle(situation, tezos) })
+              : Brain.decision({ act: "mute", how: situation.utterance.heard.startsWith("Unmute") ? "unmute" : "mute", target: "s1", when: "for an hour" }),
+          undefined,
+          { muting: true },
+        )
+        // T3 Code's review of the Tezos migration, run as its subagent, read to him.
+        const subagent = { child: { machine: "Rosie", id: "t-review" }, called: "Sol review", head: { ref: { machine: "Rosie", id: tezos.id }, called: "Migrate Tezos Integration" } }
+        yield* reading("integration", "For Migrate Tezos Integration: one release blocker is left.", undefined, { session: "codex:s-review", subagent })
+        yield* dictate("Mute this one for an hour.")
+        const muted = yield* keys(mutes)
+        yield* dictate("Unmute it.")
+        yield* dictate("Mute the Tezos migration.")
+        return { spoken: spoken(), muted, after: yield* keys(mutes), dispatched: dispatched.length }
+      }),
+    )
+    expect(result.spoken).toEqual([
+      `Muted it until ${Brain.time(now + 60 * 60_000)}, sir. I'll still tell you if it needs you.`,
+      "Unmuted it, sir.",
+      "Muted Migrate Tezos Integration, sir. I'll still tell you if it needs you.",
+    ])
+    expect(result.muted).toEqual([`t3:Rosie:t-review until ${new Date(now + 60 * 60_000).toISOString()}`])
+    expect(result.after).toEqual([`t3:Rosie:${tezos.id}`])
     expect(result.dispatched).toBe(0)
   })
 

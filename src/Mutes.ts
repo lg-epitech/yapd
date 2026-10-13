@@ -207,6 +207,20 @@ export const aboutSubagents = (heard: string) => {
   )
 }
 
+/**
+ * Whether he asks, as a whole, to have a thread's subagents read to him, by
+ * its name or as "its", like "read me the Tezos migration's subagents" or
+ * "read me the subagents of the Tezos migration": which thread is the
+ * model's to tell. Never what they said, like "read me what its subagents
+ * said" or "read me its subagents' findings".
+ */
+export const readsSubagents = (heard: string) => {
+  const said = gist(heard)
+  const asks = "^(?:(?:can|could|would|will) you )?(?:read|start reading)(?: me| us)? (?!what\\b)"
+  const after = "(?: (?:too|again|aloud|out loud|from now on))?$"
+  return new RegExp(`${asks}(?:its|their|.+(?:'s|s'|')) subagents${after}`).test(said) || new RegExp(`${asks}(?:the )?subagents of .+$`).test(said)
+}
+
 /** A thread whose subagents he has read to him. */
 export interface Reading {
   /** Its key, as a thread's. */
