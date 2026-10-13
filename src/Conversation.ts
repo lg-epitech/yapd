@@ -8,6 +8,7 @@ import { plain, RelayError, type Thread } from "./Relay.ts"
 import { Journal } from "./Journal.ts"
 import { Persona } from "./Persona.ts"
 import { agreed, gist, type Line, noted, type Reply, Responder } from "./Responder.ts"
+import * as T3Actions from "./T3Actions.ts"
 import type * as Threads from "./Threads.ts"
 import { Transcriber } from "./Transcriber.ts"
 import { Vad } from "./Vad.ts"
@@ -846,9 +847,11 @@ export const make = (options: {
             // Muting its thread is done, and said, once he's stopped.
             const muted = reply.intent === "mute" ? yield* reply.muting : undefined
             const answer = muted ?? reply.spoken
-            // Held back as it could give a secret away, it's kept and logged nowhere: whether it is, is known before either.
-            const withheld = reply.intent === "send" && (yield* options.withholds(update, plain(reply.message)))
-            yield* Effect.logInfo(withheld ? "Heard something to send that could give a secret away, so it's held back" : `Heard: ${heard}`)
+            // Held back as it could give a secret away, it's kept and logged nowhere: whether it is, is known before either. Whatever the
+            // model made of it, since his words may be one however it's answered, like a "remember …" he's told to ask with the shortcut.
+            const holds = reply.intent === "send" && (yield* options.withholds(update, plain(reply.message)))
+            const withheld = T3Actions.revealing(heard) || holds
+            yield* Effect.logInfo(withheld ? "Heard something that could give a secret away, so it's held back" : `Heard: ${heard}`)
             yield* Effect.logInfo(`Reply: ${reply.intent}${answer === "" ? "" : `, saying: ${answer}`}`)
             // Ended partway on no more than what may all have been its own voice, like its "Over—" heard as "Okay.", it's left
             // unheard, so "what did I miss?" brings it back, and nothing of it is noted as his.
