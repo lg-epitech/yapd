@@ -12067,7 +12067,7 @@ describe("Assistant memories", () => {
     const unsaved = { said: "I couldn't keep that in your own words, sir, so I didn't save it.", kept: [], sent: [] }
     expect(await saving("Remember that we never use C++ for the parser.", "use C++ for the parser", "fact")).toEqual(unsaved)
     expect(await saving("Actually, remember that rig runs the nightly.", "rig runs the nightly", "fact")).toEqual({ said: alone, kept: [], sent: [] })
-    // Another request after it is done as ever when it's all the model's rest, his words after an "and" or a comma, and the fact all he
+    // Another request after it is done as ever when it's all the model's rest, his words after an "and", "then" or "also", and the fact all he
     // said before them; otherwise nothing is kept, nor anything of the rest done.
     expect(await saving("Remember that rig runs the nightly, and tell the Mina one to rebase.", "rig runs the nightly", "fact")).toEqual({
       said: "Noted, sir. On it: Open Mina SSV2 Bug Tickets.",
@@ -12088,6 +12088,15 @@ describe("Assistant memories", () => {
       sent: [],
     })
     expect(await saving("Remember that rig runs the nightly and tell the Mina one to rebase.", "rig runs the nightly", "fact", "the Mina one to rebase")).toMatchObject({ kept: [], sent: [] })
+    // Never at a comma, a semicolon or a full stop alone, which may be his pause within the fact, so what follows is never taken off it.
+    expect(await saving("Remember that the deploy script is safe, unless it's Friday.", "the deploy script is safe", "fact", "unless it's Friday")).toEqual({
+      said: `${alone} I left the rest: unless it's Friday.`,
+      kept: [],
+      sent: [],
+    })
+    for (const heard of ["Remember that rig runs the nightly. Tell the Mina one to rebase.", "Remember that rig runs the nightly; tell the Mina one to rebase."]) {
+      expect([heard, await saving(heard, "rig runs the nightly", "fact", "tell the Mina one to rebase")]).toEqual([heard, { said: `${alone} I left the rest: tell the Mina one to rebase.`, kept: [], sent: [] }])
+    }
     expect(await saving("Okay, remember that Rig uses C++ for the parser, thanks.", "rig uses C++ for the parser", "fact")).toMatchObject({ kept: ["Rig uses C++ for the parser"] })
     // A word to yapd is left out only before what he asks, or once a pause sets it off: one that runs straight into his words is his, so
     // the model's copy without it keeps nothing.

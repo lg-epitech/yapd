@@ -2077,10 +2077,15 @@ const aroundFact = {
  */
 const spokenFact = (said: string, fact: string) => inHisWords(said, fact, aroundFact.ahead, aroundFact.behind)
 
-/** What joins another request on after a fact: only spaces, a comma, a semicolon or a full stop, and "and", "then" or "also", with one of those. */
+/**
+ * What joins another request on after a fact: "and", "then" or "also", with
+ * only spaces and marks around it, like the comma of ", and". Never a comma,
+ * a semicolon or a full stop alone, which may only be his pause within the
+ * fact, like the comma of "the deploy script is safe, unless it's Friday".
+ */
 const joinedOn = {
   only: new RegExp(`^(?:${gap}|${phrased(joiners)})*$`, "iu"),
-  any: new RegExp(`[,;]|\\.(?![\\p{L}\\p{N}])|${phrased(joiners)}`, "iu"),
+  any: new RegExp(phrased(joiners), "iu"),
   first: new RegExp(`^\\s*${phrased(joiners)}`, "iu"),
   // After the other request, as after a routine's steps: words to yapd a pause sets off.
   after: behind([]),
@@ -2088,11 +2093,12 @@ const joinedOn = {
 
 /**
  * A fact he said with another request after it, as he said it: when the
- * model's `rest` is all he said after an "and", "then", "also" or a comma,
- * word for word, and its `fact` all he said between "remember that" and
- * there, as `spokenFact` takes it, so where the fact ends is what he said,
- * never the model's say. None otherwise, so the fact kept is never less than
- * he said of it, nor is the rest more than he asked after it.
+ * model's `rest` is all he said after an "and", "then" or "also", word for
+ * word, and its `fact` all he said between "remember that" and there, as
+ * `spokenFact` takes it, so where the fact ends is what he said, never the
+ * model's say. None otherwise, as at a comma, a semicolon or a full stop
+ * alone, so the fact kept is never less than he said of it, nor is the rest
+ * more than he asked after it. The only way a rest goes on after a fact.
  */
 const spokenFactThen = (said: string, fact: string, rest: string) => {
   const wanted = worded(rest)
@@ -2470,7 +2476,7 @@ export const check = (given: Decision, situation: Situation, lines: Lines): Chec
       // or before "when I say", and a fact as all he said after a "remember that" and an everyday way of asking before it, but for words
       // to yapd a pause sets off, every mark and symbol kept. The model's words only have to say the same, symbols and all, so its "C" for
       // his "C++" keeps nothing, as does a fact said with more than it, like a "never" it leaves out, or another request in the same
-      // breath, unless that's all the rest the model gave, his words after an "and" or a comma, and the fact all he said before it.
+      // breath, unless that's all the rest the model gave, his words after an "and", "then" or "also", and the fact all he said before it.
       if (utterance.echo !== undefined || heard === "") return doing({ decision: { ...choice, target: "" }, target: Option.none() })
       const his = routine === undefined ? (spokenFact(heard, text) ?? spokenFactThen(heard, text, choice.rest)) : spokenSteps(heard, text)
       if (his === undefined) {
