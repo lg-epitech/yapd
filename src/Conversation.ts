@@ -96,6 +96,18 @@ const patience = "40 seconds"
  * what goes on longer, like a TV, is no reason to keep listening for it.
  */
 const outburst = 4_000
+/**
+ * How long "Mute.", even said again and again, can go on, in seconds of
+ * speech: what's longer, like a TV's talk, isn't it, so Whisper isn't asked.
+ */
+const curt = 2.5
+/**
+ * How long the moment after a line played through for "Mute." alone lasts
+ * once something waits to be said next, unless he's begun saying something:
+ * it's the pause between lines, so a "Mute." begun as the line ended is heard,
+ * and what's next starts hardly later than it would.
+ */
+const breather: Duration.DurationInput = "500 millis"
 /** Volume while it's still unclear whether the user is talking. */
 const ducked = 0.25
 /** How far back to pick up after talk that wasn't meant for yapd. */
@@ -287,6 +299,13 @@ export const make = (options: {
    * it, "Mute." is a stop, as it always was.
    */
   readonly off?: Effect.Effect<void>
+  /**
+   * Once something waits to be said next: the moment after a line played
+   * through listening only for "Mute.", like a notice, is then over after the
+   * pause between lines, rather than holding it up. Without it, that moment
+   * is the usual one.
+   */
+  readonly queued?: Effect.Effect<void>
 }) =>
   Effect.gen(function* () {
     const lifetime = yield* Effect.scope
@@ -308,6 +327,9 @@ export const make = (options: {
      * microphone, was about muting, as that "mute" may be its own.
      */
     const halted = (heard: string, echo: string | undefined) => options.off !== undefined && halts(heard) && !/mute/i.test(echo ?? "")
+
+    /** Once something waits to be said next, if that's ever known. */
+    const queued = options.queued ?? Effect.never
 
     /** Starts listening, if there's a microphone. That's only known once something plays. */
     const open = (scope: Scope.Scope) =>
@@ -360,10 +382,10 @@ export const make = (options: {
      * when it can't be played, `confirmed` once it's known to be, which with
      * afplay is only once it has played to the end, and `through` once it
      * has, before that wait: the user has heard it, whatever they say after.
-     * `heeding`, it plays through whatever's said, listening only for
-     * "Mute.", over it and the usual moment after it, whatever `wait` is,
-     * ducked while he talks over it when it `ducks`, and that moment is cut
-     * short once something's `queued` to be said after it.
+     * `heeding`, it plays through whatever's said, never turned down,
+     * listening only for "Mute.", over it and the usual moment after it,
+     * whatever `wait` is, which is over after the pause between lines once
+     * something's queued to be said next.
      */
     const speak = (
       path: string,
@@ -376,12 +398,10 @@ export const make = (options: {
         readonly confirmed?: Effect.Effect<void>
         readonly through?: Effect.Effect<void>
         readonly heeding?: boolean
-        readonly ducks?: boolean
-        readonly queued?: Effect.Effect<void>
       } = {},
     ) =>
       Effect.gen(function* () {
-        const { wait = linger, begun = Effect.void, confirmed = Effect.void, through = Effect.void, heeding = false, ducks = false, queued = Effect.never } = given
+        const { wait = linger, begun = Effect.void, confirmed = Effect.void, through = Effect.void, heeding = false } = given
         const playback = yield* audio.play(path, from)
         yield* begun
         if (playback.confirmed) yield* confirmed
@@ -393,7 +413,7 @@ export const make = (options: {
           yield* played
           return { _tag: "Finished" } satisfies Outcome
         }
-        return yield* (heeding ? heed(playback, listening, text, from, played, ducks, queued) : listen(playback, listening, text, from, wait, played))
+        return yield* (heeding ? heed(playback, listening, text, from, played) : listen(playback, listening, text, from, wait, played))
       }).pipe(Effect.scoped)
 
     /**
@@ -408,20 +428,17 @@ export const make = (options: {
      * the line or the usual moment after it, and then turns yapd off: for a
      * line nothing else he'd say has anywhere to go, like a notice, or the
      * rest of one he's talked over too often with what wasn't meant for yapd,
-     * say for a TV. Nothing else said over it stops it, and nothing else of
-     * what's said is kept or logged. What `ducks`, like a notice, is ducked
-     * while he talks, as a line it listens over is, so he hears at once he's
-     * heard and his word is heard clear of it, and it's back to full volume
-     * once what he said is heard out and isn't "Mute.": never the rest of a
-     * line played through for a TV, which talk that goes on would keep
-     * quiet, nor over its first seconds, while its own voice can still get
-     * into the microphone, which would dip it for nothing he said. The
-     * moment after it is over at once, rather than holding up what's
-     * `queued` to be said next, which listens for "Mute." itself. What he's
-     * still saying once that moment is over is heard out, for as long as it
-     * could be "Mute.".
+     * say for a TV. Nothing else said over it stops it or turns it down, so
+     * talk in the room, a TV or a video never keeps it low, and nothing else
+     * of what's said is kept or logged: what's longer than "Mute." could be
+     * isn't even transcribed. The moment after it is over after the pause
+     * between lines once something's `queued` to be said next, which listens
+     * for "Mute." itself, unless he's begun saying something by then. What
+     * he's still saying once that moment is over is heard out, for as long as
+     * it could be "Mute.", and so is what's begun after it by the time it's
+     * made out, so his "Mute." right after other talk isn't missed.
      */
-    const heed = (playback: Playback, ear: Ear, text: string, from: number, through: Effect.Effect<void>, ducks: boolean, queued: Effect.Effect<void>) =>
+    const heed = (playback: Playback, ear: Ear, text: string, from: number, through: Effect.Effect<void>) =>
       Effect.gen(function* () {
         const { signals } = ear
         const id = fresh()
@@ -440,47 +457,39 @@ export const make = (options: {
         let onset: number | undefined
         let since = 0
         let echoing = false
-        /** Played to the end, and then the usual moment after it too. */
+        /** Played to the end. */
         let played = false
-        let over = false
-        /** Ducked for what he's saying. */
-        let lowered = false
-        /** Back to full volume, while it's still playing, once what ducked it is over. */
-        const unduck = Effect.suspend(() => {
-          if (!lowered) return Effect.void
-          lowered = false
-          return played ? Effect.void : playback.volume(1)
-        })
-        // Once it's all over, only what he's still saying is waited for, while it could yet be "Mute.": a microphone gone quiet, or talk
-        // that goes on, like a TV's, ends it as one gone deaf does.
+        /** When the usual moment after it was over too, by the clock. */
+        let over: number | undefined
+        // Once it's all over, only what he's begun is waited for, while it could yet be "Mute.": a microphone gone quiet, or talk that goes
+        // on, like a TV's, ends it as one gone deaf does. With nothing begun, only what's come in already is looked at, never waited for.
         const next = Effect.suspend(() =>
-          over
-            ? Effect.flatMap(Clock.currentTimeMillis, (now) =>
-                Queue.take(signals).pipe(
-                  Effect.timeout(Math.max(0, since + outburst - now)),
-                  Effect.orElseSucceed((): Signal => ({ _tag: "Deaf" })),
+          over === undefined
+            ? Queue.take(signals)
+            : onset === undefined
+              ? Effect.map(Queue.poll(signals), Option.getOrElse((): Signal => ({ _tag: "Deaf" })))
+              : Effect.flatMap(Clock.currentTimeMillis, (now) =>
+                  Queue.take(signals).pipe(
+                    Effect.timeout(Math.max(0, since + outburst - now)),
+                    Effect.orElseSucceed((): Signal => ({ _tag: "Deaf" })),
+                  ),
                 ),
-              )
-            : Queue.take(signals),
         )
         while (true) {
           const signal = yield* next
           switch (signal._tag) {
-            case "Onset":
+            case "Onset": {
+              const now = yield* Clock.currentTimeMillis
+              // Begun too long after that moment to be his "Mute." right after other talk, it's more of that talk, which holds nothing up.
+              if (over !== undefined && now > over + outburst) return { _tag: "Finished" } satisfies Outcome
               onset = yield* position
-              since = yield* Clock.currentTimeMillis
+              since = now
               echoing = signal.echo
-              // Never over its first seconds, by the clock, while its own voice can still get into the microphone: it would dip for that.
-              if (ducks && !played && !echoing) {
-                lowered = true
-                yield* playback.volume(ducked)
-              }
               break
+            }
             case "Abandoned":
               onset = undefined
               echoing = false
-              if (over) return { _tag: "Finished" } satisfies Outcome
-              yield* unduck
               break
             case "Utterance": {
               // Heard out before what comes after, so it's never missed as the line ends.
@@ -489,34 +498,35 @@ export const make = (options: {
               const echo = echoing ? between(text, playback.duration, begun - reach, Math.max(at, begun) + reach) : undefined
               onset = undefined
               echoing = false
-              if (options.off !== undefined && halted(yield* unlogged(signal.audio), echo)) {
+              // Longer than "Mute." could be, it isn't, so Whisper isn't asked, and nothing waits on it.
+              if (options.off !== undefined && voiced(signal.audio) <= curt && halted(yield* unlogged(signal.audio), echo)) {
                 // Its voice ends at once, never waiting on all turning off does first. Should yapd stay on, it's a stop.
                 yield* playback.stop
                 yield* options.off
                 return { _tag: "Finished" } satisfies Outcome
               }
-              if (over) return { _tag: "Finished" } satisfies Outcome
-              yield* unduck
               break
             }
             case "Finished":
               if (signal.id !== id) break
               if (ear.deaf) return { _tag: "Finished" } satisfies Outcome
               played = true
-              // Cut short as soon as something waits to be said next, which hears "Mute." itself: only what he's begun is heard out first.
-              yield* Effect.raceFirst(Effect.sleep(linger), queued).pipe(Effect.zipRight(Queue.offer(signals, { _tag: "Lingered", id })), Effect.forkScoped)
+              // Over once something waits to be said next, which hears "Mute." itself, and the pause between lines is up, or else after
+              // the usual moment: only what he's begun by then is heard out first.
+              yield* Effect.raceFirst(Effect.sleep(linger), Effect.zipRight(Effect.sleep(breather), queued)).pipe(
+                Effect.zipRight(Queue.offer(signals, { _tag: "Lingered", id })),
+                Effect.forkScoped,
+              )
               break
             case "Lingered":
               if (signal.id !== id) break
-              if (onset === undefined) return { _tag: "Finished" } satisfies Outcome
-              over = true
+              over = yield* Clock.currentTimeMillis
               break
             case "Broke":
               if (signal.id === id) return yield* Effect.fail(signal.error)
               break
             case "Deaf":
               if (played) return { _tag: "Finished" } satisfies Outcome
-              yield* unduck
               break
             default:
               break
@@ -1194,14 +1204,13 @@ export const make = (options: {
 
     /**
      * Says something of yapd's own that nothing he'd say over it has anywhere
-     * to go, like a notice: it plays through whatever's said, ducked while
-     * he talks but over its first seconds, listening only for "Mute.", over
-     * it and the usual moment after it, so its `through` runs as soon as it's
-     * said to the end. That moment is over as soon as `queued` says
-     * something's waiting to be said next. Fails when it can't be played or
-     * breaks off.
+     * to go, like a notice: it plays through whatever's said, never turned
+     * down, listening only for "Mute.", over it and the usual moment after it,
+     * so its `through` runs as soon as it's said to the end. That moment is
+     * over after the pause between lines once something waits to be said
+     * next. Fails when it can't be played or breaks off.
      */
-    const tell = (said: Pick<Answer, "audio" | "spoken" | "saying" | "confirmed" | "through"> & { readonly queued?: Effect.Effect<void> }) =>
+    const tell = (said: Pick<Answer, "audio" | "spoken" | "saying" | "confirmed" | "through">) =>
       Effect.gen(function* () {
         const ear = heedful(hearing(yield* Effect.scope))
         yield* speak(said.audio, said.spoken, 0, ear, {
@@ -1209,8 +1218,6 @@ export const make = (options: {
           confirmed: said.confirmed ?? Effect.void,
           through: said.through ?? Effect.void,
           heeding: true,
-          ducks: true,
-          ...(said.queued === undefined ? {} : { queued: said.queued }),
         })
       }).pipe(Effect.scoped)
 

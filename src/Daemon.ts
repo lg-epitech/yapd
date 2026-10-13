@@ -635,6 +635,15 @@ export const make = (
     }
   })
 
+  /** What's to be said next, if anything is: only answers while one is on its way, and while yapd is off only what he asked. */
+  const following = STM.gen(function* () {
+    const { on } = yield* TRef.get(power)
+    return Inbox.next(yield* TRef.get(inbox), !on || (yield* TRef.get(awaited)).length > 0)
+  })
+
+  /** Whether what's being said took the pause between lines already, as the moment after it ended once something waited to be said next. */
+  let paused = false
+
   const turnOff = options.off
   const conversation = yield* Conversation.make({
     dir,
@@ -758,6 +767,15 @@ export const make = (
             if (!(yield* switched).on) yield* Effect.never
           }),
         }),
+    // Once something waits to be said next, the moment after a line played through for "Mute." alone, like a notice, is over after the
+    // pause between lines, so what's next starts then, with no pause of its own.
+    queued: STM.commit(STM.flatMap(following, (ready) => (ready === undefined ? STM.retry : STM.void))).pipe(
+      Effect.zipRight(
+        Effect.sync(() => {
+          paused = true
+        }),
+      ),
+    ),
   })
 
   const unsummarized = (project: string): Summary => ({
@@ -1764,15 +1782,6 @@ export const make = (
       Effect.flatMap((hook) => (hook === undefined ? Effect.succeed(undefined) : waiting.reply(hook))),
     )
 
-  /** What's to be said next, if anything is: only answers while one is on its way, and while yapd is off only what he asked. */
-  const following = STM.gen(function* () {
-    const { on } = yield* TRef.get(power)
-    return Inbox.next(yield* TRef.get(inbox), !on || (yield* TRef.get(awaited)).length > 0)
-  })
-
-  /** Once something waits to be said next, which the moment after a notice then doesn't hold up. */
-  const queuedNext = STM.commit(STM.flatMap(following, (ready) => (ready === undefined ? STM.retry : STM.void)))
-
   /**
    * Nothing is read while the user dictates, only answers while one is on
    * its way, and while yapd is off only what he asked. Taken with when yapd
@@ -1913,11 +1922,11 @@ export const make = (
         return
       }
       if (question === undefined) {
-        // Nothing else he'd say over it has anywhere to go, so it plays through all he says, only ducked while he talks, but "Mute.",
-        // which it listens for a moment after it too, unless something waits to be said next, which hears it itself: heard as soon as
-        // it's said to the end, so a dictation then neither puts it back nor finds it missed.
+        // Nothing else he'd say over it has anywhere to go, so it plays through all he says, never turned down, but "Mute.", which it
+        // listens for a moment after it too, only as long as the pause between lines once something waits to be said next, which hears
+        // it itself: heard as soon as it's said to the end, so a dictation then neither puts it back nor finds it missed.
         const heard = Effect.zipRight(said.notice.heard ?? Effect.void, dealtWith).pipe(Effect.uninterruptible)
-        return yield* conversation.tell({ audio: played, spoken, saying, confirmed, through: heard, queued: queuedNext })
+        return yield* conversation.tell({ audio: played, spoken, saying, confirmed, through: heard })
       }
       const answer = (heard: string, voiced: number, echo?: string, afterPause?: string, unsaid?: string) =>
         question.answer(heard, voiced, echo, afterPause, unsaid).pipe(Effect.map(Option.map((proceed) => Effect.zipRight(dealtWith, proceed))))
@@ -2152,6 +2161,7 @@ export const make = (
       return yield* Effect.logInfo("Not saying a turn no hook told of, since its hook came or its thread started again")
     }
     saying = ready
+    paused = false
     if ("update" in ready) {
       readSince.set(ready.update, turns)
       yield* hear(ready.update)
@@ -2261,7 +2271,8 @@ export const make = (
         }),
       ),
     )
-    yield* Effect.sleep("400 millis")
+    // The pause between lines, unless the moment after this one was it already.
+    if (!paused) yield* Effect.sleep("400 millis")
   })
 
   /**

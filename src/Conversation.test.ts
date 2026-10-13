@@ -842,6 +842,8 @@ const overHelper = (
     readonly transcribing?: number
     /** With `tell`, it says a notice in the same words instead, like a failure, which nothing else said over it is for. */
     readonly tell?: boolean
+    /** Whether something always waits to be said next. */
+    readonly queued?: boolean
   } = {},
 ) =>
   Effect.gen(function* () {
@@ -982,6 +984,7 @@ const overHelper = (
             }),
           }
         : {}),
+      ...(options.queued === true ? { queued: Effect.void } : {}),
     }).pipe(Effect.provide(context))
     // Lets the helper, the microphone and the fibers catch up on what the test did, since the clock only moves when told to.
     const flush = Effect.promise(async () => {
@@ -1612,29 +1615,15 @@ describe("Over its first seconds, while yapd's own voice can still get into the 
     expect(result).toEqual({ offs: 1, worked: [] })
   })
 
-  test("over a notice, what he says ducks it until it's heard out, and 'Mute.' stops it before yapd is turned off", async () => {
+  test.each([
+    ["once its own voice is learnt", 4],
+    ["over its first seconds, while its own voice can still get into the microphone", 1],
+  ] as const)("over a notice, %s, nothing he says turns it down, so talk in the room can't keep it low, and 'Mute.' stops it before yapd is turned off", async (_, at) => {
     const over = (said: string) =>
       overHelperScoped(
         Effect.gen(function* () {
           const helper = yield* overHelper([[0.95, said]], { off: true, tell: true })
-          yield* helper.wait(4)
-          yield* helper.talk(0.95, 10)
-          yield* helper.quiet
-          yield* helper.wait(0.5)
-          return { timeline: helper.timeline.map(({ type, value }) => (value === undefined ? type : `${type} ${value}`)), offs: helper.offs() }
-        }),
-      )
-    expect(await over("Mute.")).toEqual({ timeline: ["play", "volume 0.25", "stop", "off"], offs: 1 })
-    // Anything else plays on as it was, at full volume once he's done.
-    expect(await over("What time is it?")).toEqual({ timeline: ["play", "volume 0.25", "volume 1"], offs: 0 })
-  })
-
-  test("over a notice's first seconds, while its own voice can still get into the microphone, nothing ducks it, but 'Mute.' still stops it before yapd is turned off", async () => {
-    const over = (said: string) =>
-      overHelperScoped(
-        Effect.gen(function* () {
-          const helper = yield* overHelper([[0.95, said]], { off: true, tell: true })
-          yield* helper.wait(1)
+          yield* helper.wait(at)
           yield* helper.talk(0.95, 10)
           yield* helper.quiet
           yield* helper.wait(0.5)
@@ -1643,6 +1632,77 @@ describe("Over its first seconds, while yapd's own voice can still get into the 
       )
     expect(await over("Mute.")).toEqual({ timeline: ["play", "stop", "off"], offs: 1 })
     expect(await over("What time is it?")).toEqual({ timeline: ["play"], offs: 0 })
+  })
+
+  test("over a notice, talk longer than 'Mute.' could be, like a TV's, is never even transcribed", async () => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        // What Whisper would hear as "Mute." were it asked, so asking it would show.
+        const helper = yield* overHelper([[0.95, "Mute."]], { off: true, tell: true })
+        yield* helper.wait(4)
+        yield* helper.talk(0.95, 100)
+        yield* helper.quiet
+        yield* helper.wait(0.5)
+        return { transcribed: helper.transcribed, offs: helper.offs(), commands: helper.commands }
+      }),
+    )
+    expect(result).toEqual({ transcribed: [], offs: 0, commands: ["play"] })
+  })
+
+  test.each([
+    ["a notice", { tell: true }],
+    ["the rest of an update played through after talk that wasn't meant for it", {}],
+    ["the rest of an answer played through so", { answer: true }],
+    ["the rest of a question played through so", { ask: true }],
+  ] as const)("with something waiting to be said next, the moment after %s is over after the pause between lines, and a 'Mute.' begun in it is heard out", async (_, given) => {
+    const after = (mute: boolean) =>
+      overHelperScoped(
+        Effect.gen(function* () {
+          const helper = yield* overHelper([[0.95, "Mute."]], { off: true, queued: true, ...given })
+          yield* helper.wait(4)
+          // Talk Whisper makes nothing of, three times, as from a TV, unless it's a notice, which plays through all that's said anyway.
+          if (!("tell" in given)) {
+            for (let time = 0; time < 3; time++) {
+              yield* helper.talk(0.8, 10)
+              yield* helper.quiet
+              yield* helper.wait(0.5)
+            }
+          }
+          yield* helper.finish
+          yield* helper.wait(0.2)
+          if (mute) yield* helper.talk(0.95, 10)
+          yield* helper.wait(0.2)
+          const early = Option.isSome(yield* Fiber.poll(helper.fiber))
+          // Past the pause between lines.
+          yield* helper.wait(0.3)
+          const late = Option.isSome(yield* Fiber.poll(helper.fiber))
+          if (mute) yield* helper.quiet
+          return { early, late, done: Option.isSome(yield* Fiber.poll(helper.fiber)), offs: helper.offs() }
+        }),
+      )
+    expect(await after(false)).toEqual({ early: false, late: true, done: true, offs: 0 })
+    expect(await after(true)).toEqual({ early: false, late: false, done: true, offs: 1 })
+  })
+
+  test("once the moment after a notice is over, 'Mute.' begun while other talk is still being transcribed is heard out too", async () => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        const helper = yield* overHelper([[0.8, "Is that the news?"], [0.95, "Mute."]], { off: true, tell: true, queued: true, transcribing: 0.4 })
+        yield* helper.finish
+        // Someone else begins just as it ends, and goes on past the pause between lines.
+        yield* helper.wait(0.3)
+        yield* helper.talk(0.8, 10)
+        yield* helper.wait(0.4)
+        yield* helper.quiet
+        // He says it while that's being transcribed.
+        yield* helper.talk(0.95, 10)
+        yield* helper.quiet
+        yield* helper.wait(0.4)
+        yield* helper.wait(0.4)
+        return { transcribed: helper.transcribed, offs: helper.offs() }
+      }),
+    )
+    expect(result).toEqual({ transcribed: ["Is that the news?", "Mute."], offs: 1 })
   })
 
   /** What's said as a line ends, `at` seconds into its `duration`, `frames` long, and what came of it. */

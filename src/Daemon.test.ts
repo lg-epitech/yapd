@@ -5362,6 +5362,27 @@ describe("Daemon turned off by 'Mute.'", () => {
     expect(result).toEqual({ on: false, played: ["Tezos failed: rate limited."], kept: [["yapd. The PR is ready.", undefined, "off"]] })
   })
 
+  test("'Mute.' begun a moment after a notice, with something waiting behind it, still turns yapd off before that's said", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { made, notice, finish, microphone, flush, wait, played, journal } = yield* make("Mute.", { off: true })
+        yield* notice("f", "Tezos failed: rate limited.")
+        yield* finish("a", "The PR is ready.")
+        // He begins 0.2 s after it ends, and the silence that tells he's stopped comes past the pause between lines.
+        yield* wait(10.2)
+        yield* Queue.offerAll(microphone, Array.from({ length: 30 }, () => new Float32Array(512).fill(0.9)))
+        yield* flush
+        yield* wait(0.5)
+        yield* Queue.offerAll(microphone, Array.from({ length: defaults.silence }, () => new Float32Array(512)))
+        yield* flush
+        const { on } = yield* made.power
+        yield* wait(30)
+        return { on, played: [...played], kept: yield* kept(journal) }
+      }),
+    )
+    expect(result).toEqual({ on: false, played: ["Tezos failed: rate limited."], kept: [["yapd. The PR is ready.", undefined, "off"]] })
+  })
+
   test("with nothing waiting behind a notice, 'Mute.' said a second after it still turns yapd off", async () => {
     const result = await run(
       Effect.gen(function* () {
@@ -5385,8 +5406,8 @@ describe("Daemon turned off by 'Mute.'", () => {
         yield* notice("c", "Let me check.", { answer: true })
         yield* wait(at)
         yield* notice("a", "Tezos is still running.", { answer: true })
-        // Once the notice has ended, or at once once it has, after the usual pause between lines.
-        yield* wait(Math.max(10, at) - at + 0.4)
+        // Once the notice has ended, or at once once it has, after what was the usual pause between lines, and a moment more at most.
+        yield* wait(Math.max(10, at) - at + 0.6)
         return [...played]
       }),
     )
