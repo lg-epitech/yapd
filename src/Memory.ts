@@ -1,7 +1,6 @@
 import type { Database } from "bun:sqlite"
 import { Clock, Effect, Option } from "effect"
 import * as Brain from "./Brain.ts"
-import { digest } from "./Ledger.ts"
 import { addressed, type Lines } from "./Persona.ts"
 import type * as Preferences from "./Preferences.ts"
 import type * as Store from "./Store.ts"
@@ -47,10 +46,13 @@ export const longest = 4000
 
 /**
  * What came of keeping one, or bringing one back: kept, with the routine it
- * took the place of, called the same, if it did, or the fact kept already
- * that says the same, in its place; or not, as there's no more room.
+ * took the place of, called the same, if it did; the fact kept already that
+ * says the same, as nothing changed; or not, as there's no more room.
  */
-export type Kept = { readonly _tag: "Kept"; readonly memory: Memory; readonly retired: Option.Option<Memory> } | { readonly _tag: "Full" }
+export type Kept =
+  | { readonly _tag: "Kept"; readonly memory: Memory; readonly retired: Option.Option<Memory> }
+  | { readonly _tag: "Already"; readonly memory: Memory }
+  | { readonly _tag: "Full" }
 
 interface Row {
   readonly id: number
@@ -87,8 +89,8 @@ export interface Memories {
   /**
    * Keeps one, if there's room: a routine called as one kept already, in any
    * case, takes its place, as one, and gives it back, so taking this back
-   * brings it back. A fact kept already that says the same is the one kept,
-   * and nothing new is.
+   * brings it back. A fact kept already that says the same is given back as
+   * kept already, and nothing new is.
    */
   readonly add: (asked: Asked) => Effect.Effect<Kept, Store.StoreError>
   /** Forgets one kept, and gives it back: none when it isn't kept. */
@@ -97,8 +99,8 @@ export interface Memories {
    * Brings back one forgotten, if there's room, and gives it back: a routine
    * whose name another took since takes its place again, as one, so taking
    * back what took its place puts them as they were. A fact kept since that
-   * says the same is the one kept, and this stays forgotten. None when it
-   * wasn't forgotten.
+   * says the same is given back as kept already, and this stays forgotten.
+   * None when it wasn't forgotten.
    */
   readonly restore: (id: number) => Effect.Effect<Option.Option<Kept>, Store.StoreError>
 }
@@ -115,14 +117,15 @@ export const make = (store: Store.Store["Type"], written: Effect.Effect<Readonly
       memory,
     )
   /**
-   * The fact kept now that says the same, word for word as words compare,
-   * whatever their case or punctuation: two such could never be told apart
-   * to forget one, and forgetting one would leave the other.
+   * The fact kept now that says the same, word for word, whatever their case,
+   * or a comma or full stop: two such could never be told apart to forget
+   * one, and forgetting one would leave the other. Symbols and all, so "rig
+   * uses C" never stands for "rig uses C++".
    */
   const same = (database: Database, text: string) => {
-    const words = digest(text)
+    const words = Brain.worded(text)
     return Option.map(
-      Option.fromNullable(database.query<Row, []>("select * from memories where kind = 'fact' and forgotten_at is null").all().find((row) => digest(row.text) === words)),
+      Option.fromNullable(database.query<Row, []>("select * from memories where kind = 'fact' and forgotten_at is null").all().find((row) => Brain.worded(row.text) === words)),
       memory,
     )
   }
@@ -154,9 +157,9 @@ export const make = (store: Store.Store["Type"], written: Effect.Effect<Readonly
     add: (asked) =>
       Effect.flatMap(hidden, (hides) =>
         store.transaction((database: Database): Kept => {
-          // Said again, as when he didn't hear it was noted, it's kept once.
+          // Said again, as when he didn't hear it was noted, it's kept once, and nothing changed.
           const kept = asked.kind === "fact" ? same(database, asked.text) : Option.none<Memory>()
-          if (Option.isSome(kept)) return { _tag: "Kept", memory: kept.value, retired: Option.none() }
+          if (Option.isSome(kept)) return { _tag: "Already", memory: kept.value }
           const taken = asked.kind === "routine" && asked.name !== undefined ? called(database, asked.name) : Option.none<Memory>()
           if (!room(database, asked, taken, hides)) return { _tag: "Full" }
           // Retired first, since only one routine is kept under a name.
@@ -180,7 +183,7 @@ export const make = (store: Store.Store["Type"], written: Effect.Effect<Readonly
           if (Option.isNone(forgotten)) return Option.none()
           const back = forgotten.value
           const kept = back.kind === "fact" ? same(database, back.text) : Option.none<Memory>()
-          if (Option.isSome(kept)) return Option.some({ _tag: "Kept", memory: kept.value, retired: Option.none() })
+          if (Option.isSome(kept)) return Option.some({ _tag: "Already", memory: kept.value })
           const taken = back.kind === "routine" && back.name !== undefined ? called(database, back.name) : Option.none<Memory>()
           if (!room(database, back, taken, hides)) return Option.some({ _tag: "Full" })
           if (Option.isSome(taken)) retire(database, taken.value.id, now)

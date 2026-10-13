@@ -3047,6 +3047,8 @@ export const make = (options: {
           return reply(told.unwritten, thought.subject)
         }
         if (kept.right._tag === "Full") return reply(told.full, thought.subject)
+        // Kept already, as when he didn't hear it was, nothing changed: what "scratch that" takes back is still what he last changed.
+        if (kept.right._tag === "Already") return memorized(told.kept(kept.right.memory, false))
         const { memory, retired } = kept.right
         noted = { at: now, kind: "memory", id: memory.id, about: Option.none(), ...Option.match(retired, { onNone: () => ({}), onSome: ({ id }) => ({ replaced: id }) }) }
         const line = told.kept(memory, Option.isSome(retired))
@@ -3114,6 +3116,8 @@ export const make = (options: {
         }
         if (Option.isNone(restored.right)) return reply(told.over, thought.subject)
         if (restored.right.value._tag === "Full") return reply(told.full, thought.subject)
+        // Kept since, as he said it again, nothing changed: this stays forgotten, and taking it back again still brings it back.
+        if (restored.right.value._tag === "Already") return memorized(told.restored(restored.right.value.memory, false))
         const { memory, retired } = restored.right.value
         noted = { at: now, kind: "memory", id: memory.id, about: Option.none(), ...Option.match(retired, { onNone: () => ({}), onSome: ({ id }) => ({ replaced: id }) }) }
         const line = told.restored(memory, Option.isSome(retired))

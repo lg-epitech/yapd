@@ -11794,16 +11794,46 @@ describe("Assistant memories", () => {
         const first = (yield* made.memories!.list)[0]!.id
         yield* made.dictate("Forget the one about rig.")
         const forgot = { said: made.spoken().at(-1), kept: yield* kept() }
-        // Said again since, the one forgotten brought back is the one kept.
+        // Said again since, the one forgotten brought back is the one kept already, and stays forgotten.
         yield* made.dictate("Remember that rig's T3 Code runs the nightly.")
         const restored = yield* made.memories!.restore(first)
-        return { again, forgot, restored: Option.getOrUndefined(Option.map(restored, (back) => (back._tag === "Kept" ? back.memory.id : back._tag))), kept: yield* made.memories!.list }
+        return { again, forgot, restored: Option.getOrUndefined(Option.map(restored, (back) => (back._tag === "Full" ? [back._tag] : [back._tag, back.memory.id]))), kept: yield* made.memories!.list }
       }),
     )
     expect(result.again).toEqual({ said: "Noted, sir.", kept: ["rig's T3 Code runs the nightly"] })
     expect(result.forgot).toEqual({ said: "Forgotten, sir: rig's T3 Code runs the nightly.", kept: [] })
     expect(result.kept.map(({ text }) => text)).toEqual(["rig's T3 Code runs the nightly"])
-    expect(result.restored).toBe(result.kept[0]!.id)
+    expect(result.restored).toEqual(["Already", result.kept[0]!.id])
+  })
+
+  test("a fact said again changes nothing, so taking it back never forgets the one kept before, and one that differs by a symbol is kept too", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(
+          (situation) => {
+            const { heard } = situation.utterance
+            if (heard === "Remember that rig uses C++.") return Brain.decision({ act: "remember", how: "fact", text: "rig uses C++" })
+            if (heard === "Remember that rig uses C.") return Brain.decision({ act: "remember", how: "fact", text: "rig uses C" })
+            if (heard === "Scratch that.") return Brain.decision({ act: "undo", how: "memory" })
+            return undefined
+          },
+          undefined,
+          { memories: true },
+        )
+        const kept = () => Effect.map(made.memories!.list, (all) => all.map(({ text }) => text))
+        // Kept before, by nothing he could take back now.
+        yield* made.memories!.add({ at: yield* TestClock.currentTimeMillis, kind: "fact", text: "rig uses C++", heard: "Remember that rig uses C++." })
+        yield* made.dictate("Remember that rig uses C++.")
+        const again = { said: made.spoken().at(-1), kept: yield* kept() }
+        yield* made.dictate("Scratch that.")
+        const undone = { said: made.spoken().at(-1), kept: yield* kept() }
+        yield* made.dictate("Remember that rig uses C.")
+        return { again, undone, both: { said: made.spoken().at(-1), kept: yield* kept() } }
+      }),
+    )
+    expect(result.again).toEqual({ said: "Noted, sir.", kept: ["rig uses C++"] })
+    expect(result.undone).toEqual({ said: "There's nothing to take back, sir.", kept: ["rig uses C++"] })
+    expect(result.both).toEqual({ said: "Noted, sir.", kept: ["rig uses C++", "rig uses C"] })
   })
 
   test("a routine's name sends its steps to the focus thread once, as they're written", async () => {
