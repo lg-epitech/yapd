@@ -1001,11 +1001,14 @@ export const make = (
     const { session, turn, thread, arrivedAt, generation, hook, needsYou, turns } = finished
     if (hook !== undefined) summing.set(session, hook)
     return Effect.gen(function* () {
-      // In T3 Code's scratch folder, it's in none of his projects, and what its hook names it, the folder's generated name, isn't one.
-      const project = (yield* finished.outside ?? Effect.succeed(false)) ? "" : finished.project
       // What was said or held of the same work lately, by its session or its thread, read here rather than once its thread is found,
-      // which can take seconds: so "another review round" is told from news.
-      const previous = Option.map(yield* journal.previous(arrivedAt - lastDay, session, finished.known), (kept) => ({
+      // which can take seconds: so "another review round" is told from news. Meanwhile, whether it's in T3 Code's scratch folder,
+      // where it's in none of his projects, and what its hook names it, the folder's generated name, isn't one.
+      const [outside, earlier] = yield* Effect.all([finished.outside ?? Effect.succeed(false), journal.previous(arrivedAt - lastDay, session, finished.known)], {
+        concurrency: 2,
+      })
+      const project = outside ? "" : finished.project
+      const previous = Option.map(earlier, (kept) => ({
         said: kept.said ?? "",
         ago: (arrivedAt - kept.at) / 60_000,
       }))
@@ -1256,8 +1259,9 @@ export const make = (
 
   /**
    * Whether a hook's work is outside his projects, in the folder behind T3
-   * Code's scratch project on the machine it ran on: not when that isn't
-   * known in a moment, so its summary is never held up for long.
+   * Code's scratch project on the machine it ran on: by what's known of it,
+   * never asked for here, and not when an answer on its way doesn't come in
+   * a moment, so its summary is never held up for long.
    */
   const scratched = (cwd: string, origin: Origin): Effect.Effect<boolean> => {
     const { outside } = options

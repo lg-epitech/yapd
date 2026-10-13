@@ -34,7 +34,7 @@ const thread = (id: string, title: string, overrides: Record<string, unknown> = 
     ...overrides,
   })
 
-const integration: T3Live.Project = { id: "p-int", title: "integration", workspaceRoot: "/code/integration", projectIcon: { kind: "emoji", emoji: "🦀" } }
+const integration: Threads.Placed = { id: "p-int", title: "integration", workspaceRoot: "/code/integration", projectIcon: { kind: "emoji", emoji: "🦀" }, scratch: false }
 
 /**
  * The latest threads over a journal and mutes kept in `path`, with T3 Code

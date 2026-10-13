@@ -420,7 +420,7 @@ describe("Threads on several machines", () => {
     expect(found).toEqual({ matches: [{ ref: { machine: "Rosie", id: "tests" }, snippet: "the std tests" }], missed: ["rig"] })
   })
 
-  test("a scratch thread is never \"No project\" once its machine's T3 Code has caught up, and one that had no scratch project is asked again", async () => {
+  test("a scratch thread is never \"No project\" once its machine's T3 Code has caught up, and one that had no scratch project is asked again, never by a hook's turn", async () => {
     // Rosie's T3 Code says where its scratch project is; rig's had none at first, and has one once it's updated.
     const roots: Array<Option.Option<string>> = [Option.none(), Option.some("/t3/scratch")]
     const scratching = (root: Effect.Effect<Option.Option<string>>) => ({ scratchRoot: root }) as unknown as T3Actions.Actions
@@ -447,18 +447,20 @@ describe("Threads on several machines", () => {
       yield* threads.warm("rig")
       const first = yield* projects
       yield* TestClock.adjust("1 minute")
+      // A hook's turn there isn't held up asking again: what's known is all it goes by.
+      const hooked = yield* threads.outside("rig", "/t3/scratch/2026-10-13-glucose-0a081e43")
       // Asked again in the background, it's known by the next time.
       yield* projects
       yield* Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 20)))
-      return { first, later: yield* projects }
+      return { first, hooked, later: yield* projects, then: yield* threads.outside("rig", "/t3/scratch/2026-10-13-glucose-0a081e43") }
     }).pipe(Effect.scoped, Effect.provide(TestContext.TestContext), Effect.runPromise)
-    expect(seen).toEqual({ first: ["Rosie: scratch", "rig: No project"], later: ["Rosie: scratch", "rig: scratch"] })
+    expect(seen).toEqual({ first: ["Rosie: scratch", "rig: No project"], hooked: false, later: ["Rosie: scratch", "rig: scratch"], then: true })
   })
 
-  test("a scratch thread is said as scratch work, and its folder taken as outside his projects, when T3 Code gives where its scratch project is through a link", async () => {
+  test("a scratch thread is said, shown and kept as scratch work when T3 Code gives where its scratch project is through a link, made after it was first looked at", async () => {
     const dir = await realpath(await mkdtemp(join(tmpdir(), "yapd-threads-")))
     try {
-      await mkdir(join(dir, "t3", "scratch", "2026-10-13-glucose-0a081e43"), { recursive: true })
+      await mkdir(join(dir, "t3"))
       await symlink(join(dir, "t3"), join(dir, "linked"))
       const view: T3Live.View = {
         projects: new Map([["s", { id: "s", title: "No project", workspaceRoot: join(dir, "t3", "scratch") }]]),
@@ -478,13 +480,18 @@ describe("Threads on several machines", () => {
           store,
         })
         yield* threads.warm("Rosie")
+        // Looked at before T3 Code made the scratch project's folder, which it then does.
+        yield* threads.desk(Option.none(), [], 5)
+        yield* Effect.promise(() => mkdir(join(dir, "t3", "scratch", "2026-10-13-glucose-0a081e43"), { recursive: true }))
         return {
           desk: (yield* threads.desk(Option.none(), [], 5)).threads.map(({ project, scratch }) => ({ project, scratch })),
+          // As a menu row shows its project.
+          menu: Option.map(yield* threads.project("Rosie", { thread: "glucose" }), ({ scratch }) => scratch),
           // Its thread's own folder, as its hook gives it, and the folder holding the scratch project's, which isn't in it.
           outside: [yield* threads.outside("Rosie", join(dir, "t3", "scratch", "2026-10-13-glucose-0a081e43")), yield* threads.outside("Rosie", join(dir, "t3"))],
         }
       }).pipe(Effect.scoped, Effect.provide(TestContext.TestContext), Effect.runPromise)
-      expect(seen).toEqual({ desk: [{ project: "scratch", scratch: true }], outside: [true, false] })
+      expect(seen).toEqual({ desk: [{ project: "scratch", scratch: true }], menu: Option.some(true), outside: [true, false] })
     } finally {
       await rm(dir, { recursive: true, force: true })
     }

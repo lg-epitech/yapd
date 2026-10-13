@@ -19,6 +19,11 @@ export interface Ref {
   readonly id: string
 }
 
+/** A project on a machine, and whether it's that machine's T3 Code's scratch project, outside his projects, as far as that's known yet. */
+export interface Placed extends T3Live.Project {
+  readonly scratch: boolean
+}
+
 /** Whether two refs are the same thread. */
 export const same = (one: Ref, other: Ref) => one.machine === other.machine && one.id === other.id
 
@@ -122,7 +127,7 @@ export class Threads extends Context.Tag("yapd/Threads")<
      * a thread's worktree of it, holds `directory`, the nearest first. None
      * while that machine's T3 Code isn't followed.
      */
-    readonly project: (machine: string, where: { readonly thread?: string; readonly directory?: string }) => Effect.Effect<Option.Option<T3Live.Project>>
+    readonly project: (machine: string, where: { readonly thread?: string; readonly directory?: string }) => Effect.Effect<Option.Option<Placed>>
     /** The agent's own ids for a thread's conversations, which its hooks report as their session. */
     readonly sessions: (ref: Ref) => Effect.Effect<ReadonlyArray<string>, ThreadsError>
     /**
@@ -141,9 +146,10 @@ export class Threads extends Context.Tag("yapd/Threads")<
     /**
      * Whether a directory on `machine` is in the folder behind its T3 Code's
      * scratch project, where work outside his projects goes: as each really
-     * is on this machine, links followed, and as given on another. Waits for
-     * that T3 Code to say where its scratch project is while it's being
-     * asked; not known, it isn't. Never fails.
+     * is on this machine, links followed, and as given on another. Never asks
+     * that T3 Code where its scratch project is, which `warm` and the desk
+     * do, but waits for an answer on its way; not known, it isn't. Never
+     * fails.
      */
     readonly outside: (machine: string, directory: string) => Effect.Effect<boolean>
   }
@@ -646,13 +652,20 @@ export const make = (options: {
     const read = new Map<string, string>()
     /** What `owners` and `read` know a thread or a session on a machine by. */
     const on = (name: string, id: string) => `${name}\n${id}`
-    /** Directories as they really are, links followed, as each was first looked at. */
+    /**
+     * Directories as they really are, links followed, as each was first found.
+     * One that isn't there yet, like a scratch project's folder before it's
+     * made, is taken as given until it is, and looked at again each time.
+     */
     const real = new Map<string, string>()
     const canonical = (path: string) =>
       Effect.suspend(() => {
         const known = real.get(path)
         if (known !== undefined) return Effect.succeed(known)
-        return Effect.promise(() => realpath(path).catch(() => path)).pipe(Effect.tap((resolved) => Effect.sync(() => real.set(path, resolved))))
+        return Effect.tryPromise(() => realpath(path)).pipe(
+          Effect.tap((resolved) => Effect.sync(() => real.set(path, resolved))),
+          Effect.orElseSucceed(() => path),
+        )
       })
 
     /** A directory on a machine as it's compared: as it really is here, and as it's given on another machine, whose files can't be looked at from here. */
@@ -706,13 +719,13 @@ export const make = (options: {
     const project = (name: string, where: { readonly thread?: string; readonly directory?: string }) =>
       Effect.gen(function* () {
         const at = linked(name)
-        if (at === undefined) return Option.none<T3Live.Project>()
+        if (at === undefined) return Option.none<Placed>()
         const view = yield* at.live.view
-        if (Option.isNone(view)) return Option.none<T3Live.Project>()
+        if (Option.isNone(view)) return Option.none<Placed>()
         const { threads, projects } = view.value
         const thread = where.thread === undefined ? undefined : threads.get(where.thread)
-        if (thread !== undefined) return Option.fromNullable(projects.get(thread.projectId))
-        if (where.directory === undefined) return Option.none<T3Live.Project>()
+        if (thread !== undefined) return yield* placed(at, projects.get(thread.projectId))
+        if (where.directory === undefined) return Option.none<Placed>()
         const here = yield* resolved(at, where.directory)
         // Each project's folder, and the worktrees its threads work in, which may be anywhere.
         const roots = [
@@ -726,8 +739,8 @@ export const make = (options: {
           Effect.map(resolved(at, root), (real) => Option.map(within(real, here), (depth) => ({ project, depth }))),
         )
         const nearest = holding.flatMap(Option.toArray).toSorted((one, other) => other.depth - one.depth)[0]
-        return Option.fromNullable(nearest?.project)
-      }).pipe(Effect.catchAllCause((cause) => Effect.as(Effect.logWarning("Could not find a project", cause), Option.none<T3Live.Project>())))
+        return yield* placed(at, nearest?.project)
+      }).pipe(Effect.catchAllCause((cause) => Effect.as(Effect.logWarning("Could not find a project", cause), Option.none<Placed>())))
 
     const find = (ref: Ref) =>
       Option.match(Option.fromNullable(linked(ref.machine)), {
@@ -784,6 +797,15 @@ export const make = (options: {
             }),
         }),
       )
+    /** A project on a machine, told from its scratch project by where each really is, as far as that's known: asked for meanwhile, never waited on. */
+    const placed = (link: Link, project: T3Live.Project | undefined) =>
+      project === undefined
+        ? Effect.succeedNone
+        : Effect.flatMap(scratchOf(link), (root) =>
+            Option.isNone(root)
+              ? Effect.succeedSome<Placed>({ ...project, scratch: false })
+              : Effect.zipWith(resolved(link, root.value), resolved(link, project.workspaceRoot), (scratch, folder) => Option.some<Placed>({ ...project, scratch: folder === scratch })),
+          )
 
     /** When usage was last asked for, so a T3 Code that doesn't answer isn't asked on every request. */
     let tried = Number.NEGATIVE_INFINITY
@@ -920,8 +942,10 @@ export const make = (options: {
         Effect.gen(function* () {
           const at = linked(name)
           if (at === undefined) return false
-          const answer = yield* seek(at)
-          if (Option.isSome(answer)) yield* Fiber.join(answer.value)
+          // Never asked here, so no hook's turn waits on a T3 Code that doesn't say where, like rig's before it's updated: only an
+          // answer already on its way is waited for.
+          const asked = sought.get(at.machine)
+          if (!scratches.has(at.machine) && asked !== undefined) yield* Fiber.join(asked.answer)
           const root = scratches.get(at.machine)
           if (root === undefined) return false
           return Option.isSome(within(yield* resolved(at, root), yield* resolved(at, directory)))

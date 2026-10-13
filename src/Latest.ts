@@ -162,10 +162,12 @@ export const make = (options: {
           // Its machine's threads not in yet, what it's called and its project are looked for again soon. Never for a session's own
           // row, which T3 Code never names, as for one from a machine yapd doesn't follow, which it never sees.
           if (!session && Option.isNone(thread) && Option.isSome(yield* threads.unseen(machine))) blind = true
-          const project = yield* threads.project(machine, session ? (kept.directory === undefined ? {} : { directory: kept.directory }) : { thread: id })
+          const placed = yield* threads.project(machine, session ? (kept.directory === undefined ? {} : { directory: kept.directory }) : { thread: id })
+          // Outside his projects, in T3 Code's scratch project, whatever T3 Code calls it, or kept with none, it's shown with none.
+          const outside = Option.exists(placed, ({ scratch }) => scratch)
+          const project = outside ? Option.none<Threads.Placed>() : placed
           const icon = Option.isSome(project) ? Option.some(yield* icons.icon(machine, project.value)) : Option.none<Icons.Icon>()
-          // Outside his projects, kept with none, it's shown with none.
-          const name = Option.match(project, { onNone: () => (kept.project?.trim() === "" ? undefined : kept.project), onSome: ({ title }) => title })
+          const name = outside ? undefined : Option.match(project, { onNone: () => (kept.project?.trim() === "" ? undefined : kept.project), onSome: ({ title }) => title })
           // Heard again as it was said while it's still among what he heard; otherwise only a thread yapd can reach, which "it" then means.
           const still = Option.firstSomeOf(yield* Effect.forEach([key, ...by], (key) => heard(key, last.at)))
           return {
