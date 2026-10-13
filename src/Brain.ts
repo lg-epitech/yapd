@@ -1873,11 +1873,13 @@ const routineHandle = (text: string) => /^p\d+$/.test(text.trim())
 
 /**
  * Whether he said a routine's whole name, as words compare, in all he said,
- * the rest of a request too: whichever handle the model gave, the steps go
- * only then, so one called "ship deploy" never goes for his "ship", whether
- * said or in his preferences.
+ * and for the rest of a request, in that part of it too: whichever handle the
+ * model gave, the steps go only then, so one called "ship deploy" never goes
+ * for his "ship", whether said or in his preferences, nor one called "ship"
+ * for the rest of "tell the Tezos one to ship, and the Mina one to rebase".
  */
-const nameSaid = (name: string, utterance: Pick<Assistant.Utterance, "heard" | "whole">) => asSaid(name, utterance.whole ?? utterance.heard)
+const nameSaid = (name: string, utterance: Pick<Assistant.Utterance, "heard" | "whole">) =>
+  asSaid(name, utterance.whole ?? utterance.heard) && (utterance.whole === undefined || asSaid(name, utterance.heard))
 
 /**
  * A message, or an offer, whose words the model gave as a routine's handle,

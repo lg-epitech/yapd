@@ -11924,6 +11924,29 @@ describe("Assistant memories", () => {
     expect(result.plain).toEqual({ said: "On it, sir: Migrate Tezos Integration.", sent: ["merge the PR, then deploy"] })
   })
 
+  test("a routine's steps go for the rest of a request only when that part says its name, never for its name said before it", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(
+          (situation) => {
+            const { heard } = situation.utterance
+            if (heard === "Tell the Tezos one to ship, and the Mina one to rebase.") {
+              return Brain.decision({ act: "send", target: handle(situation, tezos), text: "Ship.", how: "now", rest: "tell the Mina one to rebase" })
+            }
+            // The rest, which the model takes for the routine.
+            const routine = Brain.remembered(situation).find(({ name }) => name === "ship")
+            return Brain.decision({ act: "send", target: handle(situation, mina), text: routine?.handle ?? "", how: "now" })
+          },
+          undefined,
+          { memories: true, routines: [{ name: "ship", steps: "Merge the PR, then deploy." }] },
+        )
+        yield* made.dictate("Tell the Tezos one to ship, and the Mina one to rebase.")
+        return made.dispatched.filter(({ type }) => type === "message.dispatch").map(({ threadId, text }) => ({ threadId, text }))
+      }),
+    )
+    expect(result).toEqual([{ threadId: tezos.id, text: "Ship." }])
+  })
+
   test("a secret isn't remembered, nor kept in the journal, whatever else would turn it down", async () => {
     const result = await run(
       Effect.gen(function* () {
