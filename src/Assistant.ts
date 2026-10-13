@@ -1706,12 +1706,15 @@ export const make = (options: {
      * What's said of a step that didn't go, or wasn't done, with what was left
      * of its request after it, since a failure stops the rest, and nothing he
      * asked for goes without a word. `desk` is the one the rest was worked out
-     * against, which a handle in it is named by; none names nothing.
+     * against, which a handle in it is named by; none names nothing. Held
+     * back as a secret, the rest is his words too, which may be what gave it
+     * away, so it's said to be left without them, never read out or noted.
      */
     const unfinished = (outcome: Outcome, rest: string, said: Lines, desk: Threads.Desk = nowhere): Outcome => {
       const left = Brain.speakable(rest, desk).replace(/[.!?]+$/, "")
       if (left === "") return outcome
-      return { ...retold(outcome, (say) => joined(say, `I left the rest${addressed(said)}: ${left}.`, said)), kind: outcome.kind === "none" ? "answer" : outcome.kind }
+      const line = outcome.withheld === true ? `I left the rest${addressed(said)}.` : `I left the rest${addressed(said)}: ${left}.`
+      return { ...retold(outcome, (say) => joined(say, line, said)), kind: outcome.kind === "none" ? "answer" : outcome.kind }
     }
 
     /** What's said ahead of what comes of something new, when the question it took the place of held more of its request: that it was left. */
@@ -3163,7 +3166,7 @@ export const make = (options: {
             (outcome) => onward(thought, outcome, Brain.about(outcome.subject), at.step + 1, said),
           )
         case "remember":
-          // Kept, then the rest of the request, done now; but nothing more of what may give a secret away, which he's told is left.
+          // Kept, then the rest of the request, done now; but nothing more of what may give a secret away, which he's told is left, without its words.
           return Effect.flatMap(remembering(plan, thought, said), (outcome) =>
             outcome.withheld === true ? Effect.succeed(unfinished(outcome, decision.rest, said, thought.situation.desk)) : onward(thought, outcome, Brain.about(outcome.subject), at.step + 1, said),
           )

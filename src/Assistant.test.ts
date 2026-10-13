@@ -11698,6 +11698,9 @@ describe("Assistant memories", () => {
             if (heard === "Remember that the staging key is sk-live-4f9a8b7c6d5e.") return Brain.decision({ act: "remember", how: "fact", text: "the staging key is sk-live-4f9a8b7c6d5e" })
             // Not word for word his, which would be turned down for that.
             if (heard === "Remember the staging key, sk-live-4f9a8b7c6d5e.") return Brain.decision({ act: "remember", how: "fact", text: "staging key: sk-live-4f9a8b7c6d5e" })
+            if (heard === "Remember that the Mina staging box is fennel, and tell the Mina one its PIN is 4 8 2 7.") {
+              return Brain.decision({ act: "remember", how: "fact", text: "the Mina staging box is fennel", rest: "tell the Mina one its PIN is 4 8 2 7" })
+            }
             return undefined
           },
           undefined,
@@ -11719,13 +11722,19 @@ describe("Assistant memories", () => {
         })
         yield* made.flush
         const echoed = yield* said()
-        return { plain, reworded, echoed, journal: JSON.stringify(yield* made.journal.since(0)) }
+        // Only in the rest of the request, it's left with it, which isn't read back either.
+        yield* made.dictate("Remember that the Mina staging box is fennel, and tell the Mina one its PIN is 4 8 2 7.")
+        const rest = yield* said()
+        return { plain, reworded, echoed, rest, spoken: made.spoken(), journal: JSON.stringify(yield* made.journal.since(0)) }
       }),
     )
     const refused = { said: "I won't keep that, sir. It looks like a secret.", kept: 0 }
     expect(result.plain).toEqual(refused)
     expect(result.reworded).toEqual(refused)
     expect(result.echoed).toEqual(refused)
+    expect(result.rest).toEqual({ said: "I won't keep that, sir. It looks like a secret. I left the rest.", kept: 0 })
+    expect(result.spoken.join(" ")).not.toContain("4 8 2 7")
     expect(result.journal).not.toContain("4f9a8b7c6d5e")
+    expect(result.journal).not.toContain("4 8 2 7")
   })
 })
