@@ -13549,9 +13549,9 @@ describe("Assistant tidying", () => {
     expect(await undoing("medium")).toEqual({ said: "I couldn't tell which one you meant, sir.", pending: [], sent: archived })
   })
 
-  test("taking back an archive of several, or the reminders it dropped, with no thread named, takes back all of it only when the model's sure, and a thread named that's nowhere or not one of them none of it", async () => {
-    /** The Tezos importer and fees, each with a reminder on it, archived together, then taken back as the model takes `how` he means it, of `target`, `sure` of it. */
-    const undoing = (how: "reminder" | "tidy", target: (situation: Brain.Situation) => string, sure: Brain.Sure) =>
+  test("taking back an archive of several, or the reminders it dropped, with no thread named, takes back all of it only for scratch that or when the model's sure, and a thread named that's nowhere or not one of them none of it", async () => {
+    /** The Tezos importer and fees, each with a reminder on it, archived together, then taken back in `words`, as the model takes `how` he means it, of `target`, `sure` of it. */
+    const undoing = (how: "reminder" | "tidy" | "", target: (situation: Brain.Situation) => string, sure: Brain.Sure, words = "Take it back.") =>
       run(
         Effect.gen(function* () {
           const made = yield* assistant(
@@ -13573,7 +13573,7 @@ describe("Assistant tidying", () => {
           yield* made.answer("Yes.")
           // T3 Code archived them, which the shell then shows them as.
           for (const one of [importer, fees]) yield* made.becomes({ ...one, archivedAt: "2026-10-01T02:18:01.000Z" })
-          yield* made.dictate("Take it back.")
+          yield* made.dictate(words)
           return { said: made.spoken().at(-1), pending: (yield* made.reminders!.pending).length, sent: tidied(made.dispatched).map(({ type }) => type) }
         }),
       )
@@ -13581,10 +13581,13 @@ describe("Assistant tidying", () => {
     const archived = ["thread.archive", "thread.archive"]
     const both = await undoing("reminder", none, "high")
     expect({ pending: both.pending, sent: both.sent }).toEqual({ pending: 2, sent: [...archived, "thread.unarchive", "thread.unarchive"] })
+    const scratched = await undoing("", none, "low", "Scratch that.")
+    expect({ pending: scratched.pending, sent: scratched.sent }).toEqual({ pending: 2, sent: [...archived, "thread.unarchive", "thread.unarchive"] })
     // Not sure, or of a thread that's nowhere, nothing is taken back.
     const unsure = { said: "I couldn't tell which one you meant, sir.", pending: 0, sent: archived }
     expect(await undoing("reminder", none, "low")).toEqual(unsure)
     expect(await undoing("tidy", none, "medium")).toEqual(unsure)
+    expect(await undoing("", none, "low")).toEqual(unsure)
     expect(await undoing("reminder", () => "a9", "high")).toEqual(unsure)
     // The Tezos docs, never archived, had no reminder it dropped.
     expect(await undoing("reminder", (situation) => handle(situation, docs), "high")).toEqual({ said: "There's nothing to take back, sir.", pending: 0, sent: archived })
@@ -13627,6 +13630,31 @@ describe("Assistant tidying", () => {
     const nothing = { said: "There's nothing to take back, sir.", pending: [tezos.id], sent: ["thread.archive"] }
     expect(await undoing("before")).toEqual(nothing)
     expect(await undoing("after")).toEqual(nothing)
+  })
+
+  test("taking back the reminder of a thread named by a handle that's no thread, on the desk or in ARCHIVED, takes back nothing, never the one he just set", async () => {
+    /** The Tezos one's reminder set, then a reminder taken back as the model takes it, of `target`. */
+    const undoing = (target: string) =>
+      run(
+        Effect.gen(function* () {
+          const made = yield* assistant(
+            (situation) => {
+              const { heard } = situation.utterance
+              if (heard === "Let me know when the Tezos one finishes.") return Brain.decision({ act: "remind", how: "finished", target: handle(situation, tezos) })
+              if (heard === "Take the reminder back.") return Brain.decision({ act: "undo", how: "reminder", target, sure: "high" })
+              return undefined
+            },
+            undefined,
+            { reminders: true },
+          )
+          yield* made.dictate("Let me know when the Tezos one finishes.")
+          yield* made.dictate("Take the reminder back.")
+          return { said: made.spoken().at(-1), pending: (yield* made.reminders!.pending).map(({ thread }) => thread) }
+        }),
+      )
+    expect(await undoing("a9")).toEqual({ said: "I couldn't tell which one you meant, sir.", pending: [tezos.id] })
+    // With none named, it's the one he just set.
+    expect((await undoing("")).pending).toEqual([])
   })
 
   test("tidying several threads asks once naming each, and a yes tidies exactly the ones he kept", async () => {

@@ -3611,10 +3611,11 @@ export const make = (options: {
      * an archive just dropped come back with the thread, as taking that back
      * brings both, never as a reminder he set or cancelled before it: of the
      * thread he named, on the desk or by its handle in ARCHIVED, that thread
-     * alone, only when the model's sure which, and nothing for a handle
-     * that's neither. Every thread a tidy did is taken back, with none named,
-     * only when the model's sure he means that, never on a guess, which
-     * would tidy threads he didn't ask about.
+     * alone, only when the model's sure which. A reminder of a handle that's
+     * neither is nothing taken back, never one of another thread. Every
+     * thread a tidy did is taken back, with none named, for "scratch that" or
+     * when the model's sure he means that, never on a guess, which would
+     * tidy threads he didn't ask about.
      */
     const undoing = (plan: Brain.Plan, thought: Thought, said: Lines, at: Stepping): Effect.Effect<Outcome> =>
       Effect.gen(function* () {
@@ -3638,6 +3639,8 @@ export const make = (options: {
             return yield* write({ decision: { ...plan.decision, how: "tidy", target: handle }, target: listed }, thought, said, at)
           }
         }
+        // A handle that's no thread, on the desk or in ARCHIVED, is never taken for none, which would take back another thread's reminder.
+        if (taking === "reminder" && handle !== "" && Option.isNone(whose)) return unsure()
         // Of the thread he named, if he did, and while what an archive dropped is what he'd take back, even one taken for filled in: never
         // a reminder of none he set before it, as if he'd named none.
         const named = dropping ? whose : Option.orElse(Option.map(plan.target, ({ ref }) => ref), () => Option.map(archived, ({ ref }) => ref))
@@ -3661,6 +3664,8 @@ export const make = (options: {
           const mute = { ...plan, decision: { ...plan.decision, act: "mute" as const, how: "undo" } }
           return yield* Effect.flatMap(muting(mute, thought, said), (outcome) => onward(thought, outcome, Brain.about(outcome.subject), at.step + 1, said))
         }
+        // Every thread a tidy just did, only when the model's sure he means all of it, as for "scratch that": never on a guess.
+        if (latest === "acted" && Option.exists(situation.acted, ({ kind }) => kind === "tidy") && plan.decision.sure !== "high") return unsure()
         return yield* write({ decision: { ...plan.decision, target: "" }, target: Option.none() }, thought, said, at)
       })
 
