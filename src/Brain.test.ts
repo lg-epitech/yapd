@@ -2188,6 +2188,21 @@ describe("memories", () => {
     expect(rename("Call it C++ parser.", "C++ parser")).toBe("C++ parser")
   })
 
+  test("a new title is all he said after his first \"to\" after \"rename\", so one of two titles, or one with more of his after it, is read back to him", () => {
+    const rename = (heard: string, text: string) => {
+      const checked = Brain.check(Brain.decision({ act: "tidy", how: "rename", target: handleOf(mina), sure: "high", text }), situation(heard), lines)
+      return checked._tag === "Do" ? checked.plan.decision.text : checked._tag === "Ask" ? checked.open.asked : checked
+    }
+    const back = (title: string) => `Rename Open Mina SSV2 Bug Tickets to ${title}, sir?`
+    expect(rename("Rename the Mina tickets to don't push to main.", "don't push to main")).toBe("don't push to main")
+    expect(rename("Rename the Mina tickets to don't push to main.", "main")).toBe(back("main"))
+    expect(rename("Rename the Mina tickets to fee tables and the Tezos one to Tezos fees.", "Tezos fees")).toBe(back("Tezos fees"))
+    expect(rename("Rename the Mina tickets to fee tables and the Tezos one to Tezos fees.", "fee tables")).toBe(back("fee tables"))
+    expect(rename("Rename the Mina tickets to fee tables, not to Mina fees.", "Mina fees")).toBe(back("Mina fees"))
+    expect(rename("Rename the Mina tickets to Mina fee tables, then tell it to stop.", "Mina fee tables")).toBe(back("Mina fee tables"))
+    expect(rename("Rename the Mina tickets to Mina fee tables, then tell it to stop.", "stop")).toBe(back("stop"))
+  })
+
   test("a routine's name is his as he said it, symbols and all, so the model's \"C\" for his \"C++\" keeps nothing, and saying \"C++\" never sends one called \"C\"", () => {
     const remember = (text: string) =>
       Brain.check(Brain.decision({ act: "remember", how: "routine", text }), situation("When I say C++, review the C++ parser."), lines)

@@ -2308,22 +2308,32 @@ const inHisWords = (said: string, words: string, before: RegExp, after: RegExp, 
 /** What gives a thread its new title as he says it: the "to" of "rename it to", "call it" or "name it". */
 const retitling = new RegExp(phrased(["to", "call it", "name it"]), "giu")
 
+/** His "rename", after which his first "to", "call it" or "name it" gives the new title. */
+const renaming = new RegExp(phrased(["rename"]), "iu")
+
+/** A pause filled, like "uh". */
+const filling = ["uh", "um", "erm", "hmm"]
+
 /** What may come around a new title: before it, marks and a pause filled, like "uh"; after it, words to yapd a pause sets off, like ", please.". */
-const aroundTitle = { ahead: ahead(`(?:${gap}|${phrased(["uh", "um", "erm", "hmm"])})*`), behind: behind([]) }
+const aroundTitle = { ahead: ahead(`(?:${gap}|${phrased(filling)})*`), behind: behind([]) }
 
 /**
- * Whether a new title is all he said after his last "to", "call it" or
- * "name it", symbols and all, whatever quotes he put around it, but for
- * what may come around it: so the model's "deploy yet" for his "do not
- * deploy yet" is never his, nor its "C parser" his "C++ parser", while his
- * quoted "C++ parser" is. Where it starts and ends is code's to say, never
- * the model's: a title he didn't say so, like one with a "to" in it, is read
- * back to him.
+ * Whether a new title is all he said after his first "to", "call it" or
+ * "name it" after his "rename", or his first at all with no "rename",
+ * symbols and all, whatever quotes he put around it, but for what may come
+ * around it: so the model's "deploy yet" for his "do not deploy yet" is
+ * never his, nor its "main" for his "don't push to main", nor its "C parser"
+ * his "C++ parser", while his quoted "C++ parser" is. Where it starts and
+ * ends is code's to say, never the model's: a title he didn't say so, like
+ * one of two he gave, or with more of his after it, as in "Mina fee tables,
+ * then tell it to stop", is read back to him.
  */
 const titled = (title: string, said: string) => {
-  const last = Array.from(said.matchAll(retitling)).at(-1)
-  if (last === undefined || calledAs(title) === "") return false
-  return inHisWords(said.slice(last.index + last[0].length), title, aroundTitle.ahead, aroundTitle.behind, calledAs) !== undefined
+  const renamed = renaming.exec(said)
+  const from = renamed === null ? 0 : renamed.index + renamed[0].length
+  const first = Array.from(said.slice(from).matchAll(retitling))[0]
+  if (first === undefined || calledAs(title) === "") return false
+  return inHisWords(said.slice(from + first.index + first[0].length), title, aroundTitle.ahead, aroundTitle.behind, calledAs) !== undefined
 }
 
 /** A fact said: what may come before it, "remember that" and an everyday way of asking before that, and after it, words to yapd a pause sets off. */
