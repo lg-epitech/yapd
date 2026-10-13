@@ -136,7 +136,8 @@ import Foundation
   check(quiet.first { $0.title == "Unmute" }?.kind == .action(.unmute(quieted.recent)), "takes the mute off by the same item that muted it")
 
   // A T3 Code thread's panel offers to have its subagents read, whether it has any yet or not, checked while they are, and to keep
-  // them to yapd again; a subagent's row, listed while they're read, is muted on its own, and has its thread's read or not.
+  // them to yapd again; a subagent's row, listed while they're read, is muted on its own, and never offers to stop reading them,
+  // which would stop every subagent of its thread.
   let thread = { (reading: String) in
     row("t3:Rosie:1", "Migrate the Tezos integration", #", "muted": false, "unheard": 1, "subagents": \#(reading)"#)
   }
@@ -148,12 +149,12 @@ import Foundation
   }
   check(drawn(Menu.panel(for: alone, details: nil)) == ["[card Migrate the Tezos integration]", "---", "Hear Again", "Mute", "Mute for an Hour", "Read Subagents"], "offers to read a thread's subagents, not \(drawn(Menu.panel(for: alone, details: nil)))")
   check(drawn(Menu.panel(for: head, details: nil)) == ["[card Migrate the Tezos integration]", "---", "Hear Again", "Mute", "Mute for an Hour", "Read Subagents ✓"], "checks Read Subagents while they're read, not \(drawn(Menu.panel(for: head, details: nil)))")
-  check(drawn(Menu.panel(for: part, details: nil)) == ["[card Sol review: release blockers]", "---", "Hear Again [off]", "Mute", "Mute for an Hour", "Read Subagents ✓"], "offers to mute a subagent and to stop reading its thread's subagents, not \(drawn(Menu.panel(for: part, details: nil)))")
+  check(drawn(Menu.panel(for: part, details: nil)) == ["[card Sol review: release blockers]", "---", "Hear Again [off]", "Mute", "Mute for an Hour"], "offers to mute a subagent, never to stop reading its thread's subagents, not \(drawn(Menu.panel(for: part, details: nil)))")
   let does = { (row: Menu.Row) in
     Dictionary(Menu.panel(for: row, details: nil).compactMap { item in if case .action(let action) = item.kind { (item.title, action) } else { nil } }, uniquingKeysWith: { first, _ in first })
   }
   check(does(alone)["Read Subagents"] == .subagents(alone.recent, on: true) && does(head)["Read Subagents"] == .subagents(head.recent, on: false), "reads a thread's subagents, or stops, as the item is checked")
-  check(does(part)["Read Subagents"] == .subagents(part.recent, on: false), "stops reading the subagents of the thread a subagent is part of")
+  check(Menu.panel(for: part, details: nil).first { $0.id == "t3:Rosie:7 subagents" }.map { $0.title == "Read Subagents" && !$0.enabled && $0.hidden } == true, "never lets him choose Read Subagents on a subagent's panel, keeping it hidden by its id")
   check(does(part)["Mute"] == .mute(part.recent, forAnHour: false) && does(part)["Mute for an Hour"] == .mute(part.recent, forAnHour: true), "mutes a subagent by its own row, until he takes it off or for an hour")
   check(Menu.panel(for: alone, details: nil).map(\.id) == loud.map(\.id) && Menu.panel(for: head, details: nil).map(\.id) == loud.map(\.id), "keeps a panel's items by the same ids, its subagents read or not, or not to be")
   check(Menu.panel(for: head, details: nil).first { $0.title == "Read Subagents" }.map { $0.enabled && !$0.hidden } == true, "lets him choose Read Subagents on a thread's panel")
@@ -173,11 +174,11 @@ import Foundation
     return check(false, "lists a muted subagent")
   }
   let withHeadPanel = Menu.panel(for: withHead, details: nil)
-  check(drawn(withHeadPanel) == ["[card Sol review: release blockers]", "---", "Hear Again [off]", "(Muted with Migrate the Tezos integration)", "Read Subagents ✓"], "says a subagent is muted with its thread rather than offer Unmute, not \(drawn(withHeadPanel))")
+  check(drawn(withHeadPanel) == ["[card Sol review: release blockers]", "---", "Hear Again [off]", "(Muted with Migrate the Tezos integration)"], "says a subagent is muted with its thread rather than offer Unmute, not \(drawn(withHeadPanel))")
   check(withHeadPanel.first { $0.id == "t3:Rosie:7 mute" }.map { $0.kind == .line && !$0.enabled } == true, "can't choose it")
   check(withHeadPanel.map(\.id) == Menu.panel(for: part, details: nil).map(\.id) && withHeadPanel.map(\.id) == Menu.panel(for: onItsOwn, details: nil).map(\.id), "keeps the same ids, so the open panel follows its thread's mute in place")
   check(withHeadPanel.first { $0.title == "Mute for an Hour" }?.hidden == true, "offers no Mute for an Hour while it's muted with its thread")
-  check(drawn(Menu.panel(for: onItsOwn, details: nil)) == ["[card Sol review: release blockers]", "---", "Hear Again [off]", "Unmute", "Read Subagents ✓"] && does(onItsOwn)["Unmute"] == .unmute(onItsOwn.recent), "takes off a subagent's own mute, not \(drawn(Menu.panel(for: onItsOwn, details: nil)))")
+  check(drawn(Menu.panel(for: onItsOwn, details: nil)) == ["[card Sol review: release blockers]", "---", "Hear Again [off]", "Unmute"] && does(onItsOwn)["Unmute"] == .unmute(onItsOwn.recent), "takes off a subagent's own mute, not \(drawn(Menu.panel(for: onItsOwn, details: nil)))")
   check(does(unsaid)["Unmute"] == .unmute(unsaid.recent), "offers Unmute as before from a yapd that doesn't say whether its thread is muted")
   let cut = Menu.panel(for: longHead, details: nil).first { $0.id == "t3:Rosie:7 mute" }?.title ?? ""
   check(cut == "Muted with Reimagine Yapd as a Jarvis Companion, with subag…" && cut.count == 60, "cuts a long thread's title short, as a row's label, not \(cut)")

@@ -165,11 +165,11 @@ struct Menu: Equatable {
   /// What the panel beside a recent row offers: its card, then hearing it again, the same as clicking the row, muting it until
   /// he takes it off or for an hour, or taking the mute off, a subagent's row its own, or, for a subagent muted with the thread
   /// it's part of, which taking its own off would leave muted, only saying so, having its subagents read to him, checked while
-  /// they are, on every T3 Code thread's, a subagent's by the thread it's part of, and opening its pull request, when yapd's
-  /// `details` of it have one with an https address. Muting it and reading its subagents work while yapd is off, and for a row
-  /// it can't say again. The same items whether it's muted or not, a thread's or a session's, and has a pull request or not,
-  /// what isn't offered hidden, so the open panel follows a mute that ends, one set by voice, subagents read by voice, or a
-  /// pull request yapd tells of, in place.
+  /// they are, on every T3 Code thread's own, never a subagent's, where it would stop reading all of its thread's, and opening
+  /// its pull request, when yapd's `details` of it have one with an https address. Muting it and reading its subagents work
+  /// while yapd is off, and for a row it can't say again. The same items whether it's muted or not, a thread's, a subagent's or
+  /// a session's, and has a pull request or not, what isn't offered hidden, so the open panel follows a mute that ends, one set
+  /// by voice, subagents read by voice, or a pull request yapd tells of, in place.
   static func panel(for row: Row, details: Details?) -> [Item] {
     let key = row.recent.key
     let muted = row.recent.muted
@@ -181,6 +181,9 @@ struct Menu: Equatable {
       return line.count > 60 ? "\(line.prefix(59))…" : line
     }
     let reading = row.recent.subagents == true
+    // Only on a T3 Code thread's own row: never a session's, which T3 Code runs no subagents for, nor from a yapd from before it,
+    // nor a subagent's, where choosing it would stop reading every subagent of its thread.
+    let readable = row.recent.head == nil && row.recent.subagents != nil
     let pr = details?.pr.flatMap { pr in pr.address.map { (number: pr.number, address: $0) } }
     return [
       Item(id: "\(key) card", kind: .card(row), title: row.recent.title, enabled: false),
@@ -191,10 +194,9 @@ struct Menu: Equatable {
         title: inherited ?? (muted ? "Unmute" : "Mute"), enabled: inherited == nil
       ),
       Item(id: "\(key) mute for an hour", kind: .action(.mute(row.recent, forAnHour: true)), title: "Mute for an Hour", enabled: true, hidden: muted),
-      // Never on a session's row, which T3 Code runs no subagents for, nor from a yapd from before it.
       Item(
-        id: "\(key) subagents", kind: .action(.subagents(row.recent, on: !reading)), title: "Read Subagents", enabled: row.recent.subagents != nil,
-        checked: reading, hidden: row.recent.subagents == nil
+        id: "\(key) subagents", kind: .action(.subagents(row.recent, on: !reading)), title: "Read Subagents", enabled: readable,
+        checked: reading && readable, hidden: !readable
       ),
       Item(
         id: "\(key) pull request", kind: pr.map { .action(.open($0.address)) } ?? .line, title: pr.map { "Open Pull Request #\($0.number)" } ?? "Open Pull Request",
