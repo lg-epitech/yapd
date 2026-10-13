@@ -864,7 +864,18 @@ export const make = (options: {
       Effect.suspend(() => {
         const name = (start: Start) => `${machine}:${start.thread}`
         const mine = starts.filter((start) => !keptOn.has(name(start)))
-        for (const start of mine) keptOn.add(name(start))
+        /** The threads this still holds, and no other may look into meanwhile. */
+        const held = new Set(mine.map(name))
+        for (const thread of held) keptOn.add(thread)
+        /** Lets go of those it holds that aren't of `left`, each once, so it never lets go of one another has taken since. */
+        const release = (left: ReadonlyArray<Start>) => {
+          const still = new Set(left.map(name))
+          for (const thread of held) {
+            if (still.has(thread)) continue
+            held.delete(thread)
+            keptOn.delete(thread)
+          }
+        }
         /** Those of `starts` that may still be to keep, letting go of the rest. */
         const look = (starts: ReadonlyArray<Start>) =>
           Effect.gen(function* () {
@@ -881,8 +892,9 @@ export const make = (options: {
                     ),
               { concurrency: "unbounded" },
             )
-            for (const [index, start] of starts.entries()) if (left[index] !== true) keptOn.delete(name(start))
-            return starts.filter((_, index) => left[index] === true)
+            const kept = starts.filter((_, index) => left[index] === true)
+            release(kept)
+            return kept
           })
         return Effect.gen(function* () {
           let left = yield* look(mine)
@@ -890,7 +902,7 @@ export const make = (options: {
             yield* Effect.sleep(again)
             left = yield* look(left)
           }
-        }).pipe(Effect.ensuring(Effect.sync(() => mine.forEach((start) => keptOn.delete(name(start))))))
+        }).pipe(Effect.ensuring(Effect.sync(() => release([]))))
       })
 
     /**

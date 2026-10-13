@@ -1335,6 +1335,40 @@ describe("Notices while yapd is off", () => {
     expect(result).toEqual(["done:Rosie:run-glucose"])
   })
 
+  test("the first turn of work yapd started is kept looking into once at a time, though what let go of it before ends after it's taken up again", async () => {
+    const glucose = thread("glucose", "glucose", { activeRunId: "run-glucose", latestRunId: "run-glucose" })
+    const salt = thread("salt", "salt", { activeRunId: "run-salt", latestRunId: "run-salt" })
+    const bounded = {
+      glucose: { runs: [{ id: "run-glucose", status: "running", ordinal: 1, startedAt: minutes(8), userMessageId: "yapd:glucose:0:m" }] },
+      salt: { runs: [{ id: "run-salt", status: "running", ordinal: 1, startedAt: minutes(8), userMessageId: "yapd:salt:0:m" }] },
+    }
+    const started = [
+      { at: now - 10 * 60_000, thread: "glucose", messageId: "yapd:glucose:0:m" },
+      { at: now - 10 * 60_000, thread: "salt", messageId: "yapd:salt:0:m" },
+    ]
+    const result = await run(
+      Effect.gen(function* () {
+        // T3 Code catches up before the glucose thread can be seen, so it's let go of at once, and the salt one is kept looking into.
+        const made = yield* notices({ view: [salt], bounded, started })
+        yield* made.reconcileOn("Rosie")
+        yield* made.wait(5)
+        // The glucose thread is heard of as new, and taken up again a minute later.
+        yield* made.becomes(glucose)
+        yield* made.hear({ _tag: "Created", thread: glucose })
+        yield* made.wait(60)
+        // The salt thread is archived, so what was looking into both ends.
+        yield* made.becomes({ ...salt, archivedAt: minutes(0) })
+        yield* made.wait(60)
+        // The glucose thread is heard of as new again, while it's still being looked into.
+        yield* made.hear({ _tag: "Created", thread: glucose })
+        const from = made.reads.length
+        for (let i = 0; i < 5; i++) yield* made.wait(60)
+        return made.reads.slice(from).filter((read) => read === "Rosie glucose").length
+      }),
+    )
+    expect(result).toBe(5)
+  })
+
   test("the first turn of work yapd started in a thread he archived since is never looked into", async () => {
     const archived = thread("glucose", "glucose", { latestRunId: "run-glucose", latestRunCompletedAt: minutes(2), archivedAt: minutes(1) })
     const bounded = {
