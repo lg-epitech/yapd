@@ -1919,8 +1919,27 @@ const routining = (choice: Decision, situation: Pick<Situation, "memories" | "ut
 export const resolved = (choice: Decision, situation: Pick<Situation, "memories" | "utterance" | "open">): Decision =>
   Option.getOrElse(routining(choice, situation), () => choice)
 
-/** The most words, as words compare, a routine kept by voice is called. */
+/** The most words a routine kept by voice is called. */
 const namedIn = 3
+
+/** How many words a name is, as he'd say them: what's between spaces, but for punctuation on its own, so "let's ship it" is three. */
+const wordsIn = (name: string) => name.split(/\s+/u).filter((word) => /[\p{L}\p{N}]/u.test(word)).length
+
+/** "When", "whenever" or "if I say", as he says a routine's name, whatever the punctuation. */
+const calling = /(?<![\p{L}\p{N}])(?:when|whenever|if)[^\p{L}\p{N}]+i[^\p{L}\p{N}]+say(?![\p{L}\p{N}])/iu
+
+/**
+ * A routine's name as he said it: his words right after "when", "whenever"
+ * or "if I say", up to where he paused after them, a comma, a full stop or the
+ * like as speech recognition writes it, or to the end, as when he said its
+ * name after its steps; none when he said no such thing. Where it ends is his
+ * to say, never the model's, so an "if" after it is in the steps.
+ */
+const spokenName = (said: string) => {
+  const found = calling.exec(said)
+  const name = found === null ? "" : (said.slice(found.index + found[0].length).replace(/^[^\p{L}\p{N}]+/u, "").split(/[,;:.?!]/u)[0] ?? "").trim()
+  return name === "" ? undefined : name
+}
 
 /** A routine as the model gives it to be kept, "name: steps": none without both. */
 export const routineOf = (text: string) => {
@@ -2021,6 +2040,7 @@ const rememberLines = (lines: Pick<Lines, "address">) => {
     // His words, but with more than the steps, it's how to say it so they're all of it, by its name as he said it.
     whole: (name?: string) => `I couldn't keep the steps in your own words${sir}. Say it as one request: when I say ${name ?? "its name"}, then the steps.`,
     short: `Keep the name short${sir}: when I say ship, then the steps.`,
+    pause: `Pause after its name${sir}: when I say ship, then the steps.`,
     written: `That one's in your preferences${sir}.`,
     answered: `That's something I already answer to${sir}.`,
   }
@@ -2209,9 +2229,8 @@ export const check = (given: Decision, situation: Situation, lines: Lines): Chec
       const routine = choice.how === "routine" ? routineOf(choice.text) : undefined
       const text = choice.how === "routine" ? (routine?.steps ?? "") : choice.text.trim()
       if (text === "") return { _tag: "Say", spoken: lines.cantTell }
-      // Where its name ends is the model's to say, so a longer one may hold what he asked of the steps, like "ship, if the checks are
-      // green", which his saying "ship" would leave out: it's refused, whatever else is right with it.
-      if (routine !== undefined && Ledger.digest(routine.name).split(" ").length > namedIn) return { _tag: "Say", spoken: said.short }
+      // A short name, as he'd say it, so "let's ship it" is three words: a longer one is refused, whatever else is right with it.
+      if (routine !== undefined && wordsIn(routine.name) > namedIn) return { _tag: "Say", spoken: said.short }
       // His words, never the model's: what's kept is in all he said, as heard, word for word. What may have been yapd's own voice is
       // never kept, which he's told as it's done.
       const { utterance } = situation
@@ -2221,6 +2240,12 @@ export const check = (given: Decision, situation: Situation, lines: Lines): Chec
       // between, or what else he asked for with them, are kept as nothing at all. He's told which words weren't his, or to say it on its own.
       if (utterance.echo === undefined && heard !== "" && routine !== undefined && !wholeRoutine(routine, heard)) {
         return { _tag: "Say", spoken: asSaid(text, heard) ? said.whole(asSaid(routine.name, heard) ? routine.name : undefined) : said.steps(unheard(text, heard)) }
+      }
+      // Where its name ends is his to say, never the model's: as far as he went after "when I say" before he paused, so a name the model
+      // ran on into what he asked of the steps, like "ship, if green", which his saying "ship" would leave out, is refused, as is any he
+      // ran on into the steps without a pause.
+      if (utterance.echo === undefined && heard !== "" && routine !== undefined && Ledger.digest(spokenName(heard) ?? "") !== Ledger.digest(routine.name)) {
+        return { _tag: "Say", spoken: said.pause }
       }
       if (routine !== undefined) {
         // The one in his preferences is the one, and a name yapd answers to already would never be heard as the routine's.

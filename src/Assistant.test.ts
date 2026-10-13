@@ -11884,6 +11884,17 @@ describe("Assistant memories", () => {
       kept: [],
       sent: [],
     })
+    // Its name ends where he paused, whatever the model makes of it: a short if it ran on into isn't kept, nor a name he ran on into the
+    // steps, and left in the steps, the if is kept with them.
+    const pause = { said: "Pause after its name, sir: when I say ship, then the steps.", kept: [], sent: [] }
+    expect(await saving("When I say ship, if green, merge the PR.", "ship, if green: merge the PR")).toEqual(pause)
+    expect(await saving("When I say ship merge the PR.", "ship: merge the PR")).toEqual(pause)
+    expect(await saving("When I say ship, if green, merge the PR.", "ship: if green, merge the PR")).toEqual({
+      said: "Noted, sir. Ship: if green, merge the PR.",
+      kept: ["ship: if green, merge the PR"],
+      sent: [],
+    })
+    expect(await saving("When I say let's ship it, merge the PR.", "let's ship it: merge the PR")).toMatchObject({ kept: ["let's ship it: merge the PR"] })
     // A fact is kept as his words wherever they are in what he said, with the rest of it done after.
     expect(await saving("Remember that rig runs the nightly, and tell the Mina one to rebase.", "rig runs the nightly", "fact")).toMatchObject({
       kept: ["rig runs the nightly"],
