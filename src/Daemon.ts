@@ -533,7 +533,7 @@ export const make = (
       const { update, message } = followUp
       const session = update.session
       yield* relays.send(pending.thread, message).pipe(Effect.onError(() => unregister(pending)))
-      yield* Effect.logInfo(`Delivered: ${message}`)
+      yield* Effect.logInfo(`Delivered: ${T3Actions.revealing(message) ? "something that could give a secret away" : message}`)
       yield* journal.write({
         at: yield* Clock.currentTimeMillis,
         kind: "sent",
@@ -591,7 +591,7 @@ export const make = (
         })
       if (outcome._tag === "Done") {
         yield* noted({ how: outcome.how, ...(outcome.waiting === undefined ? {} : { waiting: outcome.waiting }) })
-        yield* Effect.logInfo(`Delivered through T3 Code (${outcome.how}): ${message}`)
+        yield* Effect.logInfo(`Delivered through T3 Code (${outcome.how}): ${withheld || T3Actions.revealing(message) ? "something that could give a secret away" : message}`)
         yield* answeredNow(update)
         if (outcome.waiting !== undefined || Hands.held(outcome)) return { said: Hands.done(act, outcome.how, lines, Option.none(), outcome) }
         return outcome.how === "queued" ? ("queued" as const) : ("sent" as const)

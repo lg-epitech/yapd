@@ -1203,6 +1203,29 @@ describe("Over its first seconds, while yapd's own voice can still get into the 
     expect(echoed.lines).toContain("Reply: answer")
   })
 
+  test.each([
+    ["an answer", { answer: true }],
+    ["a question", { ask: true }],
+  ] as const)("logs none of a secret said over %s, whatever comes of it, only that it was heard", async (_, over) => {
+    const lines: Array<string> = []
+    const logger = Logger.make(({ message }) => {
+      lines.push((Array.isArray(message) ? message : [message]).join(" "))
+    })
+    const offered = await overHelperScoped(
+      Effect.gen(function* () {
+        const helper = yield* overHelper([[0.9, "Remember that the staging key is sk-live-4f9a8b7c6d5e."]], over)
+        yield* helper.wait(4)
+        yield* helper.talk(0.9, 15)
+        yield* helper.quiet
+        yield* helper.wait(1)
+        return helper.offered.map(({ heard }) => heard)
+      }).pipe(Effect.provide(Logger.replace(Logger.defaultLogger, logger))),
+    )
+    expect(offered).toEqual(["Remember that the staging key is sk-live-4f9a8b7c6d5e."])
+    expect(lines.filter((line) => line.includes("4f9a8b7c6d5e"))).toEqual([])
+    expect(lines).toContain("Heard something that could give a secret away, so it isn't logged")
+  })
+
   test.each(["Okay, thanks.", "Got it."])("follows the model's dismissal of %p said over its first second, falling quiet for good", async (said) => {
     const result = await overHelperScoped(
       Effect.gen(function* () {

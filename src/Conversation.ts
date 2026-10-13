@@ -915,16 +915,17 @@ export const make = (options: {
         if (yield* options.moved(update)) return yield* new RelayError({ reason: movedOn })
         const text = plain(message)
         const result = yield* options.send(update, text)
-        yield* Effect.logInfo(`${result === "queued" ? "Queued" : typeof result === "object" ? "Held" : "Sent"}: ${text}`)
+        // Never his words when they could give a secret away, as an answer to its agent asking for one may.
+        yield* Effect.logInfo(`${result === "queued" ? "Queued" : typeof result === "object" ? "Held" : "Sent"}: ${T3Actions.revealing(text) ? "something that could give a secret away" : text}`)
         return result
       })
 
-    /** What the user said, logged once it's known it's fit to be, as what's said over an update may not be; listening for `terms`, when there are any. */
+    /** What the user said, logged only once all of it is known, and it's known to be fit to be; listening for `terms`, when there are any. */
     const unlogged = (audio: Float32Array, terms?: ReadonlyArray<string>) =>
       transcriber.transcribe(audio, terms).pipe(Effect.catchAll((error) => Effect.logWarning("Could not transcribe", error).pipe(Effect.as(""))))
 
-    const transcribe = (audio: Float32Array, terms?: ReadonlyArray<string>) =>
-      unlogged(audio, terms).pipe(Effect.tap((heard) => (heard === "" ? Effect.void : Effect.logInfo(`Heard: ${heard}`))))
+    /** All he said, as it's logged: never what could give a secret away, however he split it between pauses, like a code said two digits at a time. */
+    const heardLine = (heard: string) => (T3Actions.revealing(heard) ? "Heard something that could give a secret away, so it isn't logged" : `Heard: ${heard}`)
 
     /**
      * What's known of yapd's own voice in what he said over a line, heard as
@@ -1200,7 +1201,7 @@ export const make = (options: {
       Effect.gen(function* () {
         const ear = hearing(yield* Effect.scope)
         // Listening for its options, if it has any, all of what he says back, however long he goes on.
-        const hear = (audio: Float32Array) => transcribe(audio, said.terms)
+        const hear = (audio: Float32Array) => unlogged(audio, said.terms)
         let from = 0
         let missed = 0
         let begun = said.saying ?? Effect.void
@@ -1233,6 +1234,7 @@ export const make = (options: {
                     ? Effect.succeed(Option.none<Effect.Effect<void>>())
                     : respond(heard, voiced, echo, echo === undefined || afterPause === "" ? undefined : afterPause, left === "" ? undefined : left),
                 )
+          if (settled !== undefined) yield* Effect.logInfo(heardLine(settled.heard))
           // "Mute." turns yapd off at once, which cuts this off: it's no answer, nor anything to follow up. Should yapd stay on, nothing came of it.
           if (settled?.halt === true && options.off !== undefined) {
             yield* options.off

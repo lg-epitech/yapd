@@ -77,6 +77,9 @@ const ownWords = (said: { readonly heard: string; readonly echo?: string }) => (
 /** His words as they're logged: never what could give a secret away, which is kept out of the log, as out of the journal. */
 const logged = (words: string) => (T3Actions.revealing(words) ? "something that could give a secret away" : words)
 
+/** His words as they're logged in a sentence, in quotes: never what could give a secret away, which is "what he said". */
+const quoted = (words: string) => (T3Actions.revealing(words) ? "what he said" : `"${words}"`)
+
 /** What a thread asks of the user, which a short answer can settle. */
 export type Asks =
   | {
@@ -3542,7 +3545,7 @@ export const make = (options: {
          */
         const late = Effect.gen(function* () {
           const withheld = T3Actions.revealing(heard)
-          yield* Effect.logInfo(`Not acting on ${withheld ? "what he said" : `"${heard}"`}, since what it answers was dealt with in T3 Code`)
+          yield* Effect.logInfo(`Not acting on ${quoted(heard)}, since what it answers was dealt with in T3 Code`)
           yield* journal.write({
             at,
             kind: "reply",
@@ -3558,7 +3561,7 @@ export const make = (options: {
         if ((thought.source === "fast" || echo !== undefined) && thought.decision.act === "resume") return Option.none()
         // Too little speech to be his, a yes or a pick that would change a thread isn't taken: the question stays open, as if unanswered.
         if (Brain.murmured(thought.decision, utterance)) {
-          yield* Effect.logInfo(`Not taking "${heard}" as the answer, with only ${voiced.toFixed(2)} s of speech`)
+          yield* Effect.logInfo(`Not taking ${quoted(heard)} as the answer, with only ${voiced.toFixed(2)} s of speech`)
           return Option.none()
         }
         return Option.some(takeUp(thought, { instead: { moot: Effect.sync(() => gone.has(open.id)), late } }))
@@ -3583,7 +3586,7 @@ export const make = (options: {
           const thought = yield* think(utterance, about, [{ speaker: "yapd", text: yield* line }])
           if (thought.decision.act === "resume") return Option.none()
           if (Brain.murmured(thought.decision, utterance)) {
-            yield* Effect.logInfo(`Not taking "${heard}" as a follow-up, with only ${voiced.toFixed(2)} s of speech`)
+            yield* Effect.logInfo(`Not taking ${quoted(heard)} as a follow-up, with only ${voiced.toFixed(2)} s of speech`)
             return Option.none()
           }
           // Taken, it holds a question asked since the answer that he's yet to hear, like one an agent asked meanwhile, so it isn't said

@@ -12203,6 +12203,37 @@ describe("Assistant memories", () => {
     expect(lines.filter((line) => line.includes("4f9a8b7c6d5e"))).toEqual([])
   })
 
+  test("a secret said too faintly to be taken, over an answer or a question, is logged nowhere", async () => {
+    const secret = "Remember that the staging key is sk-live-4f9a8b7c6d5e."
+    const lines: Array<string> = []
+    const logger = Logger.make(({ message }) => {
+      lines.push((Array.isArray(message) ? message : [message]).join(" "))
+    })
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(
+          (situation) => {
+            const { heard } = situation.utterance
+            if (heard === "Who needs me?") return Brain.decision({ act: "answer", spoken: "Two threads need you, sir." })
+            if (heard === "What's the status?") return Brain.decision({ act: "answer", target: handle(situation, mina), sure: "low", others: handle(situation, tezos), spoken: "Filed." })
+            return Brain.decision({ act: "remember", how: "fact", text: "the staging key is sk-live-4f9a8b7c6d5e" })
+          },
+          undefined,
+          { memories: true },
+        )
+        yield* made.dictate("Who needs me?")
+        const followed = yield* made.followUp(secret, 0.2)
+        yield* made.dictate("What's the status?")
+        const taken = yield* made.questions().at(-1)!.question!.answer(secret, 0.2)
+        return { followed, taken: Option.isSome(taken), kept: (yield* made.memories!.list).length }
+      }).pipe(Effect.provide(Logger.replace(Logger.defaultLogger, logger))),
+    )
+    expect(result).toEqual({ followed: false, taken: false, kept: 0 })
+    expect(lines.filter((line) => line.includes("4f9a8b7c6d5e"))).toEqual([])
+    expect(lines).toContain("Not taking what he said as a follow-up, with only 0.20 s of speech")
+    expect(lines).toContain("Not taking what he said as the answer, with only 0.20 s of speech")
+  })
+
   test("a secret to remember in the rest of a request isn't kept in the journal, even worked out after the step before is said", async () => {
     const rest = "remember that the staging key is sk-live-4f9a8b7c6d5e"
     let slow = false
