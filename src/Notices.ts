@@ -619,7 +619,11 @@ export const make = (options: {
           detail: { reminder: reminder.id, ...(on ? {} : { held: "off" }) },
         }
         const kept = yield* options.reminders.fire(reminder, entry)
-        if (Option.isNone(kept)) return yield* Effect.logInfo("Not saying a reminder, since it was said or cancelled already")
+        if (Option.isNone(kept)) {
+          // Cancelled meanwhile, it may be brought back, and handed over then.
+          firing.delete(reminder.id)
+          return yield* Effect.logInfo("Not saying a reminder, since it was said or cancelled already")
+        }
         if (!on) return yield* Effect.logInfo(`Kept unheard, since yapd is off: ${line}`)
         if (reminder.propose !== undefined && options.offered !== undefined) return yield* options.offered(reminder, Option.flatten(kept))
         const key = Reminders.key(reminder.id)
@@ -630,16 +634,18 @@ export const make = (options: {
     const lineOf = (said: ReturnType<typeof Reminders.lines>, reminder: Reminders.Reminder, called: string, why?: string) =>
       reminder.propose !== undefined ? said.offer(reminder, called) : why === undefined ? said.fired(reminder, called) : said.failed(reminder, called, why)
 
-    /** What he set on a thread for when it does as `event` says, still to come, handed over to be said, each in its own words. */
-    const fired = (ref: Threads.Ref, event: Reminders.Event, why?: string) =>
+    /** Hands these over to be said, each in its own words: a run that failed says why it stopped. */
+    const handing = (set: ReadonlyArray<Reminders.Reminder>, why?: string) =>
       Effect.gen(function* () {
-        if (options.reminders === undefined) return
-        const set = yield* options.reminders.on(ref, event)
         if (set.length === 0) return
         const called = yield* callingNow(set)
         const said = yield* reminderLines
         for (const reminder of set) yield* remind(reminder, lineOf(said, reminder, called(reminder), why))
       })
+
+    /** What he set on a thread for when it does as `event` says, still to come, handed over to be said, each in its own words. */
+    const fired = (ref: Threads.Ref, event: Reminders.Event, why?: string) =>
+      options.reminders === undefined ? Effect.void : Effect.flatMap(options.reminders.on(ref, event), (set) => handing(set, why))
 
     /** How long after a run's word that its update is on its way what he set on its finishing waits to lead it, before it's said on its own. */
     const settling = "40 seconds"
@@ -881,12 +887,14 @@ export const make = (options: {
             const id = window.id ?? `${window.kind}:${window.label}`
             const same = (entry: (typeof kept)[number], at: number) => entry.key?.startsWith(`usage:${who}:${id}:${at}:`) === true
             // Said for this window already, while its reset is still ahead, or for as long as the shortest lasts when nobody said when.
-            const told = kept.some((entry) => {
-              if (!same(entry, level)) return false
-              const was = resetOf(entry)
-              return was === undefined || Number.isNaN(was) ? now - entry.at < lasting : now < was
-            })
-            if (told) continue
+            const told = (at: number) =>
+              kept.some((entry) => {
+                if (!same(entry, at)) return false
+                const was = resetOf(entry)
+                return was === undefined || Number.isNaN(was) ? now - entry.at < lasting : now < was
+              })
+            // Nor 80 once 95 was said, as a window that rolls on can come down again.
+            if (told(level) || (level === 80 && told(95))) continue
             if (level === 95 && (yield* limitHolds(who))) continue
             const { whose, name: windowName } = Brain.windowed(window)
             const resets = window.resetsAt === undefined ? undefined : Brain.clock(window.resetsAt, now)
@@ -1066,12 +1074,12 @@ export const make = (options: {
             yield* dropping(ref)
             continue
           }
-          const since = Math.min(...set.filter(({ thread }) => thread === ref.id).map(({ at }) => at))
           const over = Date.parse(thread.value.latestRunCompletedAt ?? "")
           const asking = Date.parse(thread.value.pendingRuntimeRequest?.createdAt ?? "")
           // Each by when it was set: only what happened after counts.
-          if (over > since && !T3Live.busy(thread.value)) yield* fired(ref, "finished")
-          if (asking > since) yield* fired(ref, "asked")
+          const on = set.filter(({ thread }) => thread === ref.id)
+          yield* handing(on.filter(({ event, at }) => event === "finished" && over > at && !T3Live.busy(thread.value)))
+          yield* handing(on.filter(({ event, at }) => event === "asked" && asking > at))
         }
       }).pipe(Effect.catchAll((error) => Effect.logWarning("Could not look at what you asked me to tell you of", error)))
 
@@ -1098,11 +1106,7 @@ export const make = (options: {
        */
       due: Effect.gen(function* () {
         if (options.reminders === undefined) return
-        const set = yield* options.reminders.due(yield* Clock.currentTimeMillis)
-        if (set.length === 0) return
-        const called = yield* callingNow(set)
-        const said = yield* reminderLines
-        for (const reminder of set) yield* remind(reminder, lineOf(said, reminder, called(reminder)))
+        yield* handing(yield* options.reminders.due(yield* Clock.currentTimeMillis))
       }).pipe(Effect.catchAll((error) => Effect.logWarning("Could not say what you asked me to remind you of", error))),
       /**
        * What was handed over to be said before yapd restarted and he never
