@@ -1309,6 +1309,88 @@ describe("Notices of reminders", () => {
     expect(result.told).toHaveLength(2)
     expect(result.told[1]).toMatch(/: pick up the parcel\.$/)
   })
+
+  /** Set a minute before now, to hear when the Tezos one finishes, and to call Bob then when `text` says so. */
+  const tezosDone = (text = "", at = now - 60_000): Reminders.Asked => ({ at, heard: "Tell me when the Tezos one finishes.", text, event: "finished", machine: "Rosie", thread: "tezos", called: "the Tezos importer" })
+
+  /** Whether each reminder's entry was heard. */
+  const remindersHeard = (journal: Journal.Journal["Type"]) =>
+    Effect.map(journal.since(0, { kinds: ["notice"] }), (kept) => kept.filter(({ key }) => key?.startsWith("remind:") === true).map(({ heardAt }) => heardAt !== undefined))
+
+  test("asked once its turn had ended, a thread's finishing is told of when it next finishes, never as the turn before's", async () => {
+    const first = thread("tezos", "Migrate Tezos Integration", { latestRunId: "run-1" })
+    const said = [{ id: "a1", runId: "run-1", role: "assistant", text: "Done, the fee table is in.", createdAt: minutes(0) }]
+    const bounded: Record<string, Bounded> = { tezos: { runs: [{ id: "run-1", status: "completed", ordinal: 1, startedAt: minutes(5), userMessageId: "m1" }], messages: said } }
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* notices({ view: [first], bounded, reminding: true })
+        yield* made.hear(ended(first, "run-1"))
+        // Its turn told of, he sends it more work and asks to hear when that's done.
+        yield* made.wait(30)
+        yield* made.reminders!.add(tezosDone("", now + 30_000))
+        yield* made.wait(60)
+        const early = { told: [...made.told], pending: (yield* made.reminders!.pending).length }
+        const next = thread("tezos", "Migrate Tezos Integration", { latestRunId: "run-2" })
+        bounded.tezos = {
+          runs: [...(bounded.tezos?.runs ?? []), { id: "run-2", status: "completed", ordinal: 2, startedAt: new Date(now + 31_000).toISOString(), userMessageId: "m2" }],
+          messages: [...said, { id: "a2", runId: "run-2", role: "assistant", text: "The full suite passes.", createdAt: new Date(now + 90_000).toISOString() }],
+        }
+        yield* made.becomes(next)
+        yield* made.hear(ended(next, "run-2"))
+        yield* made.wait(60)
+        return { early, told: made.told, pending: (yield* made.reminders!.pending).length }
+      }),
+    )
+    expect(result.early).toEqual({ told: [], pending: 1 })
+    expect(result.told).toEqual([expect.stringMatching(/ has finished, sir, as you asked\.$/)])
+    expect(result.pending).toBe(0)
+  })
+
+  test("a thread he asked to hear finish that fails is told as one: the failure, then what he asked to be reminded of, heard together", async () => {
+    const tezos = thread("tezos", "Migrate Tezos Integration", { status: "failed", latestRunId: "run-1", lastErrorClass: "provider_error" })
+    const bounded = {
+      tezos: { runs: [{ id: "run-1", status: "failed", ordinal: 1, startedAt: minutes(5) }], turnItems: [failure("run-1", "provider_error", "API Error: 500 Internal server error")] },
+    }
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* notices({ view: [tezos], bounded, reminding: true })
+        yield* made.reminders!.add(tezosDone("call Bob"))
+        yield* made.hear(ended(tezos, "run-1"))
+        yield* made.wait(10)
+        return { told: made.told, heard: yield* remindersHeard(made.journal) }
+      }),
+    )
+    expect(result.told).toEqual(["Migrate Tezos Integration failed, sir: the model provider had an error. You asked me to remind you then: call Bob."])
+    expect(result.heard).toEqual([true])
+  })
+
+  test("a thread he asked to hear finish that hits a limit said for another thread already is told on its own, with why it stopped", async () => {
+    const limited = (id: string, title: string, runId: string) =>
+      thread(id, title, { status: "failed", latestRunId: runId, lastErrorClass: "usage_limit", usageLimitResetAt: "2026-10-08T23:00:00.000Z" })
+    const std = limited("std", "Fix the std build", "run-1")
+    const tezos = limited("tezos", "Migrate Tezos Integration", "run-2")
+    const limit = (runId: string) => ({
+      runs: [{ id: runId, status: "failed", ordinal: 1, startedAt: minutes(3) }],
+      turnItems: [failure(runId, "usage_limit", "Claude usage limit reached.", "2026-10-08T23:00:00.000Z")],
+    })
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* notices({ view: [std, tezos], bounded: { std: limit("run-1"), tezos: limit("run-2") }, reminding: true })
+        yield* made.reminders!.add(tezosDone("call Bob"))
+        yield* made.hear(ended(std, "run-1"))
+        yield* made.wait(10)
+        // The same window, minutes later.
+        yield* made.hear(ended(tezos, "run-2"))
+        yield* made.wait(10)
+        return { told: made.told, heard: yield* remindersHeard(made.journal) }
+      }),
+    )
+    expect(result.told).toEqual([
+      expect.stringMatching(/^Fix the std build hit Claude's limit, sir; it resets at \d/),
+      "Migrate Tezos Integration stopped, sir, before finishing: it hit Claude's limit. You asked me to remind you then: call Bob.",
+    ])
+    expect(result.heard).toEqual([true])
+  })
 })
 
 describe("Notices of usage", () => {

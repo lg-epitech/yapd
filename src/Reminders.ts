@@ -101,8 +101,12 @@ export interface Reminders {
   readonly restore: (id: number) => Effect.Effect<Option.Option<Reminder>>
   /** Those at a time that's come, the soonest first. */
   readonly due: (now: number) => Effect.Effect<ReadonlyArray<Reminder>>
-  /** Those still to come about a thread, for what it does when `event` says, or else all of them, offers at a time too, oldest first. */
-  readonly on: (ref: Threads.Ref, event?: Event) => Effect.Effect<ReadonlyArray<Reminder>>
+  /**
+   * Those still to come about a thread, for what it does when `event` says,
+   * or else all of them, offers at a time too, oldest first: set by `before`,
+   * when it's given, as one set once a run had ended is for its next.
+   */
+  readonly on: (ref: Threads.Ref, event?: Event, before?: number) => Effect.Effect<ReadonlyArray<Reminder>>
   readonly get: (id: number) => Effect.Effect<Option.Option<Reminder>>
   /**
    * Hands one over to be said: claims its key in the journal with `entry`,
@@ -167,14 +171,14 @@ export const make = (store: Store.Store["Type"], journal: Pick<Journal["Type"], 
           database.query<Row, [number]>("select * from reminders where state = 'pending' and due is not null and due <= ? order by due, id").all(now).map(reminder),
         ),
       ),
-    on: (ref, event) =>
+    on: (ref, event, before) =>
       reading(
         store.transaction((database: Database) =>
           database
             .query<Row, [string, string]>("select * from reminders where state = 'pending' and machine = ? and thread = ? order by at, id")
             .all(ref.machine, ref.id)
             .map(reminder)
-            .filter((found) => event === undefined || found.event === event),
+            .filter((found) => (event === undefined || found.event === event) && (before === undefined || found.at <= before)),
         ),
       ),
     get: (id) => one(store.transaction((database: Database) => find(database, id))),
@@ -249,6 +253,8 @@ export const lines = (said: Pick<Lines, "address">, now: number) => {
   /** What he asked to be told then, after a colon, when there's anything. */
   const then = (text: string) => (words(text) === "" ? "" : `: ${words(text)}`)
   const doing = (event: Event | undefined) => (event === "asked" ? "asks you something" : "finishes")
+  /** What he asked to be reminded of as a thread did what he wanted to hear of, said after it: "" when it's only that it did. */
+  const also = (reminder: Pick<Reminder, "text">) => (then(reminder.text) === "" ? "" : `You asked me to remind you then${then(reminder.text)}.`)
   return {
     /** What's said as he sets it, reading back what was kept. `running` is whether a thread watched to finish is working now. */
     set: (reminder: Asked, called: string, running = true): string => {
@@ -269,13 +275,12 @@ export const lines = (said: Pick<Lines, "address">, now: number) => {
     fired: (reminder: Reminder, called: string): string => {
       if (reminder.event === undefined) return `You asked me to remind you ${was(reminder.due ?? now, now)}${sir}${then(reminder.text)}.`
       const what = reminder.event === "asked" ? "is asking you something" : "has finished"
-      return then(reminder.text) === ""
-        ? `${capital(called)} ${what}${sir}${reminder.event === "asked" ? "" : ", as you asked"}.`
-        : `${capital(called)} ${what}${sir}. You asked me to remind you then${then(reminder.text)}.`
+      return also(reminder) === "" ? `${capital(called)} ${what}${sir}${reminder.event === "asked" ? "" : ", as you asked"}.` : `${capital(called)} ${what}${sir}. ${also(reminder)}`
     },
     /** What's said of a thread he wanted to hear finish that failed instead, with why, as a failure is said. */
-    failed: (reminder: Reminder, called: string, why: string): string =>
-      `${capital(called)} stopped${sir}, before finishing: ${why}${then(reminder.text) === "" ? "" : ` You asked me to remind you then${then(reminder.text)}.`}`,
+    failed: (reminder: Reminder, called: string, why: string): string => `${capital(called)} stopped${sir}, before finishing: ${why}${also(reminder) === "" ? "" : ` ${also(reminder)}`}`,
+    /** What a reminder adds to what's said of its thread's failure, said with it: "" when it's only that it finished. */
+    also,
     /** An offer, told rather than asked, like while yapd is off, for him to ask for it if he still wants it. */
     offer: (reminder: Reminder, called: string): string =>
       reminder.event === undefined
@@ -331,15 +336,15 @@ export interface Leading {
   readonly fire: (off: boolean) => Effect.Effect<Option.Option<Option.Option<number>>>
 }
 
-/** What a finished turn's update is led by, for the thread it's about: the reminders he set on it finishing. */
+/** What a finished turn's update is led by, for the thread it's about: the reminders he set on it finishing by `before`, when it came. */
 export const finishing = (options: {
   readonly reminders: Reminders
   readonly desk: (ref: Threads.Ref) => Effect.Effect<Threads.Desk>
   readonly lines: Effect.Effect<Lines>
 }) =>
-  (about: Threads.Ref): Effect.Effect<ReadonlyArray<Leading>> =>
+  (about: Threads.Ref, before: number): Effect.Effect<ReadonlyArray<Leading>> =>
     Effect.gen(function* () {
-      const set = (yield* options.reminders.on(about, "finished")).filter(({ propose }) => propose === undefined)
+      const set = (yield* options.reminders.on(about, "finished", before)).filter(({ propose }) => propose === undefined)
       if (set.length === 0) return []
       const now = yield* Clock.currentTimeMillis
       const said = lines(yield* options.lines, now)

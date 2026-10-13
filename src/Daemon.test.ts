@@ -102,7 +102,7 @@ const make = (says?: string, options: {
   /** The journal, when it's kept from before a restart, rather than one of its own. */
   readonly journal?: Journal.Journal["Type"]
   /** What he asked to hear once a thread finishes. */
-  readonly finishing?: (about: Threads.Ref) => Effect.Effect<ReadonlyArray<Reminders.Leading>>
+  readonly finishing?: (about: Threads.Ref, before: number) => Effect.Effect<ReadonlyArray<Reminders.Leading>>
 } = {}) => Effect.gen(function* () {
   /** What each rendered file says, and what was played, in order. */
   const rendered = new Map<string, string>()

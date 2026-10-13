@@ -182,8 +182,10 @@ export const make = (
      * What he asked to be told once a thread finishes, as a turn of it is
      * about to be said: its update is led by them, as one, and said whatever
      * he muted or holds, an answer to what he asked. Offers are asked apart.
+     * Only those set by `before`, as the turn came: one set since is for the
+     * thread's next.
      */
-    readonly finishing?: (about: Threads.Ref) => Effect.Effect<ReadonlyArray<Reminders.Leading>>
+    readonly finishing?: (about: Threads.Ref, before: number) => Effect.Effect<ReadonlyArray<Reminders.Leading>>
   } = {},
 ) => Effect.gen(function* () {
   const lifetime = yield* Effect.scope
@@ -1039,7 +1041,7 @@ export const make = (
       const answers = Option.isSome(tied) ? yield* asked(tied.value, finished) : Option.none()
       const opening = finished.opening === true || Option.contains(answers, "start")
       // What he asked to hear once it finishes leads it, as one: then it's what he asked for, however slight, and never kept quiet or held.
-      const reminders = Option.isSome(tied) && options.finishing !== undefined ? yield* options.finishing(tied.value) : []
+      const reminders = Option.isSome(tied) && options.finishing !== undefined ? yield* options.finishing(tied.value, arrivedAt) : []
       const reminded = reminders.length > 0
       // Whatever needs him is said in full, question and all, and so is everything once he asked to hear everything, when nothing is held
       // as progress. Otherwise only the headline is said, and the rest is kept for when he asks for more.
