@@ -2295,13 +2295,32 @@ export const answersTo = (phrase: string) => {
   )
 }
 
+/** What ends a noun: the end, a stop or a comma, or a word like "is" or "for", rather than another noun, as in "the auth flow". */
+const ended = String.raw`(?=\s*$|\s*[^\w\s-]| (?:is|are|was|were|for|to|on|at|in|of|from|and|equals)(?![a-z0-9]))`
+
+/** A word as a noun, after "the", "my" or similar and a name or two at most, as in "the Sentry auth is …" or "my seed.". */
+const asNoun = (word: string) => String.raw`(?<=(?<![a-z0-9])(?:the|my|your|our|its) (?:[\w.'’-]+ ){0,2})${word}${ended}`
+
 /**
- * What names one in what he says, though an agent's question may well mean
- * something else by it: a PIN, a PAT, in any case, or a lock's or a safe's
- * combination.
+ * What names one in a fact he'd have kept, though an agent's question may
+ * well mean something else by it: a PIN or a PAT, in any case; a lock's or a
+ * safe's combination; or one as it's said out loud, or as Whisper writes it
+ * down, like "P I N", "creds", "the Wi-Fi pass", "my seed", "sign in", "the
+ * phrase for …" or a card's CVV. Never what tells a question that asks him to
+ * type one in, so "Which phrase for the title?" is still his to answer by
+ * voice.
  */
 const alsoCredentials = new RegExp(
-  String.raw`(?<![a-z0-9])(?:pins?|pats?|(?:safe|lock|padlock|locker|vault)['’]?s? (?:combination|combo)s?|(?:combination|combo)s? (?:to|for|of|on) (?:\S+ ){0,3}?(?:safe|lock|padlock|locker|vault)s?)(?![a-z0-9])`,
+  String.raw`(?<![a-z0-9])(?:${[
+    String.raw`pins?|pats?|(?:safe|lock|padlock|locker|vault)['’]?s? (?:combination|combo)s?|(?:combination|combo)s? (?:to|for|of|on) (?:\S+ ){0,3}?(?:safe|lock|padlock|locker|vault)s?`,
+    String.raw`(?<=(?<![a-z0-9])(?:wi[ -]?fi|the|my) )pass${ended}`,
+    String.raw`pws?|p(?:\. ?| )i(?:\. ?| )n\.?|creds|psks?|${asNoun("auth")}|(?<!random )${asNoun("seed")}`,
+    String.raw`sign[ -]?in(?:s|to)?|log[ -]?in(?= (?:to|into)(?![a-z0-9]))|log into`,
+    String.raw`bip[ -]?39|phrases?(?= for(?![a-z0-9]))|words(?= for my [a-z0-9])`,
+    String.raw`security (?:questions?|answers?)|cv[vc]2?s?|card numbers?`,
+    // A URL with its user and password in it, by the user's name, as in "postgres://admin:…@rig".
+    String.raw`[a-z][a-z0-9+.-]*:\/\/[^\s/:@]+(?=:[^\s/@]+@)`,
+  ].join("|")})(?![a-z0-9])`,
   "i",
 )
 
@@ -2339,21 +2358,58 @@ const mentionsVague = (words: string) =>
       app === undefined && (plural !== "" || !somethingElse[name!.toLowerCase()]?.has(after?.toLowerCase() ?? "")),
   )
 
+/** What names something only he should know, like a password, a PIN, a key or a token, or a code or phrase that stands for one. */
+const credential = String.raw`(?:pass(?:word|code|phrase)|pin(?: code)?|secret|token|(?:api|access|private) key|key|recovery code|seed phrase|(?:2fa|two[ -]factor|backup) code)s?`
+
+/** A word of a value, as it starts: not where a sentence or a clause ends. */
+const valued = String.raw`[^\s.,;:!?…]`
+
+/**
+ * A credential given with its value, whatever's said between of whose or
+ * what for it is: "my password for GitHub is hunter2", "the password I use
+ * there is …", "the GitHub password: …", "my token's …", one word after a
+ * comma or a dash at the end, "my GitHub password, hunter2", or the other way
+ * round, "hunter2 is my GitHub password". Taken for one whenever it could be,
+ * so "the key is to batch them" is too, but never "rig's key bindings are
+ * vim-style", where what follows the word is what it's of.
+ */
+const given = [
+  new RegExp(
+    String.raw`(?<![a-z0-9])${credential}(?:\s+(?:for|to|of|on|at|in|into|with|from|i|we|you|that|which)\s+[^\s:=]+?(?:\s+[^\s:=]+?){0,4}?)?(?:['’]s\s+|\s*[:=]\s*|\s+(?:is|was|are|were|equals)\s+)${valued}`,
+    "i",
+  ),
+  new RegExp(String.raw`(?<![a-z0-9])${credential}(?:\s*,\s*|\s+[—–-]\s+)${valued}+\s*[.!?…]?\s*$`, "i"),
+  new RegExp(
+    String.raw`${valued}+\s+(?:is|was|are|were)\s+(?:my|the|our|your|his|her|their)\s+(?:${valued}+\s+){0,3}?${credential}(?![a-z0-9])(?=\s*$|\s*[.,;:!?…)"'”’]|\s+(?:for|to|of|on|at|in|with|from)\s)`,
+    "i",
+  ),
+]
+
+/** Whether what's said gives a secret's value: whatever looks like one, or a credential given with its value. */
+const givesValue = (words: string) => T3Actions.revealing(words) || given.some((pattern) => pattern.test(words))
+
+/**
+ * Whether what's said mentions a credential, however it's said: a password,
+ * a PIN, a recovery phrase, a login, a key, a token, a secret, a code or
+ * similar, even one that isn't secret, like the name of his password manager.
+ */
+const mentionsCredential = (words: string) => T3Actions.namesCredential(words) || alsoCredentials.test(words) || mentionsVague(words)
+
 /**
  * Whether what he asked to be kept in mind may give a secret away, in all he
- * said or in what the model made of it: whatever looks like one; or anything
- * that names a password, a PIN, a recovery phrase, a login, a key, a token, a
- * secret, a code or similar, even one that isn't secret, like the name of his
- * password manager. Refused broadly, since a secret kept is in every prompt,
- * and still only a best effort: one said without any word that names it,
- * like "the garage opens with 4827", gets through. It's refused as a secret
- * before anything else would turn it down, since only that keeps his words
- * out of the journal.
+ * said or in what the model made of it. A fact is refused broadly, since a
+ * secret kept is in every prompt: one that gives a value or mentions a
+ * credential at all. That's still only a best effort: one said without any
+ * word that names it, like "the garage opens with 4827", gets through. A
+ * routine's steps are words to an agent, where a code, a key or a token is
+ * everyday, as in "when I say ship, push the code", so a routine is refused
+ * only for what gives a value. It's refused as a secret before anything else
+ * would turn it down, since only that keeps his words out of the journal.
  */
-export const secretive = (choice: Pick<Decision, "text">, utterance: Pick<Assistant.Utterance, "heard" | "whole">) =>
-  [utterance.heard, utterance.whole ?? "", choice.text].some(
-    (words) => T3Actions.revealing(words) || T3Actions.namesCredential(words) || alsoCredentials.test(words) || mentionsVague(words),
-  )
+export const secretive = (choice: Pick<Decision, "how" | "text">, utterance: Pick<Assistant.Utterance, "heard" | "whole">) => {
+  const routine = choice.how === "routine" && routineOf(choice.text) !== undefined
+  return [utterance.heard, utterance.whole ?? "", choice.text].some((words) => givesValue(words) || (!routine && mentionsCredential(words)))
+}
 
 /** What's said of what can't be kept in mind, or forgotten. */
 const rememberLines = (lines: Pick<Lines, "address">) => {

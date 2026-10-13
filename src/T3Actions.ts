@@ -299,19 +299,12 @@ const wouldRun = (items: ReadonlyArray<typeof Item.Type>, approval: typeof Item.
 /** The apps whose names end in Code, like T3 Code, whose code is never a secret. */
 export const codeApps = "t3|claude|vs|studio"
 
-/** What ends a noun: the end, a stop or a comma, or a word like "is" or "for", rather than another noun, as in "the auth flow". */
-const ended = String.raw`(?=\s*$|\s*[^\w\s-]| (?:is|are|was|were|for|to|on|at|in|of|from|and|equals)(?![a-z0-9]))`
-
-/** A word as a noun, after "the", "my" or similar and a name or two at most, as in "the Sentry auth is …" or "my seed.". */
-const asNoun = (word: string) => String.raw`(?<=(?<![a-z0-9])(?:the|my|your|our|its) (?:[\w.'’-]+ ){0,2})${word}${ended}`
-
 /**
  * What names something only he should know, like a password, a PIN code, a
  * recovery phrase, a login or an API key, as words of its own, where "_"
- * parts words as a space does, as in "api_key", and as Whisper may write it
- * down, like "P I N", "creds" or "the Wi-Fi pass". One list for a question
- * that asks him to type one in and a fact never kept as a memory, so the two
- * can't drift.
+ * parts words as a space does, as in "api_key". One list for a question that
+ * asks him to type one in and a fact never kept as a memory, so the two can't
+ * drift.
  */
 const credentialNames = new RegExp(
   String.raw`(?<![a-z0-9])(?:${[
@@ -327,14 +320,6 @@ const credentialNames = new RegExp(
     String.raw`webhooks? urls?|auth(?:orization)? headers?`,
     String.raw`connection (?:strings?|ur[il]s?)|(?:database|db)[ _-]?ur[il]`,
     String.raw`credentials?|mnemonics?|otps?|jwt|dsn|\.env|bearer|log-?ins?|service[ _-]?accounts?`,
-    // As it's said out loud, or as Whisper writes it down.
-    String.raw`(?<=(?<![a-z0-9])(?:wi[ -]?fi|the|my) )pass${ended}`,
-    String.raw`pws?|p(?:\. ?| )i(?:\. ?| )n\.?|creds|psks?|${asNoun("auth")}|(?<!random )${asNoun("seed")}`,
-    String.raw`sign[ -]?in(?:s|to)?|log[ -]?in(?= (?:to|into)(?![a-z0-9]))|log into`,
-    String.raw`bip[ -]?39|phrases?(?= for(?![a-z0-9]))|words(?= for my [a-z0-9])`,
-    String.raw`security (?:questions?|answers?)|cv[vc]2?s?|card numbers?`,
-    // A URL with its user and password in it, by the user's name, as in "postgres://admin:…@rig".
-    String.raw`[a-z][a-z0-9+.-]*:\/\/[^\s/:@]+(?=:[^\s/@]+@)`,
   ].join("|")})(?![a-z0-9])`,
   "i",
 )
