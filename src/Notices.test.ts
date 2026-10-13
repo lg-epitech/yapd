@@ -1275,6 +1275,66 @@ describe("Notices while yapd is off", () => {
     expect(result).toEqual({ heard: [], looked: ["done:Rosie:run-glucose"] })
   })
 
+  test("the first turn of work yapd started once T3 Code had caught up is looked into again, under its run's key, until what it tells is kept, when it can't be read as it ends", async () => {
+    const over = thread("glucose", "glucose", { latestRunId: "run-glucose", latestRunCompletedAt: minutes(0) })
+    const asked = { id: "yapd:glucose:0:m", runId: "run-glucose", role: "user", text: "Find out.", createdAt: minutes(3) }
+    const bounded: Record<string, Bounded> = {}
+    const starts: Array<{ readonly at: number; readonly thread: string; readonly messageId: string | null }> = []
+    const result = await run(
+      Effect.gen(function* () {
+        let troubled = false
+        const made = yield* notices({ view: [], bounded, started: starts, troubled: () => troubled })
+        const told = () => made.finished.map(({ key }) => key)
+        // T3 Code catches up before any of it.
+        yield* made.reconcileOn("Rosie")
+        yield* made.wait(5)
+        // He starts it, its first turn ends, and T3 Code fails a moment as what it said is read.
+        starts.push({ at: now - 3 * 60_000, thread: "glucose", messageId: asked.id })
+        bounded.glucose = {
+          runs: [{ id: "run-glucose", status: "completed", ordinal: 1, startedAt: minutes(3), userMessageId: asked.id }],
+          messages: [asked, { id: "a-glucose", runId: "run-glucose", role: "assistant", text: "Apple hasn't shipped one.", createdAt: minutes(0) }],
+        }
+        troubled = true
+        yield* made.becomes(over)
+        yield* made.hear(ended(over, "run-glucose"))
+        yield* made.wait(13)
+        troubled = false
+        const heard = told()
+        for (let i = 0; i < 18; i++) yield* made.wait(5)
+        const looked = told()
+        // Once it's kept, it's done with.
+        yield* made.journal.write({ at: now, kind: "update", machine: "Rosie", thread: "glucose", project: "", said: "Apple hasn't shipped one." })
+        for (let i = 0; i < 18; i++) yield* made.wait(5)
+        return { heard, looked, kept: told() }
+      }),
+    )
+    expect(result).toEqual({ heard: [], looked: ["done:Rosie:run-glucose"], kept: ["done:Rosie:run-glucose"] })
+  })
+
+  test("the first turn of work yapd started that ended while T3 Code's word couldn't be heard, which then only tells of a new thread, is looked into", async () => {
+    const over = thread("glucose", "glucose", { latestRunId: "run-glucose", latestRunCompletedAt: minutes(1) })
+    const asked = { id: "yapd:glucose:0:m", runId: "run-glucose", role: "user", text: "Find out.", createdAt: minutes(3) }
+    const bounded: Record<string, Bounded> = {}
+    const starts: Array<{ readonly at: number; readonly thread: string; readonly messageId: string | null }> = []
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* notices({ view: [], bounded, started: starts })
+        yield* made.reconcileOn("Rosie")
+        yield* made.wait(5)
+        starts.push({ at: now - 3 * 60_000, thread: "glucose", messageId: asked.id })
+        bounded.glucose = {
+          runs: [{ id: "run-glucose", status: "completed", ordinal: 1, startedAt: minutes(3), userMessageId: asked.id }],
+          messages: [asked, { id: "a-glucose", runId: "run-glucose", role: "assistant", text: "Apple hasn't shipped one.", createdAt: minutes(1) }],
+        }
+        yield* made.becomes(over)
+        yield* made.hear({ _tag: "Created", thread: over })
+        for (let i = 0; i < 18; i++) yield* made.wait(5)
+        return made.finished.map(({ key }) => key)
+      }),
+    )
+    expect(result).toEqual(["done:Rosie:run-glucose"])
+  })
+
   test("the first turn of work yapd started in a thread he archived since is never looked into", async () => {
     const archived = thread("glucose", "glucose", { latestRunId: "run-glucose", latestRunCompletedAt: minutes(2), archivedAt: minutes(1) })
     const bounded = {
