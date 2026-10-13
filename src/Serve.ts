@@ -476,6 +476,7 @@ export const serve = Effect.gen(function* () {
     unmute: (key) => Effect.asVoid(controls.unmute(key)),
     subagents,
     replayThread,
+    clearCatchup: assistant.clear,
     // What a panel beside a row shows of its thread, what it's doing and its pull request as /threads has them, and what he hasn't heard as
     // its row counts it.
     details: Latest.details({ latest, threads, mutes, journal, listing: served.threads, missed }),

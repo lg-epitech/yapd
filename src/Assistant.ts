@@ -395,6 +395,15 @@ export class Assistant extends Context.Tag("yapd/Assistant")<
     /** What he hasn't heard, as a catch-up of everything would gather it, muted threads too, a thread at a time. */
     readonly missed: Effect.Effect<Missed.Missed>
     /**
+     * Clears the catch-up, as from the menu: sets aside, unheard, all a
+     * catch-up of everything would tell him now, muted threads aside, which
+     * is what the menu counts, so none of it is told or counted after, and
+     * none of it is said. Never what a thread waits on him for, which isn't
+     * in a catch-up. While yapd is off too. "Scratch that" within two minutes
+     * brings back what's still set aside. How many it set aside.
+     */
+    readonly clear: Effect.Effect<number>
+    /**
      * An offer he set came due, handed over to be said, with the entry it was
      * kept under: asked once nothing else is asked and he isn't dictating,
      * never in place of a question open, and sent only on his yes.
@@ -659,8 +668,17 @@ const catchUp = (kept: Kept) => {
     readonly second?: Partial<Brain.Decision>
     readonly over?: unknown
   }
+  // Taking back clearing the catch-up is part of catching up too: what it brings back is his to hear, as it was.
+  const restoring = (decided: Partial<Brain.Decision> | undefined) => decided?.act === "undo" && decided.how === "catchup"
   return (
-    decision?.act === "catchup" || second?.act === "catchup" || decision?.how === "missed" || second?.how === "missed" || decision?.act === "again" || over === "catch-up"
+    decision?.act === "catchup" ||
+    second?.act === "catchup" ||
+    decision?.how === "missed" ||
+    second?.how === "missed" ||
+    decision?.act === "again" ||
+    over === "catch-up" ||
+    restoring(decision) ||
+    restoring(second)
   )
 }
 
@@ -3078,10 +3096,87 @@ export const make = (options: {
         } satisfies Outcome
       })
 
-    /** What the model decided he wants to catch up on, more of the catch-up he just heard when that's what it said, or else what it named. */
+    /**
+     * Sets aside, unheard, what a catch-up of everything would tell him now,
+     * muted threads aside, as the menu counts it: never what's being told him
+     * or waiting to be, which isn't missed, nor what a thread waits on him for,
+     * which isn't in a catch-up. Asked by voice, by `utterance`, what he said
+     * it `over`, like a catch-up or a digest being read, by the entries it
+     * told him of, is set aside too: cut off, it's no longer being told him,
+     * whether it's dropped yet or put back. Noted in the journal with what it
+     * set aside, as said, `line`, when it's said, and as the change he made
+     * last, which "scratch that" takes back. What came in while yapd was off
+     * isn't offered after. How many it set aside, as of `now`, when it was
+     * asked.
+     */
+    const clearing = (
+      now: number,
+      voiced?: { readonly line: (cleared: number) => string; readonly utterance: string; readonly over: ReadonlyArray<number> },
+    ) =>
+      Effect.gen(function* () {
+        if (offered?.kind === "missed") offered = undefined
+        const coming = (yield* beingTold).filter((id) => !(voiced?.over.includes(id) ?? false))
+        const missed = yield* Missed.gather(journal, { now, spoke: yield* lastSpoke(now), coming, desk: nowhere })
+        const aside = yield* journal.setAside(
+          missed.groups.flatMap(({ rows }) => rows.filter((kept) => !Missed.muted(kept)).map(({ id }) => id)),
+          now,
+        )
+        if (aside.length === 0) return 0
+        const entry = yield* journal.write({
+          at: now,
+          kind: "action",
+          ...(voiced === undefined ? {} : { said: voiced.line(aside.length), utterance: voiced.utterance }),
+          detail: { cleared: aside.length, ids: aside },
+        })
+        noted = { at: now, kind: "cleared", id: Option.getOrElse(entry, () => 0), about: Option.none(), ids: aside }
+        yield* Effect.logInfo(`Set aside ${aside.length} of what you hadn't heard`)
+        return aside.length
+      })
+
+    /**
+     * Clears the catch-up, as he asked by voice, with what "it" told him of,
+     * like the catch-up or the digest he said it over, and says how much it
+     * set aside, or that there was nothing to.
+     */
+    const clearingUp = (thought: Thought, said: Lines) =>
+      Effect.gen(function* () {
+        const lines = Brain.catchupLines(said)
+        const { subject } = thought
+        const over = subject._tag === "Answer" ? (subject.missed ?? []) : []
+        const cleared = yield* clearing(yield* Clock.currentTimeMillis, { line: lines.cleared, utterance: thought.utterance.id, over })
+        return cleared === 0 ? reply(lines.nothingToClear, thought.subject) : ({ ...reply(lines.cleared(cleared), thought.subject), kind: "done" } satisfies Outcome)
+      })
+
+    /**
+     * Takes back clearing the catch-up, or bringing it back: what it set aside
+     * that's still only set aside is his to hear again, never what he heard
+     * since; brought back, it's set aside again. Taken back, it's a change of
+     * its own, so taking that back too puts it as it was.
+     */
+    const unclearing = (last: Brain.Noted, thought: Thought, said: Lines) =>
+      Effect.gen(function* () {
+        const lines = Brain.catchupLines(said)
+        const now = yield* Clock.currentTimeMillis
+        const ids = last.ids ?? []
+        const changed = last.kind === "cleared" ? yield* journal.bringBack(ids, last.at) : yield* journal.setAside(ids, now)
+        if (changed.length === 0) return reply(`There's nothing to take back${addressed(said)}.`, thought.subject)
+        const line = last.kind === "cleared" ? lines.back(changed.length) : lines.cleared(changed.length)
+        const entry = yield* journal.write({
+          at: now,
+          kind: "action",
+          said: line,
+          utterance: thought.utterance.id,
+          detail: last.kind === "cleared" ? { undo: { cleared: changed.length, ids: changed } } : { cleared: changed.length, ids: changed },
+        })
+        noted = { at: now, kind: last.kind === "cleared" ? "restored" : "cleared", id: Option.getOrElse(entry, () => 0), about: Option.none(), ids: changed }
+        return { ...reply(line, thought.subject), kind: "done" } satisfies Outcome
+      })
+
+    /** What the model decided he wants to catch up on, more of the catch-up he just heard when that's what it said, or else what it named, or to clear it. */
     const catchup = (plan: Brain.Plan, thought: Thought, said: Lines) =>
       Effect.gen(function* () {
         const { decision } = plan
+        if (decision.how === "clear") return yield* clearingUp(thought, said)
         const { situation } = thought
         const about = (yield* afresh(situation)).subject
         const before = about._tag === "Answer" ? about.catchup : undefined
@@ -3340,19 +3435,19 @@ export const make = (options: {
         const { situation } = thought
         const taking = Brain.undoes(plan.decision.how)
         if (taking === "thread") return yield* write(plan, thought, said, at)
-        // A reminder, or a memory, only when he means that, never the other.
-        const changed = Option.filter(situation.noted ?? Option.none(), (last) => taking === "last" || Brain.memorial(last) === (taking === "memory"))
+        // A reminder, a memory or the catch-up, only when he means that, never another.
+        const changed = Option.filter(situation.noted ?? Option.none(), (last) => taking === "last" || Brain.changeOf(last) === taking)
         const last = Option.getOrUndefined(changed)
         const latest =
-          taking === "reminder" || taking === "memory"
+          taking === "reminder" || taking === "memory" || taking === "catchup"
             ? Brain.newest({ noted: changed, acted: Option.none(), muteChange: Option.none() }, taking === "reminder" ? Option.getOrUndefined(plan.target)?.ref : undefined)
             : Brain.newest(situation)
         if (latest === "noted" && last !== undefined) {
-          return yield* Effect.flatMap(Brain.memorial(last) ? recalling(last, thought, said) : retracting(last, thought, said), (outcome) =>
-            onward(thought, outcome, Brain.about(outcome.subject), at.step + 1, said),
-          )
+          const change = Brain.changeOf(last)
+          const taken = change === "catchup" ? unclearing(last, thought, said) : change === "memory" ? recalling(last, thought, said) : retracting(last, thought, said)
+          return yield* Effect.flatMap(taken, (outcome) => onward(thought, outcome, Brain.about(outcome.subject), at.step + 1, said))
         }
-        if (taking === "reminder" || taking === "memory") {
+        if (taking === "reminder" || taking === "memory" || taking === "catchup") {
           const outcome = reply(`There's nothing to take back${addressed(said)}.`, thought.subject)
           return yield* onward(thought, outcome, Brain.about(outcome.subject), at.step + 1, said)
         }
@@ -3546,11 +3641,14 @@ export const make = (options: {
         if (opened === undefined) return yield* follow(Brain.check(decision, decided.situation, said), decided, said)
         // Taking back what he just did, of the question's thread or none named, a message he dictated, taken as the answer to a part of the
         // question, is taken back out of it. That was all he took back, since it never went: he's told so, and the question's asked again
-        // after, from the part it answered. Let go with "scratch that", it's let go without it. Never when the model took him to mean a reminder or a memory.
+        // after, from the part it answered. Let go with "scratch that", it's let go without it. Never when the model took him to mean a reminder,
+        // a memory or the catch-up he cleared.
         const undone = decided.situation.desk.threads.find(({ handle }) => handle === decision.target)
         const ours = undone === undefined || opened.open.candidates.some((ref) => Threads.same(ref, undone.ref))
         const takenBack =
-          ours && ((decision.act === "undo" && decision.how !== "reminder" && decision.how !== "memory") || (decision.act === "dismiss" && Brain.takesBack(utterance.heard)))
+          ours &&
+          ((decision.act === "undo" && decision.how !== "reminder" && decision.how !== "memory" && decision.how !== "catchup") ||
+            (decision.act === "dismiss" && Brain.takesBack(utterance.heard)))
         const open = takenBack ? withdrawing(opened.open) : opened.open
         if (open !== opened.open && decision.act === "undo") {
           yield* close(open, "replaced", utterance.id)
@@ -4682,7 +4780,8 @@ export const make = (options: {
               saying: Effect.gen(function* () {
                 // Only now, so what one that's never said would have covered comes up in the next.
                 yield* options.modes?.briefed(until) ?? Effect.void
-                answered = { subject, at: now, turns: power.turns }
+                // "It" as it starts being said, like an answer, not as it was summed up: an update read while it waited isn't "it" over it.
+                answered = { subject, at: yield* Clock.currentTimeMillis, turns: power.turns }
                 if (entry === undefined) entry = yield* journal.write({ at: yield* Clock.currentTimeMillis, kind: "brief", said: spoken, detail: { covered } })
               }),
               // Cut off, what it covered is still his to catch up on.
@@ -4702,6 +4801,7 @@ export const make = (options: {
         const now = yield* Clock.currentTimeMillis
         return yield* Missed.gather(journal, { now, spoke: yield* lastSpoke(now), coming: yield* beingTold, desk: nowhere })
       }),
+      clear: Effect.flatMap(Clock.currentTimeMillis, (now) => clearing(now)),
       offered: (reminder, kept) =>
         Effect.suspend(() => {
           proposed.push({ reminder, kept })
