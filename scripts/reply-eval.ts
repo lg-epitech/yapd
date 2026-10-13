@@ -684,13 +684,20 @@ const fixture = Effect.gen(function* () {
     // Kept under its session, the reply was over an update only known to be from its thread.
     const told = { ...toldOf(update, threads, shell), ...(update.thread === reply.thread ? {} : { owner: true }) }
     const earlier = (responders.get(`${reply.machine}\n${reply.thread}`) ?? []).filter((row) => row.at > update.at && row.at < reply.at && row.text !== undefined)
-    // Each line as he heard it when he spoke over it, cut where he did, as the Responder was shown it.
+    // Each line as he heard it when he spoke over it, cut where he did, as the Responder was shown it: his own with what may have
+    // been yapd's voice in it, as Conversation keeps it for the model asked next.
     const lines: Array<Line> = []
     let said = told.spoken
     for (const row of earlier) {
-      const intent = detailOf(row).intent
+      const noted = detailOf(row)
+      const intent = noted.intent
       if (intent !== "answer" && intent !== "send" && intent !== "mute") continue
-      lines.push({ speaker: "yapd", text: heardOf(said, row).text }, { speaker: "user", text: row.text ?? "" })
+      const echo = text(noted.echo)
+      const afterPause = text(noted.afterPause)
+      lines.push(
+        { speaker: "yapd", text: heardOf(said, row).text },
+        { speaker: "user", text: row.text ?? "", ...(echo === undefined ? {} : { echo, ...(afterPause === undefined ? {} : { afterPause }) }) },
+      )
       // A send's said is kept empty when yapd only said it was on it.
       said = row.said === undefined || row.said === "" ? (intent === "send" ? Persona.plain.onIt : "") : row.said
     }
@@ -980,6 +987,8 @@ interface Result {
   readonly message?: string
   readonly rest?: string
   readonly failed?: string
+  /** The Brain's decision as the model or `fast` gave it, before `check`: only to look into, never scored. */
+  readonly raw?: { readonly act: string; readonly target?: string; readonly spoken?: string; readonly message?: string; readonly rest?: string }
 }
 
 /** The Brain's act, as the Responder's intent it'd be: what it reads is an answer, and a send to another thread than "it" is elsewhere. */
@@ -1084,7 +1093,31 @@ const run = Effect.gen(function* () {
       if (Either.isLeft(decided)) return { id: case_.id, era: case_.era, path: "brain", source: "failed", ms, intent: "failed", failed: String(decided.left.cause) } satisfies Result
       const decision = decided.right
       const checked = Brain.check(decision, situated, lines)
-      const listed = situated.desk.threads.find(({ handle }) => handle === decision.target)
+      const raw = {
+        act: decision.act,
+        ...(decision.target === "" ? {} : { target: decision.target }),
+        ...(decision.spoken === "" ? {} : { spoken: decision.spoken }),
+        ...(decision.text === "" ? {} : { message: decision.text }),
+        ...(decision.rest === "" ? {} : { rest: decision.rest }),
+      }
+      // Scored as what the check makes of it, which is what the assistant acts on: a faint mute is talk to carry on over, a question
+      // is a clarify, and a send it turns down with a reason is only an answer.
+      const made = (() => {
+        if (checked._tag === "Ask") return { intent: "clarify", act: "clarify", ...(checked.open.asked === "" ? {} : { spoken: checked.open.asked }) }
+        if (checked._tag === "Say") return { intent: "answer", act: "answer", ...(checked.spoken === "" ? {} : { spoken: checked.spoken }) }
+        const { decision: planned, target, left } = checked.plan
+        const listed = Option.getOrUndefined(target) ?? situated.desk.threads.find(({ handle }) => handle === planned.target)
+        const rest = planned.rest === "" ? (left ?? "") : planned.rest
+        return {
+          intent: intentOf(planned, own),
+          act: planned.act,
+          ...(planned.target === "" ? {} : { target: planned.target }),
+          ...(listed === undefined ? {} : { title: listed.thread.title }),
+          ...(planned.spoken === "" ? {} : { spoken: planned.spoken }),
+          ...(planned.text === "" ? {} : { message: planned.text }),
+          ...(rest === "" ? {} : { rest }),
+        }
+      })()
       return {
         id: case_.id,
         era: case_.era,
@@ -1092,14 +1125,9 @@ const run = Effect.gen(function* () {
         source: quick === undefined ? "model" : "fast",
         ms,
         ...(quick === undefined ? { modelMs: ms } : {}),
-        intent: checked._tag === "Ask" || decision.act === "clarify" ? "clarify" : intentOf(decision, own),
-        act: decision.act,
-        ...(decision.target === "" ? {} : { target: decision.target }),
-        ...(listed === undefined ? {} : { title: listed.thread.title }),
+        ...made,
         checked: checked._tag,
-        ...(decision.spoken === "" ? {} : { spoken: decision.spoken }),
-        ...(decision.text === "" ? {} : { message: decision.text }),
-        ...(decision.rest === "" ? {} : { rest: decision.rest }),
+        raw,
       } satisfies Result
     })
 
