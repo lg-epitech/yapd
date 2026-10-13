@@ -27,7 +27,7 @@ import * as Persona from "./Persona.ts"
 import * as Preferences from "./Preferences.ts"
 import * as Relay from "./Relay.ts"
 import * as Remote from "./Remote.ts"
-import { ProviderResponder } from "./Responder.ts"
+import { ProviderResponder, switches } from "./Responder.ts"
 import * as Server from "./Server.ts"
 import * as Settings from "./Settings.ts"
 import * as Store from "./Store.ts"
@@ -133,8 +133,8 @@ export const serve = Effect.gen(function* () {
   /** What tells him what was held once he says he's back over an update, which the assistant does, once it's made. */
   const welcome = yield* Deferred.make<Effect.Effect<void>>()
   /** Turning yapd on or off as the menu does, once that's made, for "Mute." said to it, and "unmute" by the shortcut while it's off. */
-  const switches = yield* Deferred.make<(on: boolean) => Effect.Effect<void>>()
-  const power = (on: boolean) => Effect.flatMap(Deferred.await(switches), (turn) => turn(on))
+  const toggling = yield* Deferred.make<(on: boolean) => Effect.Effect<void>>()
+  const power = (on: boolean) => Effect.flatMap(Deferred.await(toggling), (turn) => turn(on))
   // Hooks on this machine are tied to the thread they came from, so what's said of each is kept with it, and what he says over it goes to it.
   // Another machine's are tied to theirs there for what's kept, shown and muted of them only.
   const daemon = yield* Daemon.make({
@@ -327,7 +327,7 @@ export const serve = Effect.gen(function* () {
       Effect.zipRight(settings.remember(on), turn(on)).pipe(Effect.zipRight(journal.write({ at, kind: "action", detail: { on } }))),
     ).pipe(switching.withPermits(1))
   // By voice, nothing waits on it to say what went wrong, so that's logged.
-  yield* Deferred.succeed(switches, (on) => toggle(on).pipe(Effect.catchAllCause((cause) => Effect.logWarning(`Could not turn ${on ? "on" : "off"}`, cause))))
+  yield* Deferred.succeed(toggling, (on) => toggle(on).pipe(Effect.catchAllCause((cause) => Effect.logWarning(`Could not turn ${on ? "on" : "off"}`, cause))))
   // The shortcut waits for this, so nothing is dictated before yapd knows it's on.
   if (yield* settings.on) yield* turn(true)
   else {
@@ -395,10 +395,13 @@ export const serve = Effect.gen(function* () {
   })
   // Asked as the user starts talking, so it's there by the time they've finished.
   yield* Effect.forkScoped(Stream.runForEach(dictation.presses, ({ press, turns, began }) => assistant.prepare(press, turns, began)))
-  // Each with the press it began with, which keeps what "it" meant then, however long the dictation took.
+  // Each with the press it began with, which keeps what "it" meant then, however long the dictation took. "Mute.", or "unmute" while
+  // yapd is off, is heard at once, ahead of what's still being worked out.
   yield* Effect.forkScoped(
-    Stream.runForEach(dictation.transcripts, ({ press, turns, heard: text, voiced, at }) =>
-      text === "" ? assistant.nothing(press) : heard(text, "shortcut", voiced, turns, press, at),
+    Switching.dictations(
+      dictation.transcripts,
+      ({ heard: text }) => Effect.map(daemon.power, ({ on }) => switches(text, on) !== undefined),
+      ({ press, turns, heard: text, voiced, at }) => (text === "" ? assistant.nothing(press) : heard(text, "shortcut", voiced, turns, press, at)),
     ),
   )
   // Whatever he says over an update takes the place of a question yapd asked before.

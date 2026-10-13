@@ -6233,6 +6233,25 @@ describe("Assistant", () => {
     expect(await sending(true)).toEqual({ dispatched: 0, spoken: 0 })
   })
 
+  test("'Mute.' by the shortcut while the model still works out what came before turns yapd off at once, which stops that: nothing is sent or said", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const turning: Array<boolean> = []
+        const { heard, wait, flush, dispatched, spoken } = yield* assistant(tezosMessage("high"), undefined, { thinking: 3, turning })
+        const dictated = yield* Effect.fork(heard({ heard: "Tell the Tesla's migration to use the fee table.", via: "shortcut", at: now, voiced: 3, turns: 1 }))
+        yield* flush
+        const muted = yield* Effect.fork(heard({ heard: "Mute.", via: "shortcut", at: now, voiced: 1, turns: 1 }))
+        yield* flush
+        // With no time gone by, so nothing waited for the model.
+        const off = { turning: [...turning], done: Option.isSome(yield* Fiber.poll(muted)) }
+        yield* wait(3)
+        yield* Fiber.join(dictated)
+        return { off, dispatched: dispatched.length, spoken: spoken().length }
+      }),
+    )
+    expect(result).toEqual({ off: { turning: [false], done: true }, dispatched: 0, spoken: 0 })
+  })
+
   test("turning yapd off while a message is being sent still notes what came of it, so scratch that knows it went", async () => {
     const result = await run(
       Effect.gen(function* () {

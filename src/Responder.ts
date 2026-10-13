@@ -162,6 +162,9 @@ const turningOn: ReadonlySet<string> = new Set(["unmute", "un mute", "turn on", 
 /** Whether what he said is only to turn yapd back on. */
 export const wakes = (heard: string) => turningOn.has(once(heard))
 
+/** What what he said turns yapd to, as it is now: off for "Mute." while it's on, on for "unmute" while it's off, and nothing otherwise. */
+export const switches = (heard: string, on: boolean) => (on ? (halts(heard) ? false : undefined) : wakes(heard) ? true : undefined)
+
 /** What Whisper writes for near-silence, which nobody said. */
 export const hallucinated: ReadonlySet<string> = new Set(["you", "thank you", "bye", "see you again", "kid", "thanks for watching"])
 

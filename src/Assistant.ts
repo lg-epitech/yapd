@@ -12,7 +12,7 @@ import * as Modes from "./Modes.ts"
 import * as Mutes from "./Mutes.ts"
 import { addressed, type Lines, Persona, unaddressed } from "./Persona.ts"
 import * as Questions from "./Questions.ts"
-import { enough, halts, type Line, once, wakes } from "./Responder.ts"
+import { enough, type Line, once, switches } from "./Responder.ts"
 import * as Show from "./Show.ts"
 import * as T3Actions from "./T3Actions.ts"
 import * as Threads from "./Threads.ts"
@@ -3881,8 +3881,7 @@ export const make = (options: {
           // it, at once, with nothing worked out or said for it, and carried through however this ends. Off, before what the press held
           // is let go of, so what it held, like a thread's question, is dropped as turning off drops it. On, nothing waits for what
           // turning on says, so what he says next doesn't either.
-          const { on } = yield* options.power
-          const switching = on ? (halts(utterance.heard) ? false : undefined) : wakes(utterance.heard) ? true : undefined
+          const switching = switches(utterance.heard, (yield* options.power).on)
           if (options.turn !== undefined && switching !== undefined) {
             yield* Effect.logInfo(switching ? `Turned on: he said ${once(utterance.heard)}` : "Turned off: he said mute")
             const turning = yield* Effect.forkIn(options.turn(switching), scope)
