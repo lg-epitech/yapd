@@ -113,11 +113,11 @@ const curt = 2.5
  */
 const breather = 500
 /**
- * How long before that pause, in milliseconds, what he's begun can be and
- * still be heard out once it's over: as long as the silence that tells he's
- * stopped, so a "Mute." begun over the line's last words, which that silence
- * shows only once the line has ended, isn't cut in two. Begun any earlier
- * and still going, it's other talk, like a TV's.
+ * How long before the line ended, in milliseconds, what he's begun can be
+ * and still be heard out once the moment after it is over: as long as the
+ * silence that tells he's stopped, so a "Mute." begun over the line's last
+ * words, which that silence shows only once the line has ended, isn't cut in
+ * two. Begun any earlier and still going, it's other talk, like a TV's.
  */
 const brink = 700
 /**
@@ -453,8 +453,8 @@ export const make = (options: {
      * Whisper is never waited on longer than "Mute." could be heard out. The
      * moment after it is over after the pause between lines once something's
      * `queued` to be said next, which listens for "Mute." itself. Only what
-     * he'd begun by its end, in the pause between lines or just before it, is
-     * heard out then, for as long as it could be "Mute.", and what he begins a
+     * he'd begun by its end, in it or just before the line ended, is heard out
+     * then, for as long as it could be "Mute.", and what he begins a
      * beat after, or right after he's stopped saying something else, so his
      * "Mute." then is neither cut in two nor missed: but nothing is listened
      * for longer than `outburst` once that moment is over, so talk that goes
@@ -472,6 +472,8 @@ export const make = (options: {
         let echoing = false
         /** Played to the end. */
         let played = false
+        /** When it played to the end, by the clock, noted before the moment after it can be over. */
+        let finished = 0
         /** When the usual moment after it was over too, by the clock. */
         let over: number | undefined
         /** When what he said last ended, or what he began came to nothing, by the clock. */
@@ -490,20 +492,24 @@ export const make = (options: {
           ),
         )
         yield* playback.finished.pipe(
+          Effect.zipRight(Clock.currentTimeMillis),
           Effect.tap(() => through),
           Effect.matchEffect({
             onFailure: (error) => Queue.offer(signals, { _tag: "Broke", id, error }),
-            onSuccess: () => Effect.zipRight(Queue.offer(signals, { _tag: "Finished", id }), after),
+            onSuccess: (at) =>
+              Effect.sync(() => {
+                finished = at
+              }).pipe(Effect.zipRight(Queue.offer(signals, { _tag: "Finished", id })), Effect.zipRight(after)),
           }),
           Effect.forkScoped,
         )
         /**
          * Whether what he began at `at` is heard out once that moment is over,
-         * at `over`: begun in the pause between lines or just before it, or a
-         * beat after, or right after what he said last ended, and never once
-         * `outburst` has passed since it was over.
+         * at `over`: begun in it or just before the line ended, however long
+         * it lasted, or a beat after, or right after what he said last ended,
+         * and never once `outburst` has passed since it was over.
          */
-        const heeded = (at: number, over: number) => at >= over - breather - brink && at <= Math.min(Math.max(over + beat, ended + breather), over + outburst)
+        const heeded = (at: number, over: number) => at >= finished - brink && at <= Math.min(Math.max(over + beat, ended + breather), over + outburst)
         // Once it's all over, only what's heeded is waited for, while it could yet be "Mute.": a microphone gone quiet, or talk that goes
         // on, like a TV's, ends it as one gone deaf does. What's come in already is looked at first, however long it waited.
         const next = Effect.suspend(() => {
@@ -552,9 +558,14 @@ export const make = (options: {
               onset = undefined
               echoing = false
               // Longer than "Mute." could be, it isn't, so Whisper isn't asked, and nothing waits on it; nor while Whisper can't hear yet,
-              // as while its model loads. What it takes longer to make out than "Mute." could be heard out in is taken for something else.
+              // as while its model loads. What it takes longer to make out than "Mute." could be heard out in is taken for something else,
+              // as is what it hasn't made out once nothing more is listened for after that moment, but for a breather at least, so what's
+              // next is held up hardly past then.
               if (options.off !== undefined && voiced(signal.audio) <= curt && (yield* transcriber.ready)) {
-                const heard = yield* unlogged(signal.audio).pipe(Effect.timeout(outburst), Effect.orElseSucceed(() => ""))
+                const heard = yield* unlogged(signal.audio).pipe(
+                  Effect.timeout(over === undefined ? outburst : Math.max(breather, over + outburst - ended)),
+                  Effect.orElseSucceed(() => ""),
+                )
                 if (halted(heard, echo)) {
                   // Its voice ends at once, never waiting on all turning off does first. Should yapd stay on, it's a stop.
                   yield* playback.stop

@@ -1786,6 +1786,40 @@ describe("Over its first seconds, while yapd's own voice can still get into the 
     expect(result).toBe(1)
   })
 
+  test("with nothing waiting to be said next, a 'Mute, mute' begun in the moment after a notice and still going as it's over is heard out", async () => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        const helper = yield* overHelper([[0.95, "Mute, mute."]], { off: true, tell: true })
+        yield* helper.finish
+        yield* helper.wait(1.5)
+        yield* helper.talk(0.95, 10)
+        // Just past the usual moment after it.
+        yield* helper.wait(1.7)
+        yield* helper.quiet
+        return helper.offs()
+      }),
+    )
+    expect(result).toBe(1)
+  })
+
+  test("once the moment after a notice is over, Whisper is waited on no longer than what's next is held up for 'Mute.'", async () => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        const helper = yield* overHelper([[0.95, "Mute."]], { off: true, tell: true, queued: true, transcribing: 10 })
+        yield* helper.finish
+        yield* helper.wait(0.3)
+        yield* helper.talk(0.95, 10)
+        // Heard out three seconds into the four what's next can be held up for.
+        yield* helper.wait(3.2)
+        yield* helper.quiet
+        // Four seconds after the pause between lines.
+        yield* helper.wait(1)
+        return { done: Option.isSome(yield* Fiber.poll(helper.fiber)), offs: helper.offs() }
+      }),
+    )
+    expect(result).toEqual({ done: true, offs: 0 })
+  })
+
   test.each([
     ["while Whisper can't hear yet, its model still loading, it isn't asked", { unready: true, transcribing: 30 }, 0.6],
     ["Whisper taking longer than 'Mute.' could be heard out in, it's taken for other talk", { transcribing: 10 }, 4],
