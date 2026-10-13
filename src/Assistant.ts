@@ -2979,12 +2979,12 @@ export const make = (options: {
     /**
      * Takes back what he just did, as the model said he meant it, never as
      * whether it filled in a thread: the reminder or offer he just set or
-     * cancelled, of the thread he named if he did, and nothing else then;
-     * what yapd last did to a thread, a message or a stop, of the thread he
-     * named if he did, never a reminder or a mute made since; and for no
-     * more than "scratch that", the newest change he made, whatever thread
-     * the model filled in, so a message sent a minute before a reminder is
-     * never withdrawn in its place.
+     * cancelled, of the thread he named if he did and it's of one, and
+     * nothing else then; what yapd last did to a thread, a message or a
+     * stop, of the thread he named if he did, never a reminder or a mute
+     * made since; and for no more than "scratch that", the newest change he
+     * made, whatever thread the model filled in, so a message sent a minute
+     * before a reminder is never withdrawn in its place.
      */
     const undoing = (plan: Brain.Plan, thought: Thought, said: Lines, at: Stepping): Effect.Effect<Outcome> =>
       Effect.gen(function* () {

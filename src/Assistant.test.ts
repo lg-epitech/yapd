@@ -11478,6 +11478,31 @@ describe("Assistant reminders", () => {
     expect(result.withdrawn.said).toMatch(/already read it, sir\. Shall I tell it to ignore that\?$/)
     expect(result.withdrawn.pending).toBe(1)
   })
+
+  test("cancel that reminder takes back one set for a time, whatever thread the model filled in", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(
+          (situation) => {
+            const { heard } = situation.utterance
+            if (heard.startsWith("Remind me")) return Brain.decision({ act: "remind", how: "at", when: local(soon), text: "call the bank", target: handle(situation, tezos) })
+            // He names no thread, and the model fills in the one he was hearing about, which a reminder for a time is never of.
+            if (heard === "Actually, cancel that reminder.") return Brain.decision({ act: "undo", how: "reminder", target: handle(situation, tezos) })
+            return undefined
+          },
+          undefined,
+          { reminders: true },
+        )
+        yield* made.dictate("Remind me in a couple of hours to call the bank.")
+        const set = (yield* made.reminders!.pending).length
+        yield* made.dictate("Actually, cancel that reminder.")
+        return { set, said: made.spoken().at(-1), pending: (yield* made.reminders!.pending).length }
+      }),
+    )
+    expect(result.set).toBe(1)
+    expect(result.said).toMatch(/^Cancelled your reminder .*, sir: call the bank\.$/)
+    expect(result.pending).toBe(0)
+  })
 })
 
 describe("Assistant offers giving way", () => {
