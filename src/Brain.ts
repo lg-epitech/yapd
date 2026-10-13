@@ -1079,6 +1079,42 @@ export const muteLines = (lines: Lines, name: string, now: number) => {
   }
 }
 
+/**
+ * What's said once a thread's subagents are read to him or kept to yapd, or
+ * found as they were, by its name or as "it": a lasting setting, which reads
+ * nothing now, never one for a set time.
+ */
+export const subagentLines = (lines: Lines, name: string) => {
+  const sir = addressed(lines)
+  const theirs = name === "it" ? "its subagents" : `the subagents of ${name}`
+  return {
+    on: `From now on I'll read you ${theirs}${sir}.`,
+    /** After `on`, when some of what they said is kept. */
+    kept: "Ask me what they said for the ones so far.",
+    already: `I'm reading you ${theirs} already${sir}.`,
+    off: `I'll keep ${theirs} to myself${sir}.`,
+    notOn: `I'm not reading you ${theirs}${sir}.`,
+    again: (on: boolean) => (on ? `I'll read you ${theirs} again${sir}.` : `Back to keeping ${theirs} to myself${sir}.`),
+    untimed: (on: boolean) =>
+      on
+        ? `I can't read you ${theirs} for a set time${sir}, only until you tell me to stop.`
+        : `I can't keep ${theirs} to myself for a set time${sir}, only until you ask for them again.`,
+    /** For a session that isn't a T3 Code thread's, like one in a terminal. */
+    session: `I can only read a T3 Code thread's subagents${sir}.`,
+    elsewhere: `Ask me that with the shortcut${sir}. Over an update, say read its subagents, or stop reading them.`,
+  }
+}
+
+/** What's said once the last change to what's muted, or to whose subagents are read, is taken back, by what taking it back changed. */
+export const takenBack = (lines: Lines, undone: Option.Option<Mutes.Change>, now: number) => {
+  const told = muteLines(lines, "it", now)
+  if (Option.isNone(undone)) return told.unchanged
+  const { added, read = [], unread = [] } = undone.value
+  // Reading them again, or keeping them again, as nothing else is changed with it.
+  if (read.length > 0 || unread.length > 0) return subagentLines(lines, "it").again(read.length > 0)
+  return told.again(added.length > 0)
+}
+
 /** When a mode ends, as it's said after "until": "three" on the hour, and otherwise as a mute's end is. */
 const ends = (at: number, now: number) => {
   const said = until(at, now)

@@ -1,4 +1,4 @@
-import { Cause, Clock, Deferred, Effect, Fiber, FiberMap, Option, PubSub, STM, Stream, SubscriptionRef, TRef } from "effect"
+import { Cause, Clock, Deferred, Effect, Exit, Fiber, FiberMap, Option, PubSub, STM, Stream, SubscriptionRef, TRef } from "effect"
 import { mkdtemp, rm } from "node:fs/promises"
 import { hostname, tmpdir } from "node:os"
 import { join } from "node:path"
@@ -63,15 +63,25 @@ const lookedBack = 2 * replayable
 const remembered = (kept: Kept) => {
   const detail = (typeof kept.detail === "object" && kept.detail !== null ? kept.detail : {}) as Record<string, unknown>
   const text = (name: string) => (typeof detail[name] === "string" ? (detail[name] as string) : undefined)
-  return { session: text("session"), host: text("host"), prompt: text("prompt"), more: text("more"), priority: text("priority"), quiet: detail.muted === true || text("held") !== undefined }
+  return {
+    session: text("session"),
+    host: text("host"),
+    prompt: text("prompt"),
+    more: text("more"),
+    priority: text("priority"),
+    quiet: detail.muted === true || text("held") !== undefined,
+    subagent: detail.subagent === true,
+    head: text("head"),
+  }
 }
 
 /**
  * An update he heard before yapd restarted, as it was said, to hear again:
  * under its session, or its hook's session once it was tied to a thread,
  * which is this machine's to reply to through T3 Code, or another's, kept,
- * shown and muted by it. Never one kept quiet or held, which he never heard
- * said, nor one too little was kept of. Its audio is rendered as it's asked for.
+ * shown and muted by it, as a subagent's is by the subagent and the thread
+ * it's part of. Never one kept quiet or held, which he never heard said, nor
+ * one too little was kept of. Its audio is rendered as it's asked for.
  */
 export const restored = (kept: Kept, here: string): Option.Option<Conversation.Update> => {
   const was = remembered(kept)
@@ -99,7 +109,13 @@ export const restored = (kept: Kept, here: string): Option.Option<Conversation.U
       origin: finished ? { host: hostname(), app: T3Code.bundle } : was.host === undefined ? {} : { host: was.host },
     },
     at: kept.at,
-    ...(ref === undefined ? {} : ref.machine === here ? { about: ref } : { owner: ref }),
+    ...(ref === undefined
+      ? {}
+      : was.subagent
+        ? { subagent: { child: ref, ...(was.head === undefined ? {} : { head: { ref: { machine: ref.machine, id: was.head } } }) } }
+        : ref.machine === here
+          ? { about: ref }
+          : { owner: ref }),
   })
 }
 
@@ -115,6 +131,13 @@ const forgotten = 60 * 60_000
 /** How long finding the T3 Code thread a hook came from can take, after which its update goes the old way. */
 const lookup = "3 seconds"
 
+/**
+ * How long after a hook came finding the subagent of T3 Code's own it came
+ * from can take at most, while one at work there was still to be read, after
+ * which its update goes the old way too.
+ */
+const longest = 10_000
+
 /** How long a hook's update waits to be told whether its work is outside his projects, which its summary waits on, before it's taken not to be. */
 const placing = "1 second"
 
@@ -128,14 +151,17 @@ const lastDay = 24 * 60 * 60_000
  * with the thread, and `hands` send what the user says over it to that
  * thread, as T3 Code takes it: into the turn under way, or in its queue.
  * `owner` finds the thread a hook on another machine came from, in that
- * machine's T3 Code, for what's kept, shown and muted of it only. What's
- * `mutes` is kept quiet, by the keys `naming` gives an update, but not the
- * answer to what yapd `sent` its thread for him.
+ * machine's T3 Code, for what's kept, shown and muted of it only. Either may
+ * find one of T3 Code's own subagents instead, which is kept to yapd unless
+ * he has the thread it's part of read to him. What's `mutes` is kept quiet,
+ * by the keys `naming` gives an update, but not the answer to what yapd
+ * `sent` its thread for him.
  */
 export const make = (
   options: {
-    readonly link?: (session: string, cwd: string) => Effect.Effect<Option.Option<Threads.Ref>>
-    readonly owner?: (host: string, session: string, cwd: string) => Effect.Effect<Option.Option<Threads.Ref>>
+    /** Told by `promising` once looking among subagents may pay, so it's waited for longer. */
+    readonly link?: (session: string, cwd: string, promising: Deferred.Deferred<void>) => Effect.Effect<Option.Option<Threads.Linked>>
+    readonly owner?: (host: string, session: string, cwd: string, promising: Deferred.Deferred<void>) => Effect.Effect<Option.Option<Threads.Linked>>
     /**
      * Whether a directory on a machine, by its name, is in the folder behind
      * T3 Code's scratch project there, where work outside his projects goes,
@@ -692,10 +718,11 @@ export const make = (
         Effect.sync(() => changedOver.delete(update)),
         update.about !== undefined && options.hands !== undefined && steered(update) ? options.hands.keeps(update.about, message) : Effect.succeed(false),
       ),
-    // "Mute it" said over an update, plainly his and in so many words, is its thread muted: never anything sent to its agent. "Scratch that"
-    // said next takes it back, rather than be the model's to make something of, which could take it for something to tell the agent.
-    // What he says in between that isn't for its agent, like a cough heard as "Thank you." or the "Scratch" of "Scratch... that", leaves
-    // it to be taken back, for as long as it's the last change he made.
+    // "Mute it" said over an update, plainly his and in so many words, is its thread muted: never anything sent to its agent. So is "read
+    // me its subagents", or "stop reading its subagents", the thread's whose update it is, or the one a subagent's is part of. "Scratch
+    // that" said next takes it back, rather than be the model's to make something of, which could take it for something to tell the
+    // agent. What he says in between that isn't for its agent, like a cough heard as "Thank you." or the "Scratch" of "Scratch...
+    // that", leaves it to be taken back, for as long as it's the last change he made.
     mute: (update, heard, voiced, echo) => {
       const muted = controls
       const plain = echo === undefined && voiced >= Brain.faintest
@@ -711,18 +738,20 @@ export const make = (
         changedOver.delete(update)
         return Option.some(
           Effect.gen(function* () {
-            const said = Brain.muteLines(yield* persona.lines, "it", yield* Clock.currentTimeMillis)
+            const [lines, now] = [yield* persona.lines, yield* Clock.currentTimeMillis]
             // Only while it's still the last change he made, made in the last two minutes.
             const last = options.mutes === undefined ? Option.none<Mutes.Change>() : yield* options.mutes.last
-            if (!Option.exists(last, ({ at }) => at === made)) return said.unchanged
-            return Option.match(yield* muted.undo, { onNone: () => said.unchanged, onSome: ({ added }) => said.again(added.length > 0) })
+            if (!Option.exists(last, ({ at }) => at === made)) return Brain.muteLines(lines, "it", now).unchanged
+            return Brain.takenBack(lines, yield* muted.undo, now)
           }),
         )
       }
       const asked = Mutes.command(heard)
-      // Anything else about mutes, like "mute the Tezos one", "mute it for a bit" or "what's muted?", is the shortcut's to work out:
-      // the model reading him this update knows only this thread, and could take it for something to tell the agent.
+      // Anything else about mutes, like "mute the Tezos one", "mute it for a bit" or "what's muted?", or about which subagents are read,
+      // like "can you read me its subagents", is the shortcut's to work out: the model reading him this update knows only this thread, and
+      // could take it for something to tell the agent.
       if (Option.isNone(asked)) {
+        if (Mutes.aboutSubagents(heard)) return Option.some(Effect.map(persona.lines, (lines) => Brain.subagentLines(lines, "it").elsewhere))
         return Mutes.aboutMuting(heard) ? Option.some(Effect.map(persona.lines, (lines) => Brain.muteLines(lines, "it", 0).elsewhere)) : Option.none()
       }
       changedOver.delete(update)
@@ -740,6 +769,20 @@ export const make = (
           const now = yield* Clock.currentTimeMillis
           const said = Brain.muteLines(lines, "it", now)
           if (how === "clear") return said.cleared(yield* noted((yield* muted.clear).length > 0))
+          if (how === "subagents" || how === "nosubagents") {
+            const reading = Brain.subagentLines(lines, "it")
+            // A subagent's are the thread's it's part of, which is the only one he can have them read to him of.
+            const head = update.subagent === undefined ? (update.about ?? update.owner) : update.subagent.head?.ref
+            if (head === undefined) return update.subagent === undefined ? reading.session : lines.cantTell
+            const on = how === "subagents"
+            const changed = yield* noted(
+              yield* muted.subagents({ key: Mutes.key.thread(head), ...(update.subagent?.head?.called === undefined ? {} : { called: update.subagent.head.called }), project: update.project }, on),
+            )
+            if (!on) return changed ? reading.off : reading.notOn
+            if (!changed) return reading.already
+            // A lasting setting, which reads nothing now: what they said so far is for him to ask about.
+            return (yield* Missed.keptBy(journal, head, now)) ? `${reading.on} ${reading.kept}` : reading.on
+          }
           // Said again for the menu's row, it's that row's, which is what he asked to hear. Otherwise by its thread when it's tied to one,
           // else by its session.
           const menu = latest?.update === update ? latest.menu : undefined
@@ -750,14 +793,17 @@ export const make = (
           // Muted by its session too, before it was found to be its thread's.
           if (how === "unmute") return (yield* noted(yield* muted.unmute(key, also))) ? said.unmuted : said.notMuted
           const ends = minutes === undefined ? undefined : now + minutes * 60_000
-          const session = Option.isSome(row) ? row.value._tag === "Session" : update.about === undefined && update.owner === undefined
+          const session = Option.isSome(row) ? row.value._tag === "Session" : update.about === undefined && update.owner === undefined && update.subagent === undefined
           const agent = update.thread.agent === "codex" ? "Codex" : "Claude"
           const machine = Option.match(row, {
             onNone: () => (update.thread.origin.host === undefined ? undefined : called(update.thread.origin.host)),
             onSome: (row) => (row._tag === "Session" ? row.machine : row.ref.machine),
           })
           const where = machine === undefined || machine === called(hostname()) ? "" : ` on ${machine}`
-          const done = yield* muted.mute({ key, project: update.project, ...(session ? { called: `the ${agent} session ${Threads.inProject(update.project)}${where}` } : {}) }, ends)
+          // A subagent, which is never on the desk, by what it's called.
+          const child = update.subagent !== undefined && key === Mutes.key.thread(update.subagent.child) ? update.subagent.called : undefined
+          const name = session ? `the ${agent} session ${Threads.inProject(update.project)}${where}` : child
+          const done = yield* muted.mute({ key, project: update.project, ...(name === undefined ? {} : { called: name }) }, ends)
           return (yield* noted(done)) ? said.muted(ends) : said.already
         }),
       )
@@ -806,11 +852,17 @@ export const make = (
     readonly hooked: boolean
     readonly needsYou: boolean
     readonly turns: number
-    /** The T3 Code thread it's from, worked out alongside the summary, when there's one. */
-    readonly about: Effect.Effect<Option.Option<Threads.Ref>>
-    /** The T3 Code thread on another machine it's known to be from, worked out alongside too, for what's kept, shown and muted of it only. */
-    readonly owner: Effect.Effect<Option.Option<Threads.Ref>>
-    /** The T3 Code thread it's known to be from before anything is worked out, like a turn T3 Code told of, to find what was said of it last. */
+    /**
+     * For a hook's, finding the T3 Code thread it came from, alongside the
+     * summary: here, or on another machine, for what's kept, shown and muted
+     * of it only, or one of T3 Code's own subagents, on either.
+     */
+    readonly finding?: Finding
+    /**
+     * The T3 Code thread it's known to be from before anything is worked out,
+     * like a turn T3 Code told of, which it's then about, and to find what was
+     * said of it last.
+     */
     readonly known?: Threads.Ref
     /** For a turn no hook told of, said in its hook's place, which is said once, ever, under its key. */
     readonly fallback?: Fallback
@@ -842,6 +894,13 @@ export const make = (
     readonly stop?: Notices.Stop
     /** For a hook's, whether its turn began before yapd started, as no hook of its session came since, so its prompt isn't known. */
     readonly unprompted?: boolean
+  }
+
+  /** Finding the T3 Code thread a hook came from, here or on another machine, with what's logged when its answer doesn't come in time. */
+  interface Finding {
+    readonly here: boolean
+    readonly find: (promising: Deferred.Deferred<void>) => Effect.Effect<Option.Option<Threads.Linked>>
+    readonly late: string
   }
 
   /** A failure is owed once what all the Stops it was left to told of is kept quiet. */
@@ -900,26 +959,35 @@ export const make = (
       detail: { through: over.key, session },
     })
 
-  /** Why an update is kept quiet: he muted its thread, or it's held for later, by focus or quiet, or as progress for the digest. */
-  type Quieting = { readonly _tag: "Muted"; readonly mute: Mutes.Mute } | { readonly _tag: "Held"; readonly why: Held }
+  /**
+   * Why an update is kept quiet: he muted its thread, or it's held for later,
+   * by focus or quiet, or as progress for the digest, or it's one of T3 Code's
+   * own subagents', whose thread he doesn't have them read to him of.
+   */
+  type Quieting =
+    | { readonly _tag: "Muted"; readonly mute: Mutes.Mute }
+    | { readonly _tag: "Held"; readonly why: Held }
+    | { readonly _tag: "Subagent"; readonly child: Threads.Ref; readonly head: Option.Option<Threads.Head> }
 
   /**
-   * Keeps quiet an update whose thread he muted, or that's held for later,
-   * as when yapd is off: its Stop hook is let go of at once, and it's kept,
-   * marked as kept quiet or held, for what he missed, but never said; a turn
-   * said in a hook's place, kept so under its key, is the turn's, so its own
-   * Stop coming late isn't said either, unless it needs him. Muted by its
-   * session, the mute becomes its thread's. `claimed` is its entry under its
-   * key, when it was kept already, as when the mute, the mode or turning
-   * yapd off came while it was being rendered.
+   * Keeps quiet an update whose thread he muted, that's held for later, as
+   * when yapd is off, or that's a subagent's he doesn't have read to him: its
+   * Stop hook is let go of at once, and it's kept, marked as kept quiet or
+   * held, for what he missed, but never said; a turn said in a hook's place,
+   * kept so under its key, is the turn's, so its own Stop coming late isn't
+   * said either, unless it needs him. Muted by its session, the mute becomes
+   * its thread's, `keys` its own; never one of the thread a subagent is part
+   * of. `claimed` is its entry under its key, when it was kept already, as
+   * when the mute, the mode or turning yapd off came while it was being
+   * rendered.
    */
   const hush = (finished: Finished, entry: Entry, detail: Readonly<Record<string, unknown>>, keys: ReadonlyArray<string>, quieting: Quieting, claimed?: Option.Option<number>) =>
     Effect.gen(function* () {
       const { fallback, hook, project } = finished
       yield* release(hook)
-      const quiet = quieting._tag === "Muted" ? { ...detail, muted: true } : { ...detail, held: quieting.why }
+      const quiet = quieting._tag === "Held" ? { ...detail, held: quieting.why } : { ...detail, muted: true }
       if (fallback === undefined) yield* journal.write({ ...entry, detail: quiet })
-      else if (claimed !== undefined) yield* quieting._tag === "Muted" ? journal.mute(Option.toArray(claimed)) : journal.hold(Option.toArray(claimed), quieting.why)
+      else if (claimed !== undefined) yield* quieting._tag === "Held" ? journal.hold(Option.toArray(claimed), quieting.why) : journal.mute(Option.toArray(claimed))
       else {
         // Given way since to a Stop of its own, or its thread started again or went, it's left to that.
         if (fallbacks.get(fallback.key) !== fallback || !(yield* fallback.current)) {
@@ -939,8 +1007,19 @@ export const make = (
       // that keeps it unheard, apart, so it leads a catch-up, and muting the thread later never keeps it quiet.
       yield* quieten(finished.stop)
       if (quieting._tag === "Held") return yield* Effect.logInfo(`Held update for ${project}, for later (${quieting.why})`)
+      if (quieting._tag === "Subagent") {
+        return yield* Effect.logInfo(
+          Option.match(quieting.head, {
+            onNone: () => `Held update from a subagent whose thread can't be found on ${quieting.child.machine}`,
+            onSome: ({ ref, called }) => `Held update from a subagent of ${called} on ${ref.machine}`,
+          }),
+        )
+      }
+      // Only a session's mute is moved, so the mute of the thread a subagent is part of is never moved onto the subagent.
       const thread = keys.find((key) => key.startsWith("t3:"))
-      if (thread !== undefined && quieting.mute.key !== thread && options.mutes !== undefined) yield* options.mutes.rekey(quieting.mute.key, thread)
+      if (thread !== undefined && quieting.mute.key !== thread && quieting.mute.key.startsWith("session:") && options.mutes !== undefined) {
+        yield* options.mutes.rekey(quieting.mute.key, thread)
+      }
       yield* Effect.logInfo(`Muted update for ${project}`)
     })
 
@@ -1119,6 +1198,44 @@ export const make = (
       if (fallback !== undefined && fallbacks.get(fallback.key) === fallback && !fallback.heard) fallbacks.delete(fallback.key)
     })
 
+  /** What a hook's lookup gave, or nothing, should it have failed after all. */
+  const found = (looking: Fiber.RuntimeFiber<Option.Option<Threads.Linked>>) =>
+    Effect.map(Fiber.await(looking), Exit.match({ onFailure: () => Option.none<Threads.Linked>(), onSuccess: (linked) => linked }))
+
+  /**
+   * What a hook's lookup came to, `first` being what it said within three
+   * seconds, if it did, as ever: what it says later counts only for a
+   * subagent of T3 Code's own, once the summary is in too, and, while one at
+   * work there was still to be read when it was last looked at, until ten
+   * seconds after the hook came. Past that, it's taken for none, and so goes
+   * the way hooks always have.
+   */
+  const settled = (
+    finding: Finding,
+    looking: Fiber.RuntimeFiber<Option.Option<Threads.Linked>>,
+    first: Option.Option<Option.Option<Threads.Linked>>,
+    promising: Deferred.Deferred<void>,
+    arrivedAt: number,
+  ) =>
+    Effect.gen(function* () {
+      if (Option.isSome(first)) return first.value
+      /** A subagent's answer, which counts late; a thread's came too late, as ever. */
+      const helper = (linked: Option.Option<Threads.Linked>) =>
+        Option.exists(linked, ({ _tag }) => _tag === "Subagent") ? Effect.succeed(linked) : Effect.as(Effect.logInfo(finding.late), Option.none<Threads.Linked>())
+      const now = yield* Fiber.poll(looking)
+      if (Option.isSome(now)) return yield* helper(Exit.match(now.value, { onFailure: () => Option.none<Threads.Linked>(), onSuccess: (linked) => linked }))
+      if (!(yield* Deferred.isDone(promising))) return yield* helper(Option.none())
+      const left = arrivedAt + longest - (yield* Clock.currentTimeMillis)
+      const later = left <= 0 ? Option.none() : yield* Effect.timeoutOption(found(looking), left)
+      if (Option.isSome(later)) return yield* helper(later.value)
+      yield* Effect.logInfo("Not linked: ran out of time looking among subagents")
+      return Option.none<Threads.Linked>()
+    })
+
+  /** Whether he has the subagents of this thread read to him: never without one, or without mutes to keep the setting. */
+  const reads = (head: Option.Option<Threads.Ref>) =>
+    Option.isNone(head) || options.mutes === undefined ? Effect.succeed(false) : options.mutes.reads(Mutes.key.thread(head.value))
+
   const prepare = (finished: Finished) => {
     const { session, turn, thread, arrivedAt, generation, hook, needsYou, turns } = finished
     if (hook !== undefined) summing.set(session, hook)
@@ -1136,20 +1253,29 @@ export const make = (
         said: kept.said ?? "",
         ago: (arrivedAt - kept.at) / 60_000,
       }))
-      const [[summary, summarized], about, owner] = yield* Effect.all(
+      // Its thread is looked for once, alongside its summary, and told when looking among subagents may pay.
+      const { finding } = finished
+      const promising = yield* Deferred.make<void>()
+      const looking = finding === undefined ? undefined : yield* Effect.fork(finding.find(promising))
+      const [[summary, summarized], first] = yield* Effect.all(
         [
           condenser.condense(project, Option.match(previous, { onNone: () => turn, onSome: (previous) => ({ ...turn, previous }) })).pipe(
             Effect.retry({ times: 1 }),
             Effect.map((summary) => [summary, true] as const),
             Effect.catchAll((error) => Effect.logWarning("Could not condense", error).pipe(Effect.as([unsummarized(project), false] as const))),
           ),
-          finished.about,
-          finished.owner,
+          looking === undefined ? Effect.succeedSome(Option.none<Threads.Linked>()) : Effect.timeoutOption(found(looking), lookup),
         ],
-        { concurrency: 3 },
+        { concurrency: 2 },
       )
+      const linked = finding === undefined || looking === undefined ? Option.none<Threads.Linked>() : yield* settled(finding, looking, first, promising, arrivedAt)
+      const threadOf = Option.flatMap(linked, (linked) => (linked._tag === "Thread" ? Option.some(linked.ref) : Option.none()))
       /** The thread it's from, here or, only for what's kept, shown and muted, on another machine. */
+      const about = finding === undefined ? Option.fromNullable(finished.known) : finding.here ? threadOf : Option.none<Threads.Ref>()
+      const owner = finding !== undefined && !finding.here ? threadOf : Option.none<Threads.Ref>()
       const tied = Option.orElse(about, () => owner)
+      /** The subagent of T3 Code's own it's from, here or on another machine, for what's kept, shown and muted of it only. */
+      const part = Option.flatMap(linked, (linked) => (linked._tag === "Subagent" ? Option.some(linked) : Option.none()))
       // What it answers of what yapd sent its thread for him, if anything: the first turn of work yapd started is what he asked for. And
       // whether that was told by id, which it can't be with no thread found in time.
       const { answers, told } = Option.isSome(tied) ? yield* asked(tied.value, finished) : { answers: Option.none<"start" | "sent">(), told: false }
@@ -1181,7 +1307,10 @@ export const make = (
       // What needs him is said whatever he muted, and so is what answers what he asked of the thread himself. A turn that couldn't be
       // summed up may be either, as far as yapd can tell, so it's said.
       const mutable = priority !== "needs-you" && !answering && summarized && !reminded
-      const spoken = introduce(project, full ? [summary.spoken, summary.more ?? ""].map((part) => part.trim()).filter((part) => part !== "").join(" ") : summary.spoken)
+      const summed = full ? [summary.spoken, summary.more ?? ""].map((part) => part.trim()).filter((part) => part !== "").join(" ") : summary.spoken
+      // A subagent's, led by the thread it's part of rather than the project, which says whose it is.
+      const head = Option.flatMap(part, ({ head }) => head)
+      const spoken = Option.match(head, { onNone: () => introduce(project, summed), onSome: ({ called }) => `For ${called}: ${summed}` })
       // All it would tell, its rest too, as what was kept of its turn is weighed against it word for word.
       const all = Missed.whole(spoken, more)
       // Its turn was kept quiet in its hook's place, then heard since, as in a catch-up, from the menu or in a digest: it's said already.
@@ -1217,7 +1346,9 @@ export const make = (
       const detail = {
         priority,
         ...Option.match(turn.prompt, { onNone: () => ({}), onSome: (prompt) => ({ prompt }) }),
-        ...(Option.isSome(tied) ? { session } : {}),
+        ...(Option.isSome(tied) || Option.isSome(part) ? { session } : {}),
+        // A subagent's, kept under it, with the thread it's part of, by which a thread's subagents are found together.
+        ...(Option.isSome(part) ? { subagent: true, ...Option.match(head, { onNone: () => ({}), onSome: ({ ref }) => ({ head: ref.id }) }) } : {}),
         ...(more === "" ? {} : { more }),
         // Said whatever he mutes, though it doesn't need him: the answer to what he asked its thread, or a turn yapd couldn't sum up. So
         // held as yapd was off, it isn't kept quiet when he mutes its thread later.
@@ -1231,7 +1362,10 @@ export const make = (
         kind: "update",
         host: thread.origin.host,
         project,
-        ...Option.match(tied, { onNone: () => ({ thread: session }), onSome: ({ machine, id }) => ({ machine, thread: id }) }),
+        ...Option.match(Option.orElse(tied, () => Option.map(part, ({ child }) => child)), {
+          onNone: () => ({ thread: session }),
+          onSome: ({ machine, id }) => ({ machine, thread: id }),
+        }),
         directory: thread.cwd,
         said: spoken,
         text: turn.message,
@@ -1240,19 +1374,32 @@ export const make = (
       const ties = {
         ...Option.match(about, { onNone: () => ({}), onSome: (about) => ({ about }) }),
         ...(Option.isSome(about) ? {} : Option.match(owner, { onNone: () => ({}), onSome: (owner) => ({ owner }) })),
+        ...Option.match(part, {
+          onNone: () => ({}),
+          onSome: ({ child, called, head }) => ({
+            subagent: { child, called, ...Option.match(head, { onNone: () => ({}), onSome: (head) => ({ head }) }) },
+          }),
+        }),
       }
-      const keys = Mutes.keysOf({ session, thread, ...ties }, called)
+      // Its own keys, which a session's mute moves to, and those that keep it quiet, a subagent's by the thread it's part of too.
+      const own = Mutes.keysOf({ session, thread, ...ties }, called)
+      const keys = Mutes.covering({ session, thread, ...ties }, called)
+      // One of T3 Code's own subagents' is kept to yapd unless he has the thread it's part of read to him, whatever it is, as yapd is off,
+      // in focus or quiet too, or its chain can't be followed up to one: before anything else, so it never leads a catch-up as what came in
+      // while yapd was off, nor goes into the digest.
+      const unread = Effect.map(reads(Option.map(head, ({ ref }) => ref)), (read) => Option.isSome(part) && !read)
+      if (yield* unread) return yield* hush(finished, entry, detail, own, { _tag: "Subagent", child: Option.getOrThrow(part).child, head })
       const muted = mutable ? yield* muting(keys) : Option.none<Mutes.Mute>()
-      if (Option.isSome(muted)) return yield* hush(finished, entry, detail, keys, { _tag: "Muted", mute: muted.value })
+      if (Option.isSome(muted)) return yield* hush(finished, entry, detail, own, { _tag: "Muted", mute: muted.value })
       // Off, or turned off since it came, it's kept unheard, what needs him and the answer to what he asked too, for him to catch up on:
       // nothing that came in around turning off is said late. What he asked to hear of its finishing is kept so too.
       if (yield* offSince(turns)) {
         yield* Effect.forEach(reminders, ({ fire }) => fire(true), { discard: true })
-        return yield* hush(finished, entry, detail, keys, { _tag: "Held", why: "off" })
+        return yield* hush(finished, entry, detail, own, { _tag: "Held", why: "off" })
       }
       // Muted first, then kept as yapd is off, then held by the mode, then held as progress: kept the same way, by the same rule, and never rendered.
       const held: Option.Option<Held> = reminded ? Option.none() : yield* heldFor(priority, full, mutable, opening)
-      if (Option.isSome(held)) return yield* hush(finished, entry, detail, keys, { _tag: "Held", why: held.value })
+      if (Option.isSome(held)) return yield* hush(finished, entry, detail, own, { _tag: "Held", why: held.value })
 
       // Each fired as it's about to be said, once: one said on its own meanwhile is left out. Fired, each is said on its own should this
       // never be queued, as when its hook came or its thread started again meanwhile, or it can't be rendered.
@@ -1315,11 +1462,16 @@ export const make = (
         yield* removeFile(audio)
         return yield* Effect.logInfo(`Skipped update, said already: ${spoken}`)
       }
+      // Its subagents no longer read to him while it was rendered, a subagent's is kept to yapd all the same.
+      if (yield* unread) {
+        yield* removeFile(audio)
+        return yield* hush(finished, entry, detail, own, { _tag: "Subagent", child: Option.getOrThrow(part).child, head }, claimed === undefined ? undefined : Option.flatten(claimed))
+      }
       // Muted while it was rendered, it's kept quiet all the same, and held all the same once focus or quiet began meanwhile.
       const late = mutable ? yield* muting(keys) : Option.none<Mutes.Mute>()
       if (Option.isSome(late)) {
         yield* removeFile(audio)
-        return yield* hush(finished, entry, detail, keys, { _tag: "Muted", mute: late.value }, claimed === undefined ? undefined : Option.flatten(claimed))
+        return yield* hush(finished, entry, detail, own, { _tag: "Muted", mute: late.value }, claimed === undefined ? undefined : Option.flatten(claimed))
       }
       // Turned off meanwhile, it's held for when he catches up, whatever mode began too, which would otherwise have the digest say it, and
       // what he asked to hear of its finishing with it.
@@ -1328,12 +1480,12 @@ export const make = (
         yield* removeFile(audio)
         yield* journal.hold(remindRows, "off")
         unsaid = undefined
-        return yield* hush(finished, entry, detail, keys, off, claimed === undefined ? undefined : Option.flatten(claimed))
+        return yield* hush(finished, entry, detail, own, off, claimed === undefined ? undefined : Option.flatten(claimed))
       }
       const lateHeld: Option.Option<Held> = reminded ? Option.none() : yield* heldFor(priority, full, mutable, opening)
       if (Option.isSome(lateHeld)) {
         yield* removeFile(audio)
-        return yield* hush(finished, entry, detail, keys, { _tag: "Held", why: lateHeld.value }, claimed === undefined ? undefined : Option.flatten(claimed))
+        return yield* hush(finished, entry, detail, own, { _tag: "Held", why: lateHeld.value }, claimed === undefined ? undefined : Option.flatten(claimed))
       }
       if (fallback !== undefined) standing.set(update, fallback)
       if (unsaid !== undefined) alone.set(update, unsaid)
@@ -1351,7 +1503,7 @@ export const make = (
         yield* removeFile(audio)
         yield* journal.hold(remindRows, "off")
         unsaid = undefined
-        return yield* hush(finished, entry, detail, keys, off, claimed === undefined ? undefined : Option.flatten(claimed))
+        return yield* hush(finished, entry, detail, own, off, claimed === undefined ? undefined : Option.flatten(claimed))
       }
       const row = claimed === undefined ? yield* journal.write(entry) : Option.flatten(claimed)
       if (Option.isSome(row)) rows.set(update, row.value)
@@ -1410,37 +1562,25 @@ export const make = (
   const fromHere = (origin: Origin) => origin.host !== undefined && origin.host.toLowerCase() === hostname().toLowerCase()
 
   /**
-   * The T3 Code thread a hook came from, when it ran on this machine and the
-   * thread is found in time. Anything else keeps its update on the old path.
+   * How the T3 Code thread a hook came from is found: on this machine, where
+   * what he says over it goes to it, or another's, for what's kept, shown and
+   * muted of it only, either of them maybe one of T3 Code's own subagents.
+   * None when there's no telling, which keeps its update on the old path.
    */
-  const linking = (session: string, cwd: string, origin: Origin): Effect.Effect<Option.Option<Threads.Ref>> => {
-    const { link } = options
-    if (link === undefined) return Effect.succeedNone
-    if (!fromHere(origin)) {
-      return Effect.as(Effect.logInfo(`Not linked: it came from ${origin.host ?? "a machine that didn't say"}`), Option.none())
+  const finding = (session: string, cwd: string, origin: Origin): Option.Option<Finding> => {
+    const { link, owner } = options
+    if (fromHere(origin)) {
+      if (link === undefined) return Option.none()
+      return Option.some({ here: true, find: (promising) => link(session, cwd, promising), late: "Not linked: T3 Code took too long to say which thread it is" })
     }
-    return link(session, cwd).pipe(
-      Effect.timeout(lookup),
-      Effect.catchTag("TimeoutException", () =>
-        Effect.as(Effect.logInfo("Not linked: T3 Code took too long to say which thread it is"), Option.none<Threads.Ref>()),
-      ),
-    )
-  }
-
-  /**
-   * The T3 Code thread a hook from another machine came from, found in that
-   * machine's T3 Code in time, for what's kept, shown and muted of it: what
-   * he says over it still goes back the way hooks always have.
-   */
-  const owning = (session: string, cwd: string, origin: Origin): Effect.Effect<Option.Option<Threads.Ref>> => {
-    const { owner } = options
-    if (owner === undefined || origin.host === undefined || fromHere(origin)) return Effect.succeedNone
-    return owner(origin.host, session, cwd).pipe(
-      Effect.timeout(lookup),
-      Effect.catchTag("TimeoutException", () =>
-        Effect.as(Effect.logInfo(`Not tied: ${origin.host}'s T3 Code took too long to say which thread it is`), Option.none<Threads.Ref>()),
-      ),
-    )
+    const elsewhere = link === undefined ? Effect.void : Effect.logInfo(`Not linked: it came from ${origin.host ?? "a machine that didn't say"}`)
+    const host = origin.host
+    if (owner === undefined || host === undefined) return link === undefined ? Option.none() : Option.some({ here: false, find: () => Effect.as(elsewhere, Option.none()), late: "" })
+    return Option.some({
+      here: false,
+      find: (promising) => Effect.zipRight(elsewhere, owner(host, session, cwd, promising)),
+      late: `Not tied: ${host}'s T3 Code took too long to say which thread it is`,
+    })
   }
 
   /**
@@ -1642,8 +1782,6 @@ export const make = (
           hooked: false,
           needsYou: false,
           turns: input.turns,
-          about: Effect.succeedSome(input.about),
-          owner: Effect.succeedNone,
           known: input.about,
           fallback,
           answering: input.answering === true || followedUp,
@@ -1759,8 +1897,7 @@ export const make = (
             needsYou,
             turns,
             outside: scratched(payload.cwd, origin),
-            about: linking(payload.session_id, payload.cwd, origin),
-            owner: owning(payload.session_id, payload.cwd, origin),
+            ...Option.match(finding(payload.session_id, payload.cwd, origin), { onNone: () => ({}), onSome: (finding) => ({ finding }) }),
             answering: followedUp,
             ...(prompt === undefined ? {} : { prompted: prompt }),
             ...(through === undefined ? {} : { over: through }),
@@ -2002,10 +2139,21 @@ export const make = (
    */
   const quietOnly = (ready: Inbox.Ready) => ready.priority !== "needs-you" && ready.replay === undefined && openings.has(ready.update)
 
-  /** Whether an update waiting to be read is muted now, or held by focus or quiet: the first turn of work yapd started, only by quiet. */
+  /**
+   * Whether an update waiting to be read is muted now, or held by focus or
+   * quiet: the first turn of work yapd started, only by quiet. A subagent's,
+   * whatever it is, once its thread's are no longer read to him, unless he
+   * asked to hear it again.
+   */
   const quieted = (ready: Inbox.Ready): Effect.Effect<Option.Option<"muted" | Modes.Hold>> =>
+    ready.replay === undefined && ready.update.subagent !== undefined
+      ? Effect.flatMap(reads(Option.fromNullable(ready.update.subagent.head?.ref)), (read) => (read ? quietedAs(ready) : Effect.succeedSome("muted" as const)))
+      : quietedAs(ready)
+
+  /** Whether an update waiting to be read is muted now, or held by focus or quiet, as `quieted` says of any but a subagent's. */
+  const quietedAs = (ready: Inbox.Ready): Effect.Effect<Option.Option<"muted" | Modes.Hold>> =>
     quiet(ready)
-      ? Effect.flatMap(muting(Mutes.keysOf(ready.update, called)), (mute): Effect.Effect<Option.Option<"muted" | Modes.Hold>> =>
+      ? Effect.flatMap(muting(Mutes.covering(ready.update, called)), (mute): Effect.Effect<Option.Option<"muted" | Modes.Hold>> =>
           Option.isSome(mute) ? Effect.succeedSome("muted") : holdingNow,
         )
       : quietOnly(ready)
@@ -2024,13 +2172,28 @@ export const make = (
   const silence = (keys: ReadonlyArray<string>): Effect.Effect<void> => {
     const muted = new Set(keys)
     return Effect.gen(function* () {
-      yield* drop((entry) => Mutes.keysOf(entry.update, called).some((key) => muted.has(key)), { _tag: "Muted" })
+      yield* drop((entry) => Mutes.covering(entry.update, called).some((key) => muted.has(key)), { _tag: "Muted" })
       // What of it was held for later is kept quiet too, so the digest and the rundown never bring up a thread he muted since. Not what a
       // mute never keeps quiet, held as yapd was off: what needs him, or answers what he asked, still leads a catch-up.
-      const held = (yield* journal.held(0)).filter((kept) => !Missed.audible(kept) && Mutes.keysOfKept(kept, called).some((key) => muted.has(key)))
+      const held = (yield* journal.held(0)).filter((kept) => !Missed.audible(kept) && Mutes.coveringKept(kept, called).some((key) => muted.has(key)))
       yield* journal.mute(held.map(({ id }) => id))
     })
   }
+
+  /**
+   * He no longer has the subagents of the thread under this key read to
+   * him: as when they're kept to yapd from the start, whatever they say,
+   * what of them waits to be read is dropped, what needs him and what can't
+   * be summed up too, and kept quiet, and so is what of them was held for
+   * later, whatever it is. Never one he asked to hear again, nor the line
+   * being said. What's still being prepared looks for itself.
+   */
+  const unread = (key: string): Effect.Effect<void> =>
+    Effect.gen(function* () {
+      yield* drop((entry) => entry.update.subagent?.head !== undefined && Mutes.key.thread(entry.update.subagent.head.ref) === key, { _tag: "Muted" }, true)
+      const held = (yield* journal.held(0)).filter((kept) => Mutes.headKept(kept) === key)
+      yield* journal.mute(held.map(({ id }) => id))
+    })
 
   /**
    * Focus or quiet just began: the updates waiting to be read that a mute
@@ -2044,11 +2207,17 @@ export const make = (
   /**
    * Drops the updates waiting to be read that a mute could keep quiet and
    * `which` picks, kept as muted or held, and, held by quiet, those quiet
-   * alone holds.
+   * alone holds; or, `whatever`, any `which` picks but one he asked to hear
+   * again.
    */
-  const drop = (which: (entry: Inbox.Ready) => boolean, as: { readonly _tag: "Muted" } | { readonly _tag: "Held"; readonly why: Modes.Hold }): Effect.Effect<void> =>
+  const drop = (
+    which: (entry: Inbox.Ready) => boolean,
+    as: { readonly _tag: "Muted" } | { readonly _tag: "Held"; readonly why: Modes.Hold },
+    whatever = false,
+  ): Effect.Effect<void> =>
     Effect.gen(function* () {
-      const dropping = (entry: Inbox.Ready) => quiet(entry) || (as._tag === "Held" && as.why === "quiet" && quietOnly(entry))
+      const dropping = (entry: Inbox.Ready) =>
+        whatever ? entry.replay === undefined : quiet(entry) || (as._tag === "Held" && as.why === "quiet" && quietOnly(entry))
       const dropped = yield* STM.commit(
         TRef.modify(inbox, (current) => {
           const quietened = [...current.values()].filter((entry): entry is Inbox.Ready => "update" in entry && dropping(entry) && which(entry))
@@ -2074,7 +2243,7 @@ export const make = (
       yield* Effect.logInfo(`${as._tag === "Muted" ? "Muted" : "Held"} ${dropped.length === 1 ? "an update" : `${dropped.length} updates`} waiting to be said`)
     })
 
-  if (options.mutes !== undefined) controls = Mutes.controls({ mutes: options.mutes, silence, journal })
+  if (options.mutes !== undefined) controls = Mutes.controls({ mutes: options.mutes, silence, unread, journal })
 
   /**
    * Drops an update the user told to stop, even one a dictation cut off and
@@ -2200,7 +2369,7 @@ export const make = (
         const led = leading.get(update) ?? []
         if (row === undefined) return led.length === 0 ? Effect.void : Effect.flatMap(Clock.currentTimeMillis, (at) => journal.markHeard(led, at))
         return Effect.flatMap(Clock.currentTimeMillis, (at) =>
-          Effect.zipRight(journal.markHeard([row, ...led], at), journal.outdated(row, update.session, update.about ?? update.owner, at)),
+          Effect.zipRight(journal.markHeard([row, ...led], at), journal.outdated(row, update.session, update.about ?? update.owner ?? update.subagent?.child, at)),
         )
       }).pipe(Effect.uninterruptible)
     const reading =
@@ -2410,6 +2579,7 @@ export const make = (
       journal.since(now - Recent.lifetime, { most: Recent.most, kinds: ["update", "started"], muted: false, held: false }),
     ).pipe(Effect.map((entries) => entries.toReversed().map(Recent.fromJournal))),
     silence,
+    unread,
     hold,
     idle,
     /** Muting from the menu or by voice, which drops what of a thread waits to be said: none without mutes. */

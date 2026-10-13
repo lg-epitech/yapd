@@ -198,8 +198,12 @@ export interface Entry {
   readonly utterance?: string
   /** ISO 8601, when the user heard it through. */
   readonly heard?: string
-  /** For an update yapd didn't read out, why: kept quiet as he muted its thread, or held for focus, quiet, the digest, or as yapd was off. */
-  readonly unsaid?: "muted" | "focus" | "quiet" | "progress" | "off"
+  /**
+   * For an update yapd didn't read out, why: kept to yapd as one of a
+   * thread's subagents', kept quiet as he muted its thread, or held for
+   * focus, quiet, the digest, or as yapd was off.
+   */
+  readonly unsaid?: "subagent" | "muted" | "focus" | "quiet" | "progress" | "off"
 }
 
 /** Which of the journal's entries `/journal` returns. */

@@ -37,6 +37,13 @@ export interface Update {
    * always have.
    */
   readonly owner?: Threads.Ref
+  /**
+   * The subagent of T3 Code's own it came from, what that's called aloud,
+   * and the thread it's part of, when its chain could be followed up to one:
+   * like `owner`, for what's kept, shown and muted only, since what's said
+   * over it goes the way hooks always have.
+   */
+  readonly subagent?: { readonly child: Threads.Ref; readonly called?: string; readonly head?: { readonly ref: Threads.Ref; readonly called?: string } }
 }
 
 type Signal =

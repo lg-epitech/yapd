@@ -161,10 +161,11 @@ export const serve = Effect.gen(function* () {
   /** What says notices, once it's made, which says a reminder on its own when the update it led is never said. */
   const noticing = yield* Deferred.make<Effect.Effect.Success<ReturnType<typeof Notices.make>>>()
   // Hooks on this machine are tied to the thread they came from, so what's said of each is kept with it, and what he says over it goes to it.
-  // Another machine's are tied to theirs there for what's kept, shown and muted of them only.
+  // Another machine's are tied to theirs there for what's kept, shown and muted of them only, and either may be one of T3 Code's own
+  // subagents, kept to yapd unless he has the thread it's part of read to him.
   const daemon = yield* Daemon.make({
-    link: (session, cwd) => threads.link(machine, session, cwd),
-    owner: (host, session, cwd) => threads.link(naming(host), session, cwd),
+    link: (session, cwd, promising) => threads.link(machine, session, cwd, promising),
+    owner: (host, session, cwd, promising) => threads.link(naming(host), session, cwd, promising),
     // Work in T3 Code's scratch folder is in none of his projects, wherever it ran. This machine's by the name its threads are known by.
     outside: (name, directory) => threads.outside(name === naming(hostname()) ? machine : name, directory),
     hands,
@@ -261,7 +262,7 @@ export const serve = Effect.gen(function* () {
   })
   // Muting from the menu or by voice: never anything that reaches an agent. A thread the menu shows muted by its session is unmuted by it too.
   const controls = Mutes.widened(
-    Option.getOrElse(daemon.controls, () => Mutes.controls({ mutes, silence: daemon.silence, journal })),
+    Option.getOrElse(daemon.controls, () => Mutes.controls({ mutes, silence: daemon.silence, unread: daemon.unread, journal })),
     latest.under,
   )
   const drafts = yield* Drafts.make({
