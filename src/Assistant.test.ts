@@ -13,11 +13,13 @@ import * as Journal from "./Journal.ts"
 import * as Latest from "./Latest.ts"
 import { type Catalog, LaunchError, type Request, type Started } from "./Launcher.ts"
 import * as Ledger from "./Ledger.ts"
+import * as Memory from "./Memory.ts"
 import * as Modes from "./Modes.ts"
 import * as Mutes from "./Mutes.ts"
 import { Model, ModelError } from "./Model.ts"
 import * as Notices from "./Notices.ts"
 import * as Persona from "./Persona.ts"
+import type * as Preferences from "./Preferences.ts"
 import * as Reminders from "./Reminders.ts"
 import type { Line } from "./Responder.ts"
 import * as Show from "./Show.ts"
@@ -282,6 +284,9 @@ const assistant = (
     readonly modes?: boolean
     /** Whether he can be reminded of things later, kept in the same database. */
     readonly reminders?: boolean
+    /** Whether yapd can keep things in mind for him, kept in the same database, and the routines his preferences have. */
+    readonly memories?: boolean
+    readonly routines?: ReadonlyArray<Preferences.Routine>
     /** What the model briefs him with on what was held or what he missed, from what it's given, or none when it can't be asked. */
     readonly briefs?: (held: ReadonlyArray<Journal.Kept>, brief: Brain.Brief) => string | undefined
   } = {},
@@ -466,12 +471,14 @@ const assistant = (
     const controls = mutes === undefined ? undefined : Mutes.controls({ mutes, journal, silence: (keys) => Effect.sync(() => void silenced.push(keys)) })
     const modes = given.modes === true ? yield* Modes.make({ settings: Settings.fromStore(store), journal }) : undefined
     const reminders = given.reminders === true ? Reminders.make(store, journal) : undefined
+    const memories = given.memories === true ? Memory.make(store) : undefined
     /** What each brief was asked to sum up, and each brief as it was asked. */
     const briefed: Array<ReadonlyArray<string>> = []
     const briefings: Array<Brain.Brief> = []
     const made = yield* Assistant.make({
       ...(modes === undefined ? {} : { modes }),
       ...(reminders === undefined ? {} : { reminders }),
+      ...(memories === undefined ? {} : { memories, routines: Effect.succeed(given.routines ?? []) }),
       // This Mac is Rosie.
       ...(mutes === undefined || controls === undefined
         ? {}
@@ -544,6 +551,7 @@ const assistant = (
       silenced,
       modes,
       reminders,
+      memories,
       briefed,
       briefings,
       told: said,
@@ -11566,5 +11574,136 @@ describe("Assistant offers giving way", () => {
     )
     expect(turnedOn.offered).toEqual(["You missed one, sir. Want the rundown?"])
     expect(turnedOn.then).toEqual(["A question on Cloud deployment discovery, sir: Which colour should the test use? Red or Blue? I'd go with Blue."])
+  })
+})
+
+describe("Assistant memories", () => {
+  test("forgetting removes a memory from what the model is told, and scratch that brings it back", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(
+          (situation) => {
+            const { heard } = situation.utterance
+            if (heard === "Remember that rig's T3 Code runs the nightly.") return Brain.decision({ act: "remember", how: "fact", text: "rig's T3 Code runs the nightly" })
+            if (heard === "What do you know about rig?") return Brain.decision({ act: "answer", spoken: "Its T3 Code runs the nightly, sir." })
+            if (heard === "Forget that one about rig.") {
+              return Brain.decision({ act: "forget", target: Brain.remembered(situation).find(({ text }) => text.includes("rig"))?.handle ?? "" })
+            }
+            return undefined
+          },
+          undefined,
+          { memories: true },
+        )
+        // What the model is told he asked to keep in mind, apart from what was said lately, which the journal still has.
+        const told = () => Brain.prompt(made.seen.at(-1)!, Option.none()).split("\n\n").find((part) => part.startsWith("MEMORIES"))
+        yield* made.dictate("Remember that rig's T3 Code runs the nightly.")
+        const kept = { said: made.spoken().at(-1), memories: (yield* made.memories!.list).map(({ kind, text, heard }) => ({ kind, text, heard })) }
+        yield* made.dictate("What do you know about rig?")
+        const before = told()
+        yield* made.dictate("Forget that one about rig.")
+        const forgot = { said: made.spoken().at(-1), memories: (yield* made.memories!.list).length }
+        yield* made.dictate("What do you know about rig?")
+        const after = told()
+        yield* made.dictate("Scratch that.")
+        const back = { said: made.spoken().at(-1), memories: (yield* made.memories!.list).length }
+        yield* made.dictate("What do you know about rig?")
+        return { kept, before, forgot, after, back, again: told() }
+      }),
+    )
+    expect(result.kept.said).toBe("Noted, sir.")
+    expect(result.kept.memories).toEqual([{ kind: "fact", text: "rig's T3 Code runs the nightly", heard: "Remember that rig's T3 Code runs the nightly." }])
+    expect(result.before).toContain("- k1 «rig's T3 Code runs the nightly»")
+    expect(result.forgot).toEqual({ said: "Forgotten, sir: rig's T3 Code runs the nightly.", memories: 0 })
+    expect(result.after).toBe("MEMORIES, what he asked you to keep in mind: None.")
+    expect(result.back).toEqual({ said: "Kept, sir: rig's T3 Code runs the nightly.", memories: 1 })
+    expect(result.again).toContain("- k1 «rig's T3 Code runs the nightly»")
+  })
+
+  test("a routine's name sends its steps to the focus thread once, as they're written", async () => {
+    const steps = "Merge the PR once checks pass, then update the dev worktree and reinstall yapd."
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(
+          (situation) => {
+            const { heard } = situation.utterance
+            if (heard === "How's the Tezos one doing?") return Brain.decision({ act: "answer", target: handle(situation, tezos), spoken: "It's migrating the fee tables, sir." })
+            // The routine by its handle, never its steps, to the thread "it" is.
+            if (heard === "Ship it.") {
+              const routine = Brain.remembered(situation).find(({ name }) => name === "ship it")
+              const on = Brain.focused(situation)
+              return Brain.decision({ act: "send", text: routine?.handle ?? "", target: Option.match(on, { onNone: () => "", onSome: ({ handle }) => handle }), how: "now" })
+            }
+            return undefined
+          },
+          undefined,
+          { memories: true, routines: [{ name: "ship it", steps }] },
+        )
+        const messages = () => made.dispatched.filter(({ type }) => type === "message.dispatch").map(({ threadId, text }) => ({ threadId, text }))
+        yield* made.dictate("How's the Tezos one doing?")
+        const shown = Brain.prompt(made.seen.at(-1)!, Option.none())
+        yield* made.dictate("Ship it.")
+        const sent = { said: made.spoken().at(-1), messages: messages() }
+        // Said again, it isn't sent again behind his back.
+        yield* made.dictate("Ship it.")
+        return { shown, sent, again: { said: made.spoken().at(-1), messages: messages() } }
+      }),
+    )
+    expect(result.shown).toContain(`- p1 «ship it»: «${steps}» (in his preferences)`)
+    expect(result.sent).toEqual({ said: "On it, sir.", messages: [{ threadId: tezos.id, text: steps }] })
+    expect(result.again.said).toBe("I sent that a minute ago, sir. Again?")
+    expect(result.again.messages).toEqual([{ threadId: tezos.id, text: steps }])
+  })
+
+  test("a routine whose steps aren't his words as heard isn't saved, nor one that may be yapd's own voice", async () => {
+    const asked = "When I say review it, have Sol review it until it's clean."
+    const result = await run(
+      Effect.gen(function* () {
+        let reworded = true
+        const made = yield* assistant(
+          (situation) => {
+            const { heard } = situation.utterance
+            if (heard === asked) return Brain.decision({ act: "remember", how: "routine", text: reworded ? "review it: have Sol review the work until it's clean" : "review it: have Sol review it until it's clean" })
+            if (heard === "When I say review it, have Opus review it twice.") return Brain.decision({ act: "remember", how: "routine", text: "review it: have Opus review it twice" })
+            return undefined
+          },
+          undefined,
+          { memories: true },
+        )
+        const kept = () => Effect.map(made.memories!.list, (all) => all.map(({ name, text }) => `${name}: ${text}`))
+        yield* made.dictate(asked)
+        const unsaved = { said: made.spoken().at(-1), kept: yield* kept() }
+        reworded = false
+        // Over yapd's own voice, what was heard may be its words.
+        yield* made.heard({ heard: asked, via: "shortcut", at: yield* TestClock.currentTimeMillis, voiced: 3, turns: 1, echo: "I'll tell you when it finishes, sir." })
+        yield* made.flush
+        const echoed = { said: made.spoken().at(-1), kept: yield* kept() }
+        yield* made.dictate(asked)
+        const saved = { said: made.spoken().at(-1), kept: yield* kept() }
+        yield* made.dictate("When I say review it, have Opus review it twice.")
+        return { unsaved, echoed, saved, changed: { said: made.spoken().at(-1), kept: yield* kept() } }
+      }),
+    )
+    expect(result.unsaved).toEqual({ said: "I couldn't keep the steps in your own words, sir, so I didn't save it.", kept: [] })
+    expect(result.echoed).toEqual({ said: "I didn't keep that, sir: it may have been my own voice. Say it again?", kept: [] })
+    expect(result.saved).toEqual({ said: "Noted, sir. Review it: have Sol review it until it's clean.", kept: ["review it: have Sol review it until it's clean"] })
+    expect(result.changed).toEqual({ said: "Changed, sir. Review it: have Opus review it twice.", kept: ["review it: have Opus review it twice"] })
+  })
+
+  test("a secret isn't remembered, nor kept in the journal", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(
+          (situation) =>
+            situation.utterance.heard.startsWith("Remember") ? Brain.decision({ act: "remember", how: "fact", text: "the staging key is sk-live-4f9a8b7c6d5e" }) : undefined,
+          undefined,
+          { memories: true },
+        )
+        yield* made.dictate("Remember that the staging key is sk-live-4f9a8b7c6d5e.")
+        return { said: made.spoken().at(-1), kept: (yield* made.memories!.list).length, journal: JSON.stringify(yield* made.journal.since(0)) }
+      }),
+    )
+    expect(result.said).toBe("I won't keep that, sir. It looks like a secret.")
+    expect(result.kept).toBe(0)
+    expect(result.journal).not.toContain("4f9a8b7c6d5e")
   })
 })
