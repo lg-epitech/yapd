@@ -2318,6 +2318,14 @@ const filling = ["uh", "um", "erm", "hmm"]
 const aroundTitle = { ahead: ahead(`(?:${gap}|${phrased(filling)})*`), behind: behind([]) }
 
 /**
+ * What may come around a new title he gives as he answers yapd's read-back
+ * of another: before it, a no, an "actually", a "to", "call it", "name it" or
+ * "rename it to", marks and a pause filled, like "No, call it"; after it,
+ * what may come after any title.
+ */
+const aroundAnswer = { ahead: ahead(`(?:${gap}|${phrased([...filling, "no", "actually", "to", "call it", "name it", "rename it to"])})*`), behind: behind([]) }
+
+/**
  * Whether a new title is all he said after his first "to", "call it" or
  * "name it" after his "rename", or his first at all with no "rename",
  * symbols and all, whatever quotes he put around it, but for what may come
@@ -2335,6 +2343,15 @@ const titled = (title: string, said: string) => {
   if (first === undefined || calledAs(title) === "") return false
   return inHisWords(said.slice(from + first.index + first[0].length), title, aroundTitle.ahead, aroundTitle.behind, calledAs) !== undefined
 }
+
+/**
+ * Whether a new title he gives as he answers yapd's read-back of another,
+ * like "No, C++ parser." to "Rename it to C parser, sir?", is all of his
+ * answer, symbols and all, but for what may come around it there, as
+ * `aroundAnswer` has it: never "the one with the plus signs", nor the "C++
+ * parser" of "C++ parser, with the plus signs".
+ */
+const retitled = (title: string, said: string) => calledAs(title) !== "" && inHisWords(said, title, aroundAnswer.ahead, aroundAnswer.behind, calledAs) !== undefined
 
 /** A fact said: what may come before it, "remember that" and an everyday way of asking before that, and after it, words to yapd a pause sets off. */
 const aroundFact = {
@@ -3290,8 +3307,11 @@ const tidying = (
   if (choice.how === "settle" && (listed.state === "question" || listed.state === "approval")) return { _tag: "Say", spoken: said.asking(Reminders.named(listed)) }
   if (choice.how === "settle" && occupied(listed)) return { _tag: "Say", spoken: said.working(Reminders.named(listed)) }
   // His words, never the model's: a title that isn't all he said after "to" or "call it", symbols and all, is read back to him first.
+  // Answering yapd's read-back of another, it's all of his answer, like "No, C++ parser." to "Rename it to C parser, sir?".
   const heard = utterance.whole ?? utterance.heard
-  const unsaid = choice.how === "rename" && (utterance.echo !== undefined || !titled(choice.text, heard))
+  const answering =
+    choice.pending === "answers" && Option.exists(situation.open, ({ kind, decision }) => kind === "confirm" && decision.act === "tidy" && decision.how === "rename")
+  const unsaid = choice.how === "rename" && (utterance.echo !== undefined || !(answering ? retitled : titled)(choice.text, heard))
   if (choice.sure === "medium" || unsaid || (choice.how === "archive" && occupied(listed))) {
     return tidyConfirm(choice, { ref: listed.ref, called: Reminders.named(listed), listed }, situation, lines)
   }

@@ -2203,6 +2203,28 @@ describe("memories", () => {
     expect(rename("Rename the Mina tickets to Mina fee tables, then tell it to stop.", "stop")).toBe(back("stop"))
   })
 
+  test("a new title he gives to yapd's read-back of another is all of his answer but a no, \"actually\" or \"call it\" before it, so \"C++ parser, with the plus signs\" is never \"C++ parser\"", () => {
+    const asked = Brain.check(Brain.decision({ act: "tidy", how: "rename", target: handleOf(mina), sure: "high", text: "C parser" }), situation("Rename Mina to C++ parser."), lines)
+    if (asked._tag !== "Ask") throw new Error("expected the title read back")
+    const open: Assistant.Open = { ...asked.open, id: "o1", version: 1, at: now - 5_000 }
+    const answer = (heard: string, text: string) => {
+      const checked = Brain.check(
+        Brain.decision({ act: "tidy", how: "rename", target: handleOf(mina), sure: "high", text, pending: "answers" }),
+        situation(heard, { open: Option.some(open) }),
+        lines,
+      )
+      return checked._tag === "Do" ? checked.plan.decision.text : checked._tag === "Ask" ? checked.open.asked : checked
+    }
+    const back = (title: string) => `Rename Open Mina SSV2 Bug Tickets to ${title}, sir?`
+    expect(answer("No, C++ parser.", "C++ parser")).toBe("C++ parser")
+    expect(answer("No, call it C++ parser, please.", "C++ parser")).toBe("C++ parser")
+    expect(answer("Actually, rename it to C++ parser.", "C++ parser")).toBe("C++ parser")
+    expect(answer("No, C++ parser, with the plus signs.", "C++ parser")).toBe(back("C++ parser"))
+    expect(answer("No, the one with the plus signs.", "C++ parser")).toBe(back("C++ parser"))
+    // All of his answer, never what's after a "to" in it.
+    expect(answer("No, don't push to main.", "main")).toBe(back("main"))
+  })
+
   test("a routine's name is his as he said it, symbols and all, so the model's \"C\" for his \"C++\" keeps nothing, and saying \"C++\" never sends one called \"C\"", () => {
     const remember = (text: string) =>
       Brain.check(Brain.decision({ act: "remember", how: "routine", text }), situation("When I say C++, review the C++ parser."), lines)

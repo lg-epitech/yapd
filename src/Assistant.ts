@@ -2395,7 +2395,7 @@ export const make = (options: {
         // A routine's name is the steps it sends, which is what was asked about when they're what went.
         const given = Brain.resolved(thought.decision, situation)
         // What he left out is what was asked about: its words, as for "no, the Mina one", and its thread, as for "no, stop it instead", or
-        // "no, call it C++ parser" to renaming it to "C parser", a new title for it, checked again as his words.
+        // "no, C++ parser" to renaming it to "C parser", a new title for it, checked again as all of his answer.
         const answered = filled(given, open)
         if (answered === undefined) {
           yield* forgo(open, "Its words may have been my own voice.")
