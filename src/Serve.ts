@@ -2,7 +2,7 @@ import { Clock, Context, Deferred, Effect, Layer, Logger, Option, Schedule, Stre
 import { hostname } from "node:os"
 import * as Assistant from "./Assistant.ts"
 import { Activity, DeviceAudio } from "./Audio.ts"
-import { modeCommand, modeLines, ProviderBrain, remembered as inMind } from "./Brain.ts"
+import { answersTo, modeCommand, modeLines, ProviderBrain, remembered as inMind } from "./Brain.ts"
 import * as ClaudeCode from "./ClaudeCode.ts"
 import * as CliLauncher from "./CliLauncher.ts"
 import * as Codex from "./Codex.ts"
@@ -103,6 +103,9 @@ const usage = "5 minutes"
 export const serve = Effect.gen(function* () {
   const started = yield* Clock.currentTimeMillis
   const preferences = yield* Preferences.path
+  // His routines in the file, read each time, from the whole of it, so one he adds is there for the next thing he says: never one called
+  // as yapd answers to already, which would never be heard as the routine.
+  const routines = Preferences.written(preferences, answersTo)
   const tunnels = yield* Tunnels
   const everywhere = yield* machines(Tunnel.masters(tunnels))
   const journal = yield* Journal.Journal
@@ -209,7 +212,7 @@ export const serve = Effect.gen(function* () {
     }),
     // Each of his routines by the name it's known by, as the shortcut would send it, read as they are now: said over an update, one is
     // never sent to its agent as the bare words.
-    routines: Effect.map(Effect.all([memories.list, Preferences.written(preferences)]), ([kept, written]) =>
+    routines: Effect.map(Effect.all([memories.list, routines]), ([kept, written]) =>
       inMind({ memories: { kept, written } }).flatMap(({ name }) => (name === undefined ? [] : [name])),
     ),
   })
@@ -273,8 +276,7 @@ export const serve = Effect.gen(function* () {
     modes,
     reminders,
     memories,
-    // Read each time, from the whole file, so a routine he adds is there for the next thing he says.
-    routines: Preferences.written(preferences),
+    routines,
   })
   yield* Deferred.succeed(welcome, assistant.welcome)
   missing = Effect.map(assistant.missed, ({ groups }) => groups)

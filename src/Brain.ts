@@ -1882,9 +1882,10 @@ export const unheard = (words: string, said: string) => {
  * Whether yapd answers to a phrase said on its own without the model, like
  * "say that again", "scratch that", "yes", "focus" or "mute it", which a
  * routine called the same would never be heard for, or would take the place
- * of.
+ * of: with a question open, "ship it" is a yes to it. So no routine is ever
+ * called that, said or written.
  */
-const answersTo = (phrase: string) => {
+export const answersTo = (phrase: string) => {
   const said = gist(phrase)
   const closed: ReadonlyArray<ReadonlySet<string>> = [
     again, needs, usage, questioning, refused, allows, declines, stopping, scratching, listing, showing, threading, pulling, hiding,
@@ -2264,7 +2265,7 @@ const contract = `Reply with only a JSON object with the keys "act", "target", "
 - "again": he wants to hear what you said last again. "how" is "same"; "spoken" is that line.
 - "clarify": it's about one thread but you'd be guessing between two or three: "target" is the likeliest and "others" the rest. yapd asks him which.
 - "start": new work: a change, a fix, an investigation, a review, a question that needs the web, the code or time. "text" is the request in his words. yapd works out where it goes and starts it.
-- "send": a message for a thread, like an instruction, a correction or an answer to what it asked. "target" is the thread, "text" the message as he'd type it. "how" is "now"; "after" when he says after, once it's done or when it finishes; "restart" when he says to drop what it's doing and do this instead. A message he wants sent at a later time, like "at five" or "in an hour", is "offer" at that time, never "send": yapd only asks him then. A routine's name from MEMORIES said as a request, like "ship it", is "send" with "text" its handle there, like p1, never its steps written out, and "target" the thread it's for: FOCUS, unless he names another. Anything more he says with it that's a request of its own, like "and tell the Mina one to rebase", goes in "rest". Words that change what the routine asks, like "for typos" or "but only the fee code", make it a message of his own words, never the routine nor its steps rewritten.
+- "send": a message for a thread, like an instruction, a correction or an answer to what it asked. "target" is the thread, "text" the message as he'd type it. "how" is "now"; "after" when he says after, once it's done or when it finishes; "restart" when he says to drop what it's doing and do this instead. A message he wants sent at a later time, like "at five" or "in an hour", is "offer" at that time, never "send": yapd only asks him then. A routine's name from MEMORIES said as a request, like "land it", is "send" with "text" its handle there, like p1, never its steps written out, and "target" the thread it's for: FOCUS, unless he names another. Anything more he says with it that's a request of its own, like "and tell the Mina one to rebase", goes in "rest". Words that change what the routine asks, like "for typos" or "but only the fee code", make it a message of his own words, never the routine nor its steps rewritten.
 - "stop": stop a thread's run, when he says to stop the thread, the run or the work. "target" is the thread.
 - "undo": take back what you just did for him, as LATELY shows it: the message you just sent, the reminder or offer you just set or cancelled, or what you just remembered or forgot. "how" is which he means: "reminder" for the reminder or offer, "memory" for what you remembered or forgot, "message" for the message you sent a thread, "carry" when he wants a thread you stopped to carry on, and "" only when he says no more than "scratch that" or "undo that": whatever you did last. "target" is the thread only when he names one, never the one he's hearing about when he doesn't; "" when "how" is "".
 - "decide": he allows, or turns down, what a thread waits for him to allow, in WAITING ON YOU or OPEN. "target" is the thread; "how" is "accept", "session" only when he says for the session or from now on, or "decline".

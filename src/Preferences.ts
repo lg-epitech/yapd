@@ -51,12 +51,25 @@ export const routines = (text: string): ReadonlyArray<Routine> => {
   return found
 }
 
-/** His routines, read each time from the whole file, so a change applies to the next thing he says. None without a file. */
-export const written = (path: string) =>
+/**
+ * His routines, read each time from the whole file, so a change applies to
+ * the next thing he says. None without a file. One called as yapd `answers`
+ * to already, like "ship it", which with a question open would be a yes to
+ * it, never the routine, is left out, as it's refused said by voice, and the
+ * log says so.
+ */
+export const written = (path: string, answers: (name: string) => boolean) =>
   Effect.gen(function* () {
     const file = Bun.file(path)
     if (!(yield* Effect.tryPromise(() => file.exists()))) return []
-    return routines(yield* Effect.tryPromise(() => file.text()))
+    const all = routines(yield* Effect.tryPromise(() => file.text()))
+    const taken = all.filter(({ name }) => answers(name))
+    if (taken.length > 0) {
+      const names = taken.map(({ name }) => `"${name}"`).join(", ")
+      const [them, it] = taken.length === 1 ? ["routine", "it"] : ["routines", "them"]
+      yield* Effect.logWarning(`I already answer to ${names}, so I'm going without your ${them} called that in ${path}: call ${it} something else`)
+    }
+    return all.filter((routine) => !taken.includes(routine))
   }).pipe(
     Effect.catchAll((error) =>
       Effect.logWarning(`Could not read ${path}, so I'm going without your routines`, error).pipe(Effect.as<ReadonlyArray<Routine>>([])),

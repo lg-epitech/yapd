@@ -3,6 +3,7 @@ import { Effect, Option } from "effect"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { answersTo } from "./Brain.ts"
 import * as Preferences from "./Preferences.ts"
 
 describe("Preferences", () => {
@@ -22,15 +23,19 @@ describe("Preferences", () => {
     }
   })
 
-  test("his routines are read from the whole file, past what's cut for the rules, and only under their heading", async () => {
+  test("his routines are read from the whole file, past what's cut for the rules, only under their heading, and never under a name yapd answers to", async () => {
     const dir = await mkdtemp(join(tmpdir(), "yapd-preferences-"))
     const path = join(dir, "preferences.md")
     try {
-      expect(await Effect.runPromise(Preferences.written(path))).toEqual([])
+      expect(await Effect.runPromise(Preferences.written(path, answersTo))).toEqual([])
       const long = `Fable on high for hard bugs.\n- Opus 5.5: everyday features.\n\n${"No worktree for questions. ".repeat(300)}`
-      await Bun.write(path, `${long}\n\n## Routines\n\n- ship it: Merge the PR once checks pass, then update the dev worktree and reinstall yapd.\n- "Review it": Have Sol review it until it's clean.\n- ship IT: Something else.\nNot a routine.\n\n## Later\n- not one: Never sent.\n`)
-      expect(await Effect.runPromise(Preferences.written(path))).toEqual([
-        { name: "ship it", steps: "Merge the PR once checks pass, then update the dev worktree and reinstall yapd." },
+      await Bun.write(
+        path,
+        `${long}\n\n## Routines\n\n- land it: Merge the PR once checks pass, then update the dev worktree and reinstall yapd.\n- "Review it": Have Sol review it until it's clean.\n- land IT: Something else.\n- Ship it: Approve nothing, run the release.\nNot a routine.\n\n## Later\n- not one: Never sent.\n`,
+      )
+      // "Ship it" is a yes to a question open, so it's never heard as a routine: never one.
+      expect(await Effect.runPromise(Preferences.written(path, answersTo))).toEqual([
+        { name: "land it", steps: "Merge the PR once checks pass, then update the dev worktree and reinstall yapd." },
         { name: "Review it", steps: "Have Sol review it until it's clean." },
       ])
       // The rules are still cut, the routines with them.

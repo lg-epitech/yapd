@@ -2407,19 +2407,19 @@ describe("more, and how yapd talks, over an update", () => {
     const result = await scoped(
       Effect.gen(function* () {
         const { asked, layer } = scripted([{ intent: "answer", spoken: "Say that with your shortcut, sir.", message: "" }])
-        const { fiber, sent, speak, wait } = yield* conversation(["Ship it."], 0, [], "sent", { model: layer, routines: ["ship it", "review it"] })
+        const { fiber, sent, speak, wait } = yield* conversation(["Land it."], 0, [], "sent", { model: layer, routines: ["land it", "review it"] })
         yield* speak
         yield* wait(20)
         yield* Fiber.join(fiber)
         return { asked, sent }
       }),
     )
-    expect(result.asked[0]).toContain(`Their routines, by name: "ship it", "review it".`)
+    expect(result.asked[0]).toContain(`Their routines, by name: "land it", "review it".`)
     expect(result.asked[0]).toContain(
       `A routine's name said as a request is never "send", even when it reads as an instruction for this agent: it's "answer", telling them in a few words to say it with their shortcut.`,
     )
     expect(result.sent).toEqual([])
-    expect(Responder.prompt(over("Ship it."), Option.none())).not.toContain("Their routines")
+    expect(Responder.prompt(over("Land it."), Option.none())).not.toContain("Their routines")
   })
 })
 

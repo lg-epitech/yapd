@@ -11628,27 +11628,27 @@ describe("Assistant memories", () => {
             const { heard } = situation.utterance
             if (heard === "How's the Tezos one doing?") return Brain.decision({ act: "answer", target: handle(situation, tezos), spoken: "It's migrating the fee tables, sir." })
             // The routine by its handle, never its steps, to the thread "it" is.
-            if (heard === "Ship it.") {
-              const routine = Brain.remembered(situation).find(({ name }) => name === "ship it")
+            if (heard === "Land it.") {
+              const routine = Brain.remembered(situation).find(({ name }) => name === "land it")
               const on = Brain.focused(situation)
               return Brain.decision({ act: "send", text: routine?.handle ?? "", target: Option.match(on, { onNone: () => "", onSome: ({ handle }) => handle }), how: "now" })
             }
             return undefined
           },
           undefined,
-          { memories: true, routines: [{ name: "ship it", steps }] },
+          { memories: true, routines: [{ name: "land it", steps }] },
         )
         const messages = () => made.dispatched.filter(({ type }) => type === "message.dispatch").map(({ threadId, text }) => ({ threadId, text }))
         yield* made.dictate("How's the Tezos one doing?")
         const shown = Brain.prompt(made.seen.at(-1)!, Option.none())
-        yield* made.dictate("Ship it.")
+        yield* made.dictate("Land it.")
         const sent = { said: made.spoken().at(-1), messages: messages() }
         // Said again, it isn't sent again behind his back.
-        yield* made.dictate("Ship it.")
+        yield* made.dictate("Land it.")
         return { shown, sent, again: { said: made.spoken().at(-1), messages: messages() } }
       }),
     )
-    expect(result.shown).toContain(`- p1 «ship it»: «${steps}» (in his preferences)`)
+    expect(result.shown).toContain(`- p1 «land it»: «${steps}» (in his preferences)`)
     expect(result.sent).toEqual({ said: "On it, sir.", messages: [{ threadId: tezos.id, text: steps }] })
     expect(result.again.said).toBe("I sent that a minute ago, sir. Again?")
     expect(result.again.messages).toEqual([{ threadId: tezos.id, text: steps }])
