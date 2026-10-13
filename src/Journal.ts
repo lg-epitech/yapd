@@ -83,8 +83,10 @@ export class Journal extends Context.Tag("yapd/Journal")<
      * Keeps an entry under its key unless one was ever kept under it, so what's
      * said once is said once across restarts: none when one was, otherwise the
      * new entry's id, when the journal could keep it, to note when it's heard.
+     * `alongside` is done in the same transaction, first: when it says not to
+     * go on, nothing is kept, and it's none as if one had been.
      */
-    readonly claim: (entry: Entry & { readonly key: string }) => Effect.Effect<Option.Option<Option.Option<number>>>
+    readonly claim: (entry: Entry & { readonly key: string }, alongside?: (database: Database) => boolean) => Effect.Effect<Option.Option<Option.Option<number>>>
     /**
      * Notes that the user heard these through, answered them or was briefed
      * on them, unless they had already, and with each the entry it took the
@@ -344,9 +346,10 @@ export const fromStore = (
           Effect.map(({ id }) => Option.some(id)),
           Effect.catchAll((error) => Effect.logWarning("Could not keep this in my journal", error).pipe(Effect.as(Option.none<number>()))),
         ),
-    claim: (entry) =>
+    claim: (entry, alongside) =>
       store
         .transaction((database: Database) => {
+          if (alongside !== undefined && !alongside(database)) return { claimed: Option.none<Option.Option<number>>(), row: undefined }
           const inserted = database.query(`insert or ignore into journal ${columns}`).run(...values(entry, called))
           if (inserted.changes === 0) return { claimed: Option.none<Option.Option<number>>(), row: undefined }
           const id = Number(inserted.lastInsertRowid)

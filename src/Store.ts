@@ -112,6 +112,31 @@ export const migrations: ReadonlyArray<string> = [
   // machine and the thread, or the session when there's no thread to tie it
   // to, so only what it's called aloud and its project are kept beside it.
   "create table mutes (key text primary key, called text, project text, at integer not null, ends_at integer) strict;",
+  // What he asked to be reminded of: at a time, when a thread finishes or asks
+  // him something, or a message to offer a thread then, which only his yes
+  // ever sends. His words are kept as he said them beside what the model made
+  // of them, and the thread by what it was called aloud, for once it's gone.
+  // Whether he heard it is the journal's, under `remind:<id>`: the id is never
+  // used again, even once older rows are pruned, so that key is always new.
+  `create table reminders (
+    id integer primary key autoincrement,
+    at integer not null,
+    utterance text,
+    heard text not null,
+    text text not null,
+    propose text,
+    due integer,
+    machine text,
+    thread text,
+    called text,
+    event text check (event in ('finished', 'asked')),
+    state text not null check (state in ('pending', 'fired', 'cancelled')),
+    fired_at integer,
+    check (due is not null or event is not null),
+    check ((event is null and propose is null) or (machine is not null and thread is not null))
+  ) strict;
+  create index reminders_due on reminders (due) where state = 'pending' and due is not null;
+  create index reminders_event on reminders (machine, thread) where state = 'pending' and event is not null;`,
 ]
 
 export class Store extends Context.Tag("yapd/Store")<
