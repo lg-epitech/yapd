@@ -2212,6 +2212,16 @@ export const asSaid = (words: string, said: string) => {
 }
 
 /**
+ * Whether words are his as he said them, as `asSaid` has it, but symbols and
+ * all, as `worded` compares them, so the model's "C parser" is never his
+ * "C++ parser", nor its "NET" his ".NET".
+ */
+const wordForWord = (words: string, said: string) => {
+  const kept = worded(words)
+  return kept !== "" && ` ${worded(said)} `.includes(` ${kept} `)
+}
+
+/**
  * Words to yapd that may come around what he asks, never part of it when
  * said before he asks it, or when a pause sets them off from his other
  * words, like the "thanks" of ", thanks.": never the "Jarvis" of "ask
@@ -3253,9 +3263,9 @@ const tidying = (
   // T3 Code won't settle one waiting on him till he answers it, nor one at work, or with something in its queue.
   if (choice.how === "settle" && (listed.state === "question" || listed.state === "approval")) return { _tag: "Say", spoken: said.asking(Reminders.named(listed)) }
   if (choice.how === "settle" && occupied(listed)) return { _tag: "Say", spoken: said.working(Reminders.named(listed)) }
-  // His words, never the model's: a title that isn't in all he said, word for word, is read back to him first.
+  // His words, never the model's: a title that isn't in all he said, word for word, symbols and all, is read back to him first.
   const heard = utterance.whole ?? utterance.heard
-  const unsaid = choice.how === "rename" && (utterance.echo !== undefined || !asSaid(choice.text, heard))
+  const unsaid = choice.how === "rename" && (utterance.echo !== undefined || !wordForWord(choice.text, heard))
   if (choice.sure === "medium" || unsaid || (choice.how === "archive" && occupied(listed))) {
     return tidyConfirm(choice, { ref: listed.ref, called: Reminders.named(listed), listed }, situation, lines)
   }
