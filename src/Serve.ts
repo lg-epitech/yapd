@@ -137,6 +137,8 @@ export const serve = Effect.gen(function* () {
   const daemon = yield* Daemon.make({
     link: (session, cwd) => threads.link(machine, session, cwd),
     owner: (host, session, cwd) => threads.link(naming(host), session, cwd),
+    // Work in T3 Code's scratch folder is in none of his projects, wherever it ran.
+    outside: threads.outside,
     hands,
     mutes,
     naming,

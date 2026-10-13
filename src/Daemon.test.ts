@@ -76,6 +76,8 @@ const make = (says?: string, options: {
   readonly mutes?: Mutes.Mutes
   /** Finds the T3 Code thread a hook on another machine came from. */
   readonly owner?: (host: string, session: string, cwd: string) => Effect.Effect<Option.Option<Threads.Ref>>
+  /** Whether a directory on a machine is in the folder behind T3 Code's scratch project there. */
+  readonly outside?: (machine: string, directory: string) => Effect.Effect<boolean>
   /** Messages the summary reads as needing the user, like a failure. */
   readonly urgentMessages?: ReadonlyArray<string>
   /** Messages that can't be summed up, as when the model is down. */
@@ -106,6 +108,8 @@ const make = (says?: string, options: {
   /** What happened to follow-ups and the hooks that wait for them, in order. */
   const followUps: Array<string> = []
   const condensed: Array<Turn> = []
+  /** The project each turn was summed up in, in order. */
+  const projects: Array<string> = []
   /** What the user said over an update, each time yapd worked out what to do with it. */
   const responded: Array<string> = []
   const logs = yield* Queue.unbounded<string>()
@@ -139,8 +143,9 @@ const make = (says?: string, options: {
         }),
     options.journal === undefined ? Journal.memory : Layer.succeed(Journal.Journal, options.journal),
     Layer.succeed(Condenser, {
-      condense: (_, turn) => options.unsummarizable?.includes(turn.message) ? Effect.fail(new CondenseError({ cause: "the model is down" })) : Effect.sync(() => {
+      condense: (project, turn) => options.unsummarizable?.includes(turn.message) ? Effect.fail(new CondenseError({ cause: "the model is down" })) : Effect.sync(() => {
         condensed.push(turn)
+        projects.push(project)
         return {
           priority: options.trivialMessages?.includes(turn.message)
             ? "trivial" as const
@@ -255,6 +260,7 @@ const make = (says?: string, options: {
     ...(options.hands === undefined ? {} : { hands: options.hands }),
     ...(options.mutes === undefined ? {} : { mutes: options.mutes }),
     ...(options.owner === undefined ? {} : { owner: options.owner }),
+    ...(options.outside === undefined ? {} : { outside: options.outside }),
     ...(options.sent === undefined ? {} : { sent: options.sent }),
     ...(options.began === undefined ? {} : { began: options.began }),
     ...(options.holding === undefined ? {} : { holding: options.holding }),
@@ -379,7 +385,7 @@ const make = (says?: string, options: {
   /** What the user heard lately, newest first, by id. */
   const heard = Effect.map(Stream.runHead(made.state), (state) => Option.getOrThrow(state).heard.map(({ id }) => id))
   const toggle = (on: boolean) => made.turn(on).pipe(Effect.zipRight(flush))
-  return { responded, listened, microphone, made, handle, finish, turn, notice, lastHeard: made.lastHeard, speak, talk, followUps, wait, dictate, record, reading, played, stopped, condensed, logged, warnings, nextEvent, nextPlayback: Queue.take(playbacks), rests: () => rests, warms: () => warms, renders: () => rendered.size, flush, toggle, power: made.turn, heard, replay: made.replay, awaiting: made.awaiting.pipe(Effect.map((arrived) => arrived.pipe(Effect.zipRight(flush)))), journal: Context.get(context, Journal.Journal) }
+  return { responded, listened, microphone, made, handle, finish, turn, notice, lastHeard: made.lastHeard, speak, talk, followUps, wait, dictate, record, reading, played, stopped, condensed, projects, logged, warnings, nextEvent, nextPlayback: Queue.take(playbacks), rests: () => rests, warms: () => warms, renders: () => rendered.size, flush, toggle, power: made.turn, heard, replay: made.replay, awaiting: made.awaiting.pipe(Effect.map((arrived) => arrived.pipe(Effect.zipRight(flush)))), journal: Context.get(context, Journal.Journal) }
 })
 
 const daemon = make()
@@ -4767,6 +4773,28 @@ describe("Daemon with threads muted", () => {
     expect(result.played).toEqual([])
     expect(result.mutes).toEqual([{ key: "t3:Rosie:t-tezos", called: "the Claude session in yapd", at: 0 }])
     expect(result.kept).toEqual([{ machine: "Rosie", thread: "t-tezos", detail: { priority: "done", session: "claude:s-tezos", muted: true, host: hostname() } }])
+  })
+
+  test("a Stop in a folder of T3 Code's scratch project is summed up and kept as outside his projects, never by that folder's generated name", async () => {
+    const dated = "/t3/scratch/2026-10-13-this-is-a-test-from-0a081e43"
+    const result = await run(
+      Effect.gen(function* () {
+        const asked: Array<string> = []
+        const { handle, nextEvent, projects, journal } = yield* make(undefined, {
+          outside: (machine, directory) => Effect.sync(() => void asked.push(`${machine} ${directory}`)).pipe(Effect.as(directory.startsWith("/t3/scratch/"))),
+        })
+        // Its hook names it by its folder, having no repository to name it by.
+        const stop = (session: string, cwd: string, project: string, message: string) =>
+          handle("claude", { hook_event_name: "Stop", session_id: session, cwd, last_assistant_message: message }, { project, host: hostname() }, false)
+        yield* stop("s-glucose", dated, "2026-10-13-this-is-a-test-from-0a081e43", "Apple has no such API.")
+        yield* nextEvent("Ready:")
+        // Work in one of his projects is still summed up in it.
+        yield* stop("s-loader", "/code/yapd", "yapd", "The loader is fixed.")
+        yield* nextEvent("Ready:")
+        return { asked, projects: [...projects], kept: (yield* journal.since(0, { kinds: ["update"] })).map(({ project }) => project) }
+      }),
+    )
+    expect(result).toEqual({ asked: [`Rosie ${dated}`, "Rosie /code/yapd"], projects: ["", "yapd"], kept: ["", "yapd"] })
   })
 
   test("rig's hook, found in rig's T3 Code, is kept under its thread there and muted by it, while what he says over it still goes the hook's way", async () => {

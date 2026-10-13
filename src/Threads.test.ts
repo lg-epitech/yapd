@@ -455,10 +455,10 @@ describe("Threads on several machines", () => {
     expect(seen).toEqual({ first: ["Rosie: scratch", "rig: No project"], later: ["Rosie: scratch", "rig: scratch"] })
   })
 
-  test("a scratch thread is said as scratch work when T3 Code gives where its scratch project is through a link to its project's folder", async () => {
+  test("a scratch thread is said as scratch work, and its folder taken as outside his projects, when T3 Code gives where its scratch project is through a link", async () => {
     const dir = await realpath(await mkdtemp(join(tmpdir(), "yapd-threads-")))
     try {
-      await mkdir(join(dir, "t3", "scratch"), { recursive: true })
+      await mkdir(join(dir, "t3", "scratch", "2026-10-13-glucose-0a081e43"), { recursive: true })
       await symlink(join(dir, "t3"), join(dir, "linked"))
       const view: T3Live.View = {
         projects: new Map([["s", { id: "s", title: "No project", workspaceRoot: join(dir, "t3", "scratch") }]]),
@@ -478,9 +478,13 @@ describe("Threads on several machines", () => {
           store,
         })
         yield* threads.warm("Rosie")
-        return (yield* threads.desk(Option.none(), [], 5)).threads.map(({ project, scratch }) => ({ project, scratch }))
+        return {
+          desk: (yield* threads.desk(Option.none(), [], 5)).threads.map(({ project, scratch }) => ({ project, scratch })),
+          // Its thread's own folder, as its hook gives it, and the folder holding the scratch project's, which isn't in it.
+          outside: [yield* threads.outside("Rosie", join(dir, "t3", "scratch", "2026-10-13-glucose-0a081e43")), yield* threads.outside("Rosie", join(dir, "t3"))],
+        }
       }).pipe(Effect.scoped, Effect.provide(TestContext.TestContext), Effect.runPromise)
-      expect(seen).toEqual([{ project: "scratch", scratch: true }])
+      expect(seen).toEqual({ desk: [{ project: "scratch", scratch: true }], outside: [true, false] })
     } finally {
       await rm(dir, { recursive: true, force: true })
     }

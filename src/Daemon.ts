@@ -113,6 +113,9 @@ const forgotten = 60 * 60_000
 /** How long finding the T3 Code thread a hook came from can take, after which its update goes the old way. */
 const lookup = "3 seconds"
 
+/** How long a hook's update waits to be told whether its work is outside his projects, which its summary waits on, before it's taken not to be. */
+const placing = "1 second"
+
 /** How far back what yapd last said about the same work is looked for, to tell progress from news. */
 const lastDay = 24 * 60 * 60_000
 
@@ -131,6 +134,12 @@ export const make = (
   options: {
     readonly link?: (session: string, cwd: string) => Effect.Effect<Option.Option<Threads.Ref>>
     readonly owner?: (host: string, session: string, cwd: string) => Effect.Effect<Option.Option<Threads.Ref>>
+    /**
+     * Whether a directory on a machine, by its name, is in the folder behind
+     * T3 Code's scratch project there, where work outside his projects goes,
+     * whose folders' generated names are no project's.
+     */
+    readonly outside?: (machine: string, directory: string) => Effect.Effect<boolean>
     readonly hands?: Hands.Hands["Type"]
     readonly mutes?: Mutes.Mutes
     readonly naming?: Naming
@@ -703,7 +712,7 @@ export const make = (
             onSome: (row) => (row._tag === "Session" ? row.machine : row.ref.machine),
           })
           const where = machine === undefined || machine === called(hostname()) ? "" : ` on ${machine}`
-          const done = yield* muted.mute({ key, project: update.project, ...(session ? { called: `the ${agent} session in ${Threads.spoken(update.project)}${where}` } : {}) }, ends)
+          const done = yield* muted.mute({ key, project: update.project, ...(session ? { called: `the ${agent} session ${Threads.inProject(update.project)}${where}` } : {}) }, ends)
           return (yield* noted(done)) ? said.muted(ends) : said.already
         }),
       )
@@ -719,6 +728,8 @@ export const make = (
   interface Finished {
     readonly session: string
     readonly project: string
+    /** For a hook's, whether its work is outside his projects all the same, worked out before it's summed up: then it's in none. */
+    readonly outside?: Effect.Effect<boolean>
     readonly turn: Turn
     readonly thread: Thread
     readonly arrivedAt: number
@@ -987,9 +998,11 @@ export const make = (
       : Effect.succeed(false)
 
   const prepare = (finished: Finished) => {
-    const { session, project, turn, thread, arrivedAt, generation, hook, needsYou, turns } = finished
+    const { session, turn, thread, arrivedAt, generation, hook, needsYou, turns } = finished
     if (hook !== undefined) summing.set(session, hook)
     return Effect.gen(function* () {
+      // In T3 Code's scratch folder, it's in none of his projects, and what its hook names it, the folder's generated name, isn't one.
+      const project = (yield* finished.outside ?? Effect.succeed(false)) ? "" : finished.project
       // What was said or held of the same work lately, by its session or its thread, read here rather than once its thread is found,
       // which can take seconds: so "another review round" is told from news.
       const previous = Option.map(yield* journal.previous(arrivedAt - lastDay, session, finished.known), (kept) => ({
@@ -1180,7 +1193,7 @@ export const make = (
           Cause.isInterruptedOnly(cause) ? Effect.void : Effect.logError("Could not prepare update", cause),
         ),
       ),
-      Effect.annotateLogs({ project }),
+      Effect.annotateLogs({ project: finished.project }),
     )
   }
 
@@ -1238,6 +1251,20 @@ export const make = (
       Effect.catchTag("TimeoutException", () =>
         Effect.as(Effect.logInfo(`Not tied: ${origin.host}'s T3 Code took too long to say which thread it is`), Option.none<Threads.Ref>()),
       ),
+    )
+  }
+
+  /**
+   * Whether a hook's work is outside his projects, in the folder behind T3
+   * Code's scratch project on the machine it ran on: not when that isn't
+   * known in a moment, so its summary is never held up for long.
+   */
+  const scratched = (cwd: string, origin: Origin): Effect.Effect<boolean> => {
+    const { outside } = options
+    if (outside === undefined) return Effect.succeed(false)
+    return outside(called(origin.host ?? hostname()), cwd).pipe(
+      Effect.timeoutOption(placing),
+      Effect.map(Option.getOrElse(() => false)),
     )
   }
 
@@ -1523,6 +1550,7 @@ export const make = (
               hooked: hook !== undefined,
               needsYou,
               turns,
+              outside: scratched(payload.cwd, origin),
               about: linking(payload.session_id, payload.cwd, origin),
               owner: owning(payload.session_id, payload.cwd, origin),
               answering: followedUp,

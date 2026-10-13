@@ -138,6 +138,14 @@ export class Threads extends Context.Tag("yapd/Threads")<
      * none of them is said as "No project" for want of it.
      */
     readonly warm: (machine: string) => Effect.Effect<void>
+    /**
+     * Whether a directory on `machine` is in the folder behind its T3 Code's
+     * scratch project, where work outside his projects goes: as each really
+     * is on this machine, links followed, and as given on another. Waits for
+     * that T3 Code to say where its scratch project is while it's being
+     * asked; not known, it isn't. Never fails.
+     */
+    readonly outside: (machine: string, directory: string) => Effect.Effect<boolean>
   }
 >() {}
 
@@ -188,6 +196,9 @@ export const when = (at: number, now: number) => {
 
 /** A project's name as it's said: "integration connectors" for integration-connectors, and a generated one as the scratch project. */
 export const spoken = (project: string) => (speakable(project) ? project.replace(/[-_]+/g, " ").trim() : "scratch")
+
+/** Where work is, as it's said to him: "in integration connectors", or outside his projects, kept with none. */
+export const inProject = (project: string) => (project.trim() === "" ? "outside your projects" : `in ${spoken(project)}`)
 
 /** What only reads well: words, numbers and ordinary punctuation, nothing like a path or a hash. */
 const plain = /^[\p{L}\p{N} ,.'’&:!?()#+-]+$/u
@@ -905,5 +916,15 @@ export const make = (options: {
           onSome: (link) =>
             Effect.flatMap(seek(link), (answer) => (Option.isNone(answer) ? Effect.void : Effect.asVoid(Effect.timeoutOption(Fiber.join(answer.value), "2 seconds")))),
         }),
+      outside: (name, directory) =>
+        Effect.gen(function* () {
+          const at = linked(name)
+          if (at === undefined) return false
+          const answer = yield* seek(at)
+          if (Option.isSome(answer)) yield* Fiber.join(answer.value)
+          const root = scratches.get(at.machine)
+          if (root === undefined) return false
+          return Option.isSome(within(yield* resolved(at, root), yield* resolved(at, directory)))
+        }).pipe(Effect.catchAllCause((cause) => Effect.as(Effect.logWarning("Could not tell whether work is outside your projects", cause), false))),
     } satisfies Threads["Type"]
   })

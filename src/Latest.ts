@@ -164,7 +164,8 @@ export const make = (options: {
           if (!session && Option.isNone(thread) && Option.isSome(yield* threads.unseen(machine))) blind = true
           const project = yield* threads.project(machine, session ? (kept.directory === undefined ? {} : { directory: kept.directory }) : { thread: id })
           const icon = Option.isSome(project) ? Option.some(yield* icons.icon(machine, project.value)) : Option.none<Icons.Icon>()
-          const name = Option.match(project, { onNone: () => kept.project, onSome: ({ title }) => title })
+          // Outside his projects, kept with none, it's shown with none.
+          const name = Option.match(project, { onNone: () => (kept.project?.trim() === "" ? undefined : kept.project), onSome: ({ title }) => title })
           // Heard again as it was said while it's still among what he heard; otherwise only a thread yapd can reach, which "it" then means.
           const still = Option.firstSomeOf(yield* Effect.forEach([key, ...by], (key) => heard(key, last.at)))
           return {

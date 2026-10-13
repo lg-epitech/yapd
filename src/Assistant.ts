@@ -1443,7 +1443,7 @@ export const make = (options: {
             .slice(0, 8)
             // His own words, where they're what's shown, with what of them may have been yapd's own voice.
             .map(({ entry }) =>
-              `${ago(entry.at, now)}, ${entry.kind}${entry.project === undefined ? "" : ` in ${entry.project}`}: ${Brain.fenced(entry.said ?? entry.text ?? "")}${
+              `${ago(entry.at, now)}, ${entry.kind}${entry.project === undefined || entry.project.trim() === "" ? "" : ` in ${entry.project}`}: ${Brain.fenced(entry.said ?? entry.text ?? "")}${
                 entry.said === undefined && (entry.kind === "dictation" || entry.kind === "reply") ? Brain.ownVoice(Brain.overheardIn(entry)) : ""
               }`,
             )
@@ -2573,7 +2573,7 @@ export const make = (options: {
         const machine = called(update.thread.origin.host ?? hostname())
         const where = machine === called(hostname()) ? "" : ` on ${machine}`
         const agent = update.thread.agent === "codex" ? "Codex" : "Claude"
-        return Option.some({ key, called: `the ${agent} session in ${Threads.spoken(update.project)}${where}`, project: update.project, it: true })
+        return Option.some({ key, called: `the ${agent} session ${Threads.inProject(update.project)}${where}`, project: update.project, it: true })
       }
       return Option.map(Brain.about(subject), (ref) => ({ key: Mutes.key.thread(ref), called: undefined, project: undefined, it: true }))
     }

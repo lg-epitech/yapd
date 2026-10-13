@@ -2225,6 +2225,9 @@ const entry = (desk: Threads.Desk, now: number) => (kept: Kept) => {
   return `- ${lasted(now - kept.at)} ago, ${what}`
 }
 
+/** What an update not tied to a thread is about, as the model sees it: its project, or work outside his projects, kept with none. */
+const updateAbout = (project: string) => (project.trim() === "" ? "work outside his projects" : project)
+
 /** What "it" means, as the model sees it. */
 const focus = (situation: Situation) => {
   const { subject, desk, now } = situation
@@ -2240,7 +2243,7 @@ const focus = (situation: Situation) => {
       const handle = update.about === undefined ? undefined : handleOf(desk, update.about.machine, update.about.id)
       return [
         handle === undefined
-          ? `Your update about ${update.project}, ${lasted(now - update.at)} ago, from work in ${fenced(update.thread.cwd, 120)} that yapd hasn't tied to a thread yet: ${fenced(update.spoken, 400)}`
+          ? `Your update about ${updateAbout(update.project)}, ${lasted(now - update.at)} ago, from work in ${fenced(update.thread.cwd, 120)} that yapd hasn't tied to a thread yet: ${fenced(update.spoken, 400)}`
           : `${handle}. Your update about it, ${lasted(now - update.at)} ago: ${fenced(update.spoken, 400)}`,
         // Like an answer to what he asked over it, which is what he heard last.
         ...(subject.said === update.spoken ? [] : [`What you said last, over it: ${fenced(subject.said, 400)}`]),
@@ -2301,7 +2304,7 @@ const said = (situation: Situation) => {
     case "typed":
       return `typed to you${maybe}`
     case "reply":
-      return subject._tag === "Session" ? `over your update about ${subject.update.project}` : "right after what you just said"
+      return subject._tag === "Session" ? `over your update about ${updateAbout(subject.update.project)}` : "right after what you just said"
   }
 }
 

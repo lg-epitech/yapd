@@ -274,7 +274,7 @@ const machineOf = (listings: ReadonlyArray<Listing>, host: string | undefined) =
 
 const heard = (listings: ReadonlyArray<Listing>, now: number) => (said: Heard) =>
   [
-    `- ${ago(said.at, now)}, ${said.project}${Option.match(Option.fromNullable(machineOf(listings, said.host)), { onNone: () => "", onSome: (machine) => ` on ${machine}` })}, in ${said.directory}. You said: ${squash(said.spoken)}`,
+    `- ${ago(said.at, now)}, ${said.project.trim() === "" ? "outside their projects" : said.project}${Option.match(Option.fromNullable(machineOf(listings, said.host)), { onNone: () => "", onSome: (machine) => ` on ${machine}` })}, in ${said.directory}. You said: ${squash(said.spoken)}`,
     `  ${said.started === true ? "The prompt you started it with" : "The agent's message"}: ${shorten(said.message, excerpt)}`,
   ].join("\n")
 
