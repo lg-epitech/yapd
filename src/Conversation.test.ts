@@ -1140,27 +1140,41 @@ describe("Over its first seconds, while yapd's own voice can still get into the 
 
   test("keeps and logs none of a secret said over it, whatever the model makes of it, like a remember he's told to ask with his shortcut", async () => {
     const secret = "Remember that the staging key is sk-live-4f9a8b7c6d5e."
-    const lines: Array<string> = []
-    const logger = Logger.make(({ message }) => {
-      lines.push((Array.isArray(message) ? message : [message]).join(" "))
-    })
-    const result = await overHelperScoped(
-      Effect.gen(function* () {
-        const helper = yield* overHelper([[0.9, secret]], { reply: () => ({ intent: "answer", spoken: "Ask me that with your shortcut, sir.", message: "" }) })
-        yield* helper.wait(1)
-        yield* helper.talk(0.9, 15)
-        yield* helper.quiet
-        yield* helper.wait(1)
-        return { responded: helper.responded.map(({ heard, echo }) => ({ heard, told: echo !== undefined })), journal: yield* helper.journal }
-      }).pipe(Effect.provide(Logger.replace(Logger.defaultLogger, logger))),
-    )
+    /** What's logged and kept of his secret when the model answers it with `spoken`. */
+    const answered = async (spoken: string) => {
+      const lines: Array<string> = []
+      const logger = Logger.make(({ message }) => {
+        lines.push((Array.isArray(message) ? message : [message]).join(" "))
+      })
+      const result = await overHelperScoped(
+        Effect.gen(function* () {
+          const helper = yield* overHelper([[0.9, secret]], { reply: () => ({ intent: "answer", spoken, message: "" }) })
+          yield* helper.wait(1)
+          yield* helper.talk(0.9, 15)
+          yield* helper.quiet
+          yield* helper.wait(1)
+          return { responded: helper.responded.map(({ heard, echo }) => ({ heard, told: echo !== undefined })), journal: yield* helper.journal }
+        }).pipe(Effect.provide(Logger.replace(Logger.defaultLogger, logger))),
+      )
+      return { ...result, lines }
+    }
+    const plain = await answered("Ask me that with your shortcut, sir.")
     // Over its first second, with what may have been its own voice, which isn't kept with it either.
-    expect(result.responded).toEqual([{ heard: secret, told: true }])
-    expect(result.journal.map(({ kind, text, said, detail }) => ({ kind, text, said, detail }))).toEqual([
+    expect(plain.responded).toEqual([{ heard: secret, told: true }])
+    expect(plain.journal.map(({ kind, text, said, detail }) => ({ kind, text, said, detail }))).toEqual([
       { kind: "reply", text: undefined, said: "Ask me that with your shortcut, sir.", detail: { intent: "answer", withheld: true } },
     ])
-    expect(lines.filter((line) => line.includes("sk-live"))).toEqual([])
-    expect(lines).toContain("Heard something that could give a secret away, so it's held back")
+    expect(plain.lines.filter((line) => line.includes("sk-live"))).toEqual([])
+    expect(plain.lines).toContain("Heard something that could give a secret away, so it's held back")
+    expect(plain.lines).toContain("Reply: answer")
+    // The model's answer saying it back is said, but neither logged nor kept.
+    const echoed = await answered("I won't keep sk-live-4f9a8b7c6d5e, sir. Ask me that with your shortcut.")
+    expect(echoed.journal.map(({ kind, text, said, detail }) => ({ kind, text, said, detail }))).toEqual([
+      { kind: "reply", text: undefined, said: undefined, detail: { intent: "answer", withheld: true } },
+    ])
+    expect(JSON.stringify(echoed.journal)).not.toContain("4f9a8b7c6d5e")
+    expect(echoed.lines.filter((line) => line.includes("4f9a8b7c6d5e"))).toEqual([])
+    expect(echoed.lines).toContain("Reply: answer")
   })
 
   test.each(["Okay, thanks.", "Got it."])("follows the model's dismissal of %p said over its first second, falling quiet for good", async (said) => {

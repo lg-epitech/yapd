@@ -852,7 +852,9 @@ export const make = (options: {
             const holds = reply.intent === "send" && (yield* options.withholds(update, plain(reply.message)))
             const withheld = T3Actions.revealing(heard) || holds
             yield* Effect.logInfo(withheld ? "Heard something that could give a secret away, so it's held back" : `Heard: ${heard}`)
-            yield* Effect.logInfo(`Reply: ${reply.intent}${answer === "" ? "" : `, saying: ${answer}`}`)
+            // The model's answer may say it back, like "I won't keep sk-…, sir": then only what it made of it is logged, and the answer is
+            // said but kept nowhere when it could give one away.
+            yield* Effect.logInfo(`Reply: ${reply.intent}${answer === "" || withheld ? "" : `, saying: ${answer}`}`)
             // Ended partway on no more than what may all have been its own voice, like its "Over—" heard as "Okay.", it's left
             // unheard, so "what did I miss?" brings it back, and nothing of it is noted as his.
             const doubted = reply.intent === "dismiss" && unsure && !after && heard === first
@@ -866,7 +868,7 @@ export const make = (options: {
                 // With the thread T3 Code knows it by, when it's tied to one, like the update itself.
                 ...(update.about === undefined ? { thread: update.session } : { machine: update.about.machine, thread: update.about.id }),
                 directory: update.thread.cwd,
-                said: answer,
+                ...(T3Actions.revealing(answer) ? {} : { said: answer }),
                 ...(withheld ? {} : { text: heard }),
                 detail: {
                   intent: reply.intent,
