@@ -115,20 +115,21 @@ describe.skipIf(swiftc === undefined)("App", () => {
   )
 
   test(
-    "the menu lists the threads with the latest updates from a yapd that sends them, and the updates it said from one that doesn't, draws each icon or the monogram yapd makes in T3 Code's colours, tells how long ago each ended, and mutes and replays a thread only by its key, on yapd's API",
+    "the menu lists the threads with the latest updates from a yapd that sends them, and the updates it said from one that doesn't, draws each icon or the monogram yapd makes in T3 Code's colours, tells how long ago each ended, and mutes and replays a thread and has its subagents read only by its key, a subagent's by its thread's, on yapd's API",
     async () => {
       // The monograms yapd makes, of names the checks don't have, so the app draws a project with no icon as yapd and T3 Code do.
       const names = ["yapd", "Tezos 2", "integration-connectors", "  spaced out  ", "ﬁle", "日本語", "Straße", "İstanbul", "x1y2", "ⅫRoman", "²squared", "Émile Zola", "🦀 crab", "a-b-c"]
       const monograms = names.map((name) => [name, Icons.monogram(name).text, Icons.monogram(name).color])
       expect(await run("recent", { YAPD_COLORS: Icons.colors.join(","), YAPD_MONOGRAMS: JSON.stringify(monograms) })).toEqual({ code: 0, out: "The app's checks pass.\n" })
       const yapd = await Bun.file(join(app, "yapd", "YapdApp.swift")).text()
-      // A thread is muted, unmuted, heard again and asked about only through Muting, Replaying and Detailing, which encode its key whole, and
-      // nothing else is sent of it.
-      expect(yapd.match(/(Muting|Replaying|Detailing)(\.\w+)?\([^)]*\)/g)).toEqual([
+      // A thread is muted, unmuted, heard again, has its subagents read or not and is asked about only through Muting, Replaying, Subagents and
+      // Detailing, which encode its key whole, and nothing else is sent of it.
+      expect(yapd.match(/(Muting|Replaying|Subagents|Detailing)(\.\w+)?\([^)]*\)/g)).toEqual([
         "Replaying(row)",
         "Muting.forAnHour(row, from: Date()",
         "Muting(row, on: true)",
         "Muting(row, on: false)",
+        "Subagents(row, on: on)",
         "Detailing(row)",
       ])
       expect(yapd).not.toMatch(/threads\//)
@@ -141,6 +142,10 @@ describe.skipIf(swiftc === undefined)("App", () => {
       expect(bar).toMatch(/case \.hear\(let row\): yapd\.replay\(row\)/)
       expect(bar).toMatch(/case \.mute\(let row, let forAnHour\): yapd\.mute\(row, forAnHour: forAnHour\)/)
       expect(bar).toMatch(/case \.unmute\(let row\): yapd\.unmute\(row\)/)
+      expect(bar).toMatch(/case \.subagents\(let row, let on\): yapd\.subagents\(row, on: on\)/)
+      // A subagent's are read by the thread it's part of, never by its own key, which yapd turns away.
+      const recent = await Bun.file(join(app, "yapd", "Recent.swift")).text()
+      expect(recent).toMatch(/struct Subagents: Asking, Equatable \{[\s\S]*?key = row\.head\?\.key \?\? row\.key/)
       // An image is fetched only from yapd's own API, and anything it can't draw is drawn as the icon's monogram.
       const icons = await Bun.file(join(app, "yapd", "Icons.swift")).text()
       expect(icons.match(/URLRequest\(url: [^)]*\)/g)).toEqual(["URLRequest(url: address)"])
@@ -181,7 +186,7 @@ describe.skipIf(swiftc === undefined)("App", () => {
   )
 
   test(
-    "the menu reads how much he hasn't heard from any yapd, says it beside a thread that isn't muted, and offers Catch Me Up only while there's something, asking for it as he'd say it, even while yapd is off",
+    "the menu reads how much he hasn't heard from any yapd, says it beside a thread that isn't muted, and offers Catch Me Up and Clear Catch-Up only while there's something, asking for the one as he'd say it and clearing the other with a POST /catchup/clear and nothing else, even while yapd is off",
     async () => {
       expect(await run("unheard")).toEqual({ code: 0, out: "The app's checks pass.\n" })
       const yapd = await Bun.file(join(app, "yapd", "YapdApp.swift")).text()
@@ -193,6 +198,13 @@ describe.skipIf(swiftc === undefined)("App", () => {
       expect(yapd).toMatch(/func catchMeUp\(\) \{\s*send\("POST", "utterances", body: try\? JSONEncoder\(\)\.encode\(Utterance\.catchMeUp\)\)\s*\}/)
       // Nothing about catching up is sent anywhere but as his words to /utterances: no thread, no replay, no state.
       expect(yapd.match(/catchMeUp/g)?.length).toBe(2)
+      // Clearing it is only ever asked of yapd as the API has it, with nothing sent, and choosing it only asks for it, with no asking him
+      // first: "scratch that" by voice brings it back.
+      expect(yapd).toMatch(/func clearCatchUp\(\) \{\s*send\("POST", "catchup\/clear"\)\s*\}/)
+      expect(yapd.match(/catchup\//g)).toEqual(["catchup/"])
+      expect(bar.match(/clearCatchUp/g)).toEqual(["clearCatchUp", "clearCatchUp"])
+      expect(bar).toMatch(/case \.clearCatchUp: yapd\.clearCatchUp\(\)/)
+      expect(bar).not.toMatch(/NSAlert/)
       // A row is still heard again only as yapd says it can, while it's on, whatever is unheard of it.
       const recent = await Bun.file(join(app, "yapd", "Recent.swift")).text()
       expect(recent).toMatch(/func hearable\(on: Bool\) -> Bool \{\s*on && replayable\s*\}/)
@@ -202,7 +214,7 @@ describe.skipIf(swiftc === undefined)("App", () => {
   )
 
   test(
-    "the menu shows everything it did, in the same order and turned on and off by the same rules, with a panel beside each recent thread instead of the Mute menu, to hear it again, mute it, for an hour too, or take the mute off, and keeps each item by an id, so the open menu changes in place",
+    "the menu shows everything it did, in the same order and turned on and off by the same rules, with a panel beside each recent thread instead of the Mute menu, to hear it again, mute it, for an hour too, or take the mute off, and have its subagents read, and keeps each item by an id, so the open menu changes in place",
     async () => {
       expect(await run("menu")).toEqual({ code: 0, out: "The app's checks pass.\n" })
       // What the checks cover is what the menu bar draws: the menu and each panel are only ever built from Menu, and what's chosen does what the

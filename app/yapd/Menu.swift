@@ -13,6 +13,8 @@ struct Menu: Equatable {
     case talk(Mode)
     case whoNeedsMe
     case catchMeUp
+    /// Sets aside everything a catch-up would tell him of now, unread, as heard.
+    case clearCatchUp
     case showLast
     /// Says again one of the updates a yapd from before recent threads lists.
     case replay(Status.Update)
@@ -21,6 +23,8 @@ struct Menu: Equatable {
     /// Mutes a recent thread until he takes it off, or for an hour.
     case mute(Status.Recent, forAnHour: Bool)
     case unmute(Status.Recent)
+    /// Has a recent thread's subagents read to him from now on, or kept to yapd again, a subagent's by the thread it's part of.
+    case subagents(Status.Recent, on: Bool)
     /// Opens a thread's pull request in the browser, only ever an https page.
     case open(URL)
     case quit
@@ -103,8 +107,8 @@ struct Menu: Equatable {
       return
     }
     var items = [Item(id: "power", kind: .action(.turn(on: !state.on)), title: state.on ? "Turn Off" : "Turn On", enabled: true)]
-    // The mode line, who's waiting and Catch Me Up are there even when there's nothing to say, hidden, so the open menu shows
-    // them, or hides them, in place, as focus ends, a thread stops waiting or he's heard everything.
+    // The mode line, who's waiting, Catch Me Up and Clear Catch-Up are there even when there's nothing to say, hidden, so the
+    // open menu shows them, or hides them, in place, as focus ends, a thread stops waiting or he's heard everything.
     if let mode = state.mode {
       let line = state.modeLine(now: now, zone: zone, locale: locale)
       items.append(Item(id: "mode line", kind: .line, title: line ?? "", enabled: false, hidden: line == nil))
@@ -120,6 +124,9 @@ struct Menu: Equatable {
     // Answered aloud even while yapd is off, as the shortcut is, and then it's quiet again.
     let unheard = state.unheardLine
     items.append(Item(id: "unheard", kind: .action(.catchMeUp), title: unheard ?? "", enabled: unheard != nil, hidden: unheard == nil))
+    // Right under it, with no asking first: "scratch that" by voice brings back what it set aside. It only marks things heard, so
+    // it works while yapd is off too, and the count drops as the state says so.
+    items.append(Item(id: "clear catch-up", kind: .action(.clearCatchUp), title: "Clear Catch-Up", enabled: unheard != nil, hidden: unheard == nil))
     items.append(Item(id: "show last", kind: .action(.showLast), title: "Show Last Card", enabled: last))
     if let recent = state.recent {
       if !recent.isEmpty {
@@ -156,13 +163,16 @@ struct Menu: Equatable {
   }
 
   /// What the panel beside a recent row offers: its card, then hearing it again, the same as clicking the row, muting it until
-  /// he takes it off or for an hour, or taking the mute off, and opening its pull request, when yapd's `details` of it have one
-  /// with an https address. Muting it works while yapd is off, and for a row it can't say again. The same items whether it's
-  /// muted or not, and has a pull request or not, what isn't offered hidden, so the open panel follows a mute that ends, one
-  /// set by voice, or a pull request yapd tells of, in place.
+  /// he takes it off or for an hour, or taking the mute off, a subagent's row its own, having its subagents read to him, checked
+  /// while they are, on every T3 Code thread's, a subagent's by the thread it's part of, and opening its pull request, when
+  /// yapd's `details` of it have one with an https address. Muting it and reading its subagents work while yapd is off, and for
+  /// a row it can't say again. The same items whether it's muted or not, a thread's or a session's, and has a pull request or
+  /// not, what isn't offered hidden, so the open panel follows a mute that ends, one set by voice, subagents read by voice, or a
+  /// pull request yapd tells of, in place.
   static func panel(for row: Row, details: Details?) -> [Item] {
     let key = row.recent.key
     let muted = row.recent.muted
+    let reading = row.recent.subagents == true
     let pr = details?.pr.flatMap { pr in pr.address.map { (number: pr.number, address: $0) } }
     return [
       Item(id: "\(key) card", kind: .card(row), title: row.recent.title, enabled: false),
@@ -170,6 +180,11 @@ struct Menu: Equatable {
       Item(id: "\(key) hear", kind: .action(.hear(row.recent)), title: "Hear Again", enabled: row.hearable),
       Item(id: "\(key) mute", kind: .action(muted ? .unmute(row.recent) : .mute(row.recent, forAnHour: false)), title: muted ? "Unmute" : "Mute", enabled: true),
       Item(id: "\(key) mute for an hour", kind: .action(.mute(row.recent, forAnHour: true)), title: "Mute for an Hour", enabled: true, hidden: muted),
+      // Never on a session's row, which T3 Code runs no subagents for, nor from a yapd from before it.
+      Item(
+        id: "\(key) subagents", kind: .action(.subagents(row.recent, on: !reading)), title: "Read Subagents", enabled: row.recent.subagents != nil,
+        checked: reading, hidden: row.recent.subagents == nil
+      ),
       Item(
         id: "\(key) pull request", kind: pr.map { .action(.open($0.address)) } ?? .line, title: pr.map { "Open Pull Request #\($0.number)" } ?? "Open Pull Request",
         enabled: pr != nil, hidden: pr == nil

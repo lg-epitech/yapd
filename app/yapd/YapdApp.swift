@@ -2,9 +2,10 @@ import AppKit
 import ServiceManagement
 
 // yapd in the menu bar: whether it's on, what it's doing, its mode, the
-// threads waiting on him, what he hasn't heard, to be caught up on, the threads
-// with the latest updates, each with a panel beside it to see more of it, hear
-// it again and mute it, and the card it's showing, in a panel under the icon.
+// threads waiting on him, what he hasn't heard, to be caught up on or cleared,
+// the threads with the latest updates, each with a panel beside it to see more
+// of it, hear it again, mute it and have its subagents read, and the card it's
+// showing, in a panel under the icon.
 // It only uses the API in docs/api.md, so another UI can do all of this too.
 
 @MainActor @Observable
@@ -126,6 +127,13 @@ final class Yapd {
     send("POST", "utterances", body: try? JSONEncoder().encode(Utterance.catchMeUp))
   }
 
+  /// Sets aside everything a catch-up would tell him of now, without reading any of it, so it counts as heard, as "clear the
+  /// catch-up" by voice does: no asking first, since "scratch that" by voice brings it back. The count drops as the state says
+  /// so. It only marks things heard: nothing reaches an agent.
+  func clearCatchUp() {
+    send("POST", "catchup/clear")
+  }
+
   func replay(_ update: Status.Update) {
     send("POST", "updates/\(update.id)/replay")
   }
@@ -144,6 +152,12 @@ final class Yapd {
   /// Takes a thread's mute off.
   func unmute(_ row: Status.Recent) {
     ask(Muting(row, on: false))
+  }
+
+  /// Has a thread's subagents read to him from now on, or kept to yapd again, a subagent's by the thread it's part of. Only what
+  /// yapd says changes: nothing is sent to the thread.
+  func subagents(_ row: Status.Recent, on: Bool) {
+    ask(Subagents(row, on: on))
   }
 
   /// What yapd tells of a thread for its panel, by its key, unless it doesn't know it, is too old to tell, or doesn't answer.

@@ -2,7 +2,7 @@ import Foundation
 
 /// A row's panel reads what yapd tells of its thread from any yapd, old or new, asks for it and mutes a thread for an hour by its
 /// key, and its card says what the thread is doing, its pull request, whether it's muted, and the latest told of it, from what
-/// the row has until yapd's details come, and when they never do.
+/// the row has until yapd's details come, and when they never do, and for a subagent's, the thread it's part of.
 @MainActor func checkDetails() {
   let api = URL(string: "http://127.0.0.1:4747")!
   let ok = { (status: Int) in HTTPURLResponse(url: api, statusCode: status, httpVersion: nil, headerFields: nil)! }
@@ -77,6 +77,18 @@ import Foundation
   let session = Status.Recent(key: "session:rig:claude:abc", machine: "rig", title: "Claude session on rig", text: "", at: "soon")
   let empty = Glance(session, details: nil, now: now)
   check(empty.place == "rig" && empty.latest == nil && empty.heard == nil, "shows a session with no project and nothing said of it")
+
+  // A subagent's card says the thread it's part of, by the title its row has; no other card says anything of it, whether its
+  // subagents are read or not.
+  let part = Status.Recent(
+    key: "t3:Rosie:7", machine: "Rosie", thread: "7", title: "Sol review: release blockers", project: row.project, text: "One release blocker is left.",
+    at: row.at, replayable: false, subagents: true, head: Status.Recent.Head(key: row.key, title: "Migrate the Tezos integration")
+  )
+  let reviewed = Glance(part, details: Details(key: part.key, machine: "Rosie", thread: "7", state: "idle"), now: now)
+  check(reviewed.title == "Sol review: release blockers" && reviewed.head == "Subagent of Migrate the Tezos integration", "says which thread a subagent is part of, not \(String(describing: reviewed.head))")
+  check(Glance(part, details: nil, now: now).head == reviewed.head, "says so from the row alone")
+  let reading = Status.Recent(key: row.key, machine: "Rosie", thread: "850299f8", title: row.title, text: row.text, at: row.at, subagents: true)
+  check(alone.head == nil && empty.head == nil && Glance(reading, details: nil, now: now).head == nil, "says nothing of it on a thread's card, nor a session's")
 
   // With yapd's details: all of it.
   let muted = Status.Recent(key: row.key, machine: "Rosie", thread: "850299f8", title: row.title, project: row.project, text: row.text, at: row.at, muted: true, until: "2026-10-02T15:00:00.000Z", unheard: 2)

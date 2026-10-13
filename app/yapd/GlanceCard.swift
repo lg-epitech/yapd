@@ -2,9 +2,9 @@ import AppKit
 import SwiftUI
 
 // The card at the top of a recent thread's panel, as Glance has it: what the
-// thread is, what it's doing, its branch and pull request, whether it's muted,
-// and the latest told of it. It only shows: what can be done with the thread
-// is in the menu's own items under it.
+// thread is, the thread a subagent is part of, what it's doing, its branch and
+// pull request, whether it's muted, and the latest told of it. It only shows:
+// what can be done with the thread is in the menu's own items under it.
 
 /// The card as a menu item's view, sized to it, and resized when it's swapped for one with more, as when yapd's details come.
 @MainActor
@@ -118,9 +118,11 @@ struct GlanceCard: View {
     var lines = 1
   }
 
-  /// What it's doing, its branch, its pull request, and whether it's muted or how much of it he hasn't heard.
+  /// The thread a subagent is part of, what it's doing, its branch, its pull request, and whether it's muted or how much of it
+  /// he hasn't heard.
   private var facts: [Fact] {
     [
+      glance.head.map { Fact(symbol: "arrow.turn.down.right", size: 11, tint: .secondary, text: $0, lines: 2) },
       glance.doing.map { Fact(symbol: "circle.fill", size: 7, tint: Glance.colour($0.tone), text: $0.line, lines: 2) },
       glance.branch.map { Fact(symbol: "arrow.triangle.branch", size: 11, tint: .secondary, text: $0) },
       glance.pr.map { Fact(symbol: "arrow.triangle.pull", size: 11, tint: .secondary, text: $0, lines: 2) },

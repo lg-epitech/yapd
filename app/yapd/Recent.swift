@@ -185,6 +185,21 @@ struct Muting: Asking, Equatable {
   }
 }
 
+/// Having a thread's subagents read to him from now on, as `PUT /threads/{key}/subagents`, or kept to yapd again, as `DELETE`: a
+/// subagent's row by the key of the thread it's part of, whose subagents they are, never its own, which yapd turns away.
+struct Subagents: Asking, Equatable {
+  let key: String
+  let on: Bool
+
+  init(_ row: Status.Recent, on: Bool) {
+    key = row.head?.key ?? row.key
+    self.on = on
+  }
+
+  var method: String { on ? "PUT" : "DELETE" }
+  var path: String { "threads/\(encoded(key))/subagents" }
+}
+
 /// Hearing a thread's latest update again, as `POST /threads/{key}/replay`.
 struct Replaying: Asking, Equatable {
   let key: String
