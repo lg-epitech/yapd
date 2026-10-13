@@ -6,14 +6,16 @@ import * as Missed from "./Missed.ts"
 import * as Mutes from "./Mutes.ts"
 import type * as Server from "./Server.ts"
 import type * as T3Live from "./T3Live.ts"
-import type * as Threads from "./Threads.ts"
+import * as Threads from "./Threads.ts"
 
 // The threads with the latest updates, as a menu lists them: each thread's
 // newest update or notice from the last week, newest first, whether yapd said
 // it or kept it quiet, with what the thread is called, its project and that
-// project's icon, and whether it's muted or waits on him. It's built from the
-// journal, so a restart keeps it, and built again whenever any of it changes.
-// What's said aloud of a thread lives elsewhere: this is only what's shown.
+// project's icon, and whether it's muted or waits on him. A thread's subagents
+// he has read to him are listed as one, by the newest of them. It's built from
+// the journal, so a restart keeps it, and built again whenever any of it
+// changes. What's said aloud of a thread lives elsewhere: this is only what's
+// shown.
 
 /** How far back a thread's latest counts. */
 const week = 7 * 24 * 60 * 60_000
@@ -106,6 +108,7 @@ export const make = (options: {
       const now = yield* Clock.currentTimeMillis
       const latest = yield* journal.latest(now - week, read)
       const muted = new Map((yield* mutes.list).map((mute) => [mute.key, mute]))
+      const reading = new Map((yield* mutes.reading).map((thread) => [thread.key, thread]))
       const missed = options.missed === undefined ? [] : yield* options.missed
       const sessions = latest.some(sessionRow) || missed.some(({ rows }) => rows.some(sessionRow))
       // The session of each thread's latest update, even when what came since, like a question it asked, has none, and, beside a
@@ -157,7 +160,16 @@ export const make = (options: {
           const by = sessions.map((own) => Mutes.key.session(machine, own))
           under.set(key, by)
           entries.set(key, { id: last.id, full: Missed.full(last) })
-          const mute = [key, ...by].map((key) => muted.get(key)).find((mute) => mute !== undefined)
+          // One of T3 Code's own subagents', listed for the thread it's part of, which keeps it quiet when that's muted, and whose its
+          // subagents are read.
+          const part = Missed.subagent(kept)
+          const head = Mutes.headKept(kept)
+          const of = Option.flatMap(Option.fromNullable(head), Mutes.parse)
+          const headTitle =
+            Option.isNone(of) || of.value._tag !== "Thread"
+              ? undefined
+              : Option.getOrUndefined(Option.map(yield* threads.find(of.value.ref), ({ title }) => title))
+          const mute = [key, ...by, ...(head === undefined ? [] : [head])].map((key) => muted.get(key)).find((mute) => mute !== undefined)
           const thread = session ? Option.none() : yield* threads.find({ machine, id })
           // Its machine's threads not in yet, what it's called and its project are looked for again soon. Never for a session's own
           // row, which T3 Code never names, as for one from a machine yapd doesn't follow, which it never sees.
@@ -189,8 +201,12 @@ export const make = (options: {
             muted: mute !== undefined,
             ...(mute?.ends === undefined ? {} : { until: new Date(mute.ends).toISOString() }),
             waiting: Option.exists(thread, ({ pendingRuntimeRequest }) => pendingRuntimeRequest !== null),
-            replayable: Option.isSome(still) || reachable(thread),
+            // A subagent's only while what it said is still among what he heard: "it" afterwards could act on nothing, as for a session's.
+            replayable: Option.isSome(still) || (!part && reachable(thread)),
             ...(options.missed === undefined ? {} : { unheard: unheardOf(machine, [id, ...sessions, ...(found.get(kept)?.all ?? [])]) }),
+            // Every thread's, a subagent's by the thread it's part of: never a session's.
+            ...(session || (part && head === undefined) ? {} : { subagents: reading.has(head ?? key) }),
+            ...(head === undefined ? {} : { head: { key: head, title: headTitle ?? reading.get(head)?.called ?? "A thread" } }),
           } satisfies Server.Recent
         }),
       )
@@ -250,13 +266,14 @@ export const make = (options: {
 type Speaker = Pick<Effect.Effect.Success<ReturnType<typeof Daemon.make>>, "latestHeard" | "replay" | "power" | "tell">
 
 /**
- * What the menu does to a thread it lists, by its key: mutes it, which never
- * reaches an agent, or says its latest update again.
+ * What the menu does to a thread it lists, by its key: mutes it, or has its
+ * subagents read to him or not, which never reach an agent, or says its
+ * latest update again.
  */
 export const menu = (options: {
   readonly latest: Latest
   readonly threads: Pick<Threads.Threads["Type"], "find">
-  readonly mutes: Pick<Mutes.Mutes, "muted">
+  readonly mutes: Pick<Mutes.Mutes, "muted" | "reads">
   readonly controls: Mutes.Controls
   readonly daemon: Speaker
   /** Makes "it" the thread what's said is about, as an answer about it does. */
@@ -281,6 +298,26 @@ export const menu = (options: {
         const project = row?.project?.name
         yield* controls.mute({ key, ...(title === undefined ? {} : { called: title }), ...(project === undefined ? {} : { project }) }, until)
         return "muted" as const
+      }),
+    /**
+     * Has a thread's subagents read to him from now on, or no longer, by its
+     * key: one it lists, one T3 Code has, with subagents yet or not, or one
+     * whose subagents are read already. Never a session's, which has none of
+     * T3 Code's, nor a subagent's own, which are read by the thread it's part
+     * of.
+     */
+    subagents: (key: string, on: boolean) =>
+      Effect.gen(function* () {
+        const about = Mutes.parse(key)
+        if (Option.isNone(about) || about.value._tag !== "Thread") return "invalid" as const
+        const row = (yield* latest.current).find((row) => row.key === key)
+        const found = yield* threads.find(about.value.ref)
+        if (row?.head !== undefined || Option.exists(found, Threads.subagent)) return "subagent" as const
+        if (row === undefined && Option.isNone(found) && !(yield* mutes.reads(key))) return "unknown" as const
+        const title = row?.title ?? Option.getOrUndefined(Option.map(found, ({ title }) => title))
+        const project = row?.project?.name
+        yield* controls.subagents({ key, ...(title === undefined ? {} : { called: title }), ...(project === undefined ? {} : { project }) }, on)
+        return "done" as const
       }),
     /**
      * Says a thread's latest update again, by its key, all of it, its "more"
@@ -374,7 +411,7 @@ const told = (kept: Kept, unheard: ReadonlySet<number>): Server.Told => {
 export const details = (options: {
   readonly latest: Pick<Latest, "current" | "under">
   readonly threads: Pick<Threads.Threads["Type"], "find">
-  readonly mutes: Pick<Mutes.Mutes, "muted">
+  readonly mutes: Pick<Mutes.Mutes, "muted" | "reads">
   readonly journal: Pick<Journal["Type"], "byThread">
   /** Every thread yapd can see, as `/threads` lists them. */
   readonly listing: Effect.Effect<ReadonlyArray<Server.Machine>>
@@ -388,8 +425,10 @@ export const details = (options: {
       if (Option.isNone(about)) return Option.none<Server.Details>()
       const ref = about.value._tag === "Thread" ? about.value.ref : undefined
       const found = ref === undefined ? Option.none<T3Live.Thread>() : yield* threads.find(ref)
-      const mute = Option.getOrUndefined(yield* mutes.muted([key, ...(yield* latest.under(key))]))
       const row = (yield* latest.current).find((row) => row.key === key)
+      // One of T3 Code's own subagents, by the thread it's part of, as its row shows it, or up its chain as T3 Code has it now.
+      const head = row?.head ?? (ref === undefined || !Option.exists(found, Threads.subagent) ? undefined : yield* headOf(threads, ref))
+      const mute = Option.getOrUndefined(yield* mutes.muted([key, ...(yield* latest.under(key)), ...(head === undefined ? [] : [head.key])]))
       if (row === undefined && Option.isNone(found) && mute === undefined) return Option.none<Server.Details>()
       // A session is kept under its agent and its own id for it.
       const { machine, id } = about.value._tag === "Thread" ? about.value.ref : { machine: about.value.machine, id: `${about.value.agent}:${about.value.session}` }
@@ -415,7 +454,30 @@ export const details = (options: {
         ...(listed?.pr === undefined ? {} : { pr: listed.pr }),
         muted: mute !== undefined,
         ...(mute?.ends === undefined ? {} : { until: new Date(mute.ends).toISOString() }),
+        // Every thread's, a subagent's by the thread it's part of: never a session's.
+        ...(ref === undefined || (head === undefined && Option.exists(found, Threads.subagent)) ? {} : { subagents: yield* mutes.reads(head?.key ?? key) }),
+        ...(head === undefined ? {} : { head }),
         updates: updates.slice(0, panel).map((kept) => told(kept, unheard)),
       } satisfies Server.Details)
     })
 }
+
+/**
+ * The thread a subagent is part of, by its key and title, up its chain as
+ * its machine's T3 Code has it now, as `Threads.head` goes: none when the
+ * chain is broken.
+ */
+const headOf = (threads: Pick<Threads.Threads["Type"], "find">, ref: Threads.Ref) =>
+  Effect.gen(function* () {
+    const seen = new Map<string, T3Live.Thread>()
+    let current = yield* threads.find(ref)
+    // Each thread up the chain, as far as it goes, which `Threads.head` then follows.
+    for (let step = 0; step <= 8 && Option.isSome(current); step++) {
+      seen.set(current.value.id, current.value)
+      const parent = current.value.lineage?.parentThreadId
+      current = parent === null || parent === undefined || seen.has(parent) ? Option.none() : yield* threads.find({ machine: ref.machine, id: parent })
+    }
+    const start = seen.get(ref.id)
+    const top = start === undefined ? Option.none<T3Live.Thread>() : Threads.head({ threads: seen }, start)
+    return Option.getOrUndefined(Option.map(top, ({ id, title }) => ({ key: Mutes.key.thread({ machine: ref.machine, id }), title })))
+  })

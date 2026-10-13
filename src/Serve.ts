@@ -448,10 +448,16 @@ export const serve = Effect.gen(function* () {
     digest: assistant.digest,
     rundown: assistant.rundown,
   })
-  // What the menu does to a thread it lists: mute it, or hear it again.
-  const { mute, replayThread } = Latest.menu({ latest, threads, mutes, controls, daemon, mention: assistant.mention, journal })
+  // What the menu does to a thread it lists: mute it, have its subagents read or not, or hear it again.
+  const { mute, subagents, replayThread } = Latest.menu({ latest, threads, mutes, controls, daemon, mention: assistant.mention, journal })
   // Every thread it can see, not only the likeliest, in the order the desk puts them.
-  const served = Show.served(show, threads.desk(Option.none(), [], Number.MAX_SAFE_INTEGER), journal.page, Effect.map(mutes.list, (all) => new Set(all.map(({ key }) => key))))
+  const served = Show.served(
+    show,
+    threads.desk(Option.none(), [], Number.MAX_SAFE_INTEGER),
+    journal.page,
+    Effect.map(mutes.list, (all) => new Set(all.map(({ key }) => key))),
+    Effect.map(mutes.reading, (all) => new Set(all.map(({ key }) => key))),
+  )
   yield* Server.serve(yield* Config.port, {
     handle: daemon.handle,
     state: Show.stated(state, show),
@@ -468,6 +474,7 @@ export const serve = Effect.gen(function* () {
     ...served,
     mute,
     unmute: (key) => Effect.asVoid(controls.unmute(key)),
+    subagents,
     replayThread,
     // What a panel beside a row shows of its thread, what it's doing and its pull request as /threads has them, and what he hasn't heard as
     // its row counts it.

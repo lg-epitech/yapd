@@ -144,7 +144,11 @@ export class Journal extends Context.Tag("yapd/Journal")<
      * turn took the place of, as with all that reads what he hasn't heard.
      */
     readonly unheard: (at: number, most: number, muted?: boolean, held?: boolean) => Effect.Effect<ReadonlyArray<Kept>>
-    /** Each thread's newest update or notice since `at`, newest first, `most` threads at most. */
+    /**
+     * Each thread's newest update or notice since `at`, newest first, `most`
+     * threads at most: the subagents of each thread as one, by the newest of
+     * them, and none kept to yapd, which never takes a thread's place.
+     */
     readonly latest: (at: number, most: number) => Effect.Effect<ReadonlyArray<Kept>>
     /** Notes that these were kept quiet because he muted their thread, like updates dropped as he did. */
     readonly mute: (ids: ReadonlyArray<number>) => Effect.Effect<void>
@@ -305,6 +309,12 @@ const told: ReadonlySet<Kind> = new Set<Kind>(["update", "notice"])
 
 /** Whether a row was kept quiet because he muted its thread, as SQLite reads its detail. */
 const quiet = "coalesce(json_extract(detail, '$.muted'), 0)"
+
+/** Whether a row is one of T3 Code's own subagents', as SQLite reads its detail. */
+const ofSubagent = "coalesce(json_extract(detail, '$.subagent'), 0)"
+
+/** What a row's thread is listed as: a subagent's as the thread it's part of, so they're listed as one. */
+const partOf = `case when ${ofSubagent} then 'head:' || coalesce(json_extract(detail, '$.head'), thread) else thread end`
 
 /** Whether a row was held for later, as SQLite reads its detail. */
 const heldBack = "(json_extract(detail, '$.held') is not null)"
@@ -478,11 +488,13 @@ export const fromStore = (
       reading(
         store.transaction((database: Database) =>
           database
-            // By when each happened, not when it was kept: an update summed up slowly can be kept after a newer notice.
+            // By when each happened, not when it was kept: an update summed up slowly can be kept after a newer notice. A muted thread keeps its
+            // row, where he unmutes it, but a subagent's kept quiet never takes one.
             .query<Row, [number, number]>(
               `select * from (
-                 select *, row_number() over (partition by machine, thread order by at desc, id desc) as rank
+                 select *, row_number() over (partition by machine, ${partOf} order by at desc, id desc) as rank
                  from journal where kind in ('update', 'notice') and thread is not null and at >= ?
+                   and not (${ofSubagent} and ${quiet})
                ) where rank = 1 order by at desc, id desc limit ?`,
             )
             .all(at, most)

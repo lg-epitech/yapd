@@ -656,9 +656,10 @@ export const readable = (text: string) => {
 /**
  * The threads on each machine as `/threads` lists them, those that need him
  * first, each with the key it's muted by and whether it is, by the keys in
- * `muted`, and the machines it can't see with why.
+ * `muted`, and whether its subagents are read to him, by those in `read`,
+ * and the machines it can't see with why.
  */
-export const listing = (desk: Threads.Desk, muted: ReadonlySet<string> = new Set()): ReadonlyArray<Server.Machine> => {
+export const listing = (desk: Threads.Desk, muted: ReadonlySet<string> = new Set(), read: ReadonlySet<string> = new Set()): ReadonlyArray<Server.Machine> => {
   const machines = [...new Set(desk.threads.map(({ ref }) => ref.machine))]
   return [
     ...machines.map((machine) => ({
@@ -669,6 +670,7 @@ export const listing = (desk: Threads.Desk, muted: ReadonlySet<string> = new Set
           id: listed.ref.id,
           key: Mutes.key.thread(listed.ref),
           muted: muted.has(Mutes.key.thread(listed.ref)),
+          subagents: read.has(Mutes.key.thread(listed.ref)),
           project: listed.project,
           title: listed.thread.title,
           state: listed.state,
@@ -740,11 +742,12 @@ export const served = (
   desk: Effect.Effect<Threads.Desk>,
   page: (page: Server.Page) => Effect.Effect<ReadonlyArray<Kept>>,
   muted: Effect.Effect<ReadonlySet<string>> = Effect.succeed(new Set()),
+  read: Effect.Effect<ReadonlySet<string>> = Effect.succeed(new Set()),
 ): Pick<Server.Api, "card" | "hide" | "back" | "threads" | "journal" | "watch"> => ({
   card: (id) => Effect.map(show.card(id), Option.map(face)),
   hide: (id, shown) => Effect.asVoid(show.hide(id, shown)),
   back: show.back,
-  threads: Effect.map(Effect.zip(desk, muted), ([desk, muted]) => listing(desk, muted)),
+  threads: Effect.map(Effect.all([desk, muted, read]), ([desk, muted, read]) => listing(desk, muted, read)),
   journal: (asked) => Effect.map(page(asked), (kept) => kept.map(entry)),
   watch: show.watch,
 })

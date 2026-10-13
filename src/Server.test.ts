@@ -19,7 +19,7 @@ const machines: ReadonlyArray<Server.Machine> = [
   {
     machine: "Rosie",
     threads: [
-      { id: "850299f8", key: "t3:Rosie:850299f8", muted: false, project: "integration", title: "Migrate the Tezos integration", state: "running", since: "2026-10-02T09:40:00.000Z" },
+      { id: "850299f8", key: "t3:Rosie:850299f8", muted: false, subagents: false, project: "integration", title: "Migrate the Tezos integration", state: "running", since: "2026-10-02T09:40:00.000Z" },
     ],
   },
   { machine: "rig", reason: "I can't see rig's threads yet.", threads: [] },
@@ -58,6 +58,7 @@ const hooks = (handle: Server.Handle): Server.Api => ({
   mute: () => Effect.succeed("unknown"),
   unmute: () => Effect.void,
   replayThread: () => Effect.succeed("unknown"),
+  subagents: () => Effect.succeed("unknown"),
   details: () => Effect.succeedNone,
   icon: () => Effect.succeedNone,
 })
@@ -75,10 +76,13 @@ const stateful = Effect.gen(function* () {
   /** The threads it lists, and which are muted, until when. */
   const known = new Set(["t3:Rosie:850299f8", "session:rig:claude:s-1"])
   const muted = new Map<string, number | undefined>()
+  /** The threads whose subagents are read to him. */
+  const reading = new Set<string>()
   return {
     ref,
     pages,
     muted,
+    reading,
     watching: () => watching,
     api: {
       mute: (key, until) =>
@@ -89,6 +93,16 @@ const stateful = Effect.gen(function* () {
           return "muted" as const
         }),
       unmute: (key) => Effect.sync(() => void muted.delete(key)),
+      // A review T3 Code runs for the thread it lists is one of its subagents.
+      subagents: (key, on) =>
+        Effect.sync(() => {
+          if (!key.startsWith("t3:")) return "invalid" as const
+          if (key === "t3:Rosie:review") return "subagent" as const
+          if (!known.has(key)) return "unknown" as const
+          if (on) reading.add(key)
+          else reading.delete(key)
+          return "done" as const
+        }),
       // A session's row it can't say again is turned away, as one yapd can't reach is.
       replayThread: (key) =>
         Effect.map(SubscriptionRef.get(ref), (state) => (!known.has(key) ? "unknown" : key.startsWith("session:") ? "unreachable" : state.on ? "queued" : "off")),
@@ -523,6 +537,30 @@ describe("Server", () => {
       // Unmuted, or not muted at all.
       expect(unmuted).toEqual([204, 204, 400, 400])
       expect([...muted.keys()]).toEqual(["session:rig:claude:s-1"])
+    })))
+  })
+
+  test("has a thread's subagents read or not by its key, and turns away a session's, a subagent's own, or one it doesn't know", async () => {
+    await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
+      const { api, reading } = yield* stateful
+      const server = yield* Server.serve(0, api)
+      const url = `http://127.0.0.1:${server.port}`
+      const call = (path: string, method: string) => Effect.promise(() => fetch(`${url}${path}`, { method }).then((response) => response.status))
+      const key = encodeURIComponent("t3:Rosie:850299f8")
+      const statuses = {
+        on: yield* call(`/threads/${key}/subagents`, "PUT"),
+        again: yield* call(`/threads/${key}/subagents`, "PUT"),
+        session: yield* call(`/threads/${encodeURIComponent("session:rig:claude:s-1")}/subagents`, "PUT"),
+        subagent: yield* call(`/threads/${encodeURIComponent("t3:Rosie:review")}/subagents`, "PUT"),
+        unknown: yield* call(`/threads/${encodeURIComponent("t3:Rosie:nope")}/subagents`, "PUT"),
+        undecodable: yield* call("/threads/%E0%A4%A/subagents", "PUT"),
+      }
+      const readThen = [...reading]
+      const off = [yield* call(`/threads/${key}/subagents`, "DELETE"), yield* call(`/threads/${key}/subagents`, "DELETE")]
+      expect(statuses).toEqual({ on: 204, again: 204, session: 400, subagent: 409, unknown: 404, undecodable: 400 })
+      expect(readThen).toEqual(["t3:Rosie:850299f8"])
+      expect(off).toEqual([204, 204])
+      expect([...reading]).toEqual([])
     })))
   })
 

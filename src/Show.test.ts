@@ -120,11 +120,12 @@ const situation = (threads: ReadonlyArray<Threads.Listed>, away: Threads.Desk["a
 
 /** yapd's API serving `show`'s cards and nothing else, and how an app asks it what revision it's at and to put a card back up. */
 /** What the API does with threads' mutes, details and icons, here nothing: no thread is known. */
-const unmuted: Pick<Server.Api, "mute" | "unmute" | "replayThread" | "details" | "icon" | "mode"> = {
+const unmuted: Pick<Server.Api, "mute" | "unmute" | "replayThread" | "subagents" | "details" | "icon" | "mode"> = {
   mode: () => Effect.void,
   mute: () => Effect.succeed("unknown"),
   unmute: () => Effect.void,
   replayThread: () => Effect.succeed("unknown"),
+  subagents: () => Effect.succeed("unknown"),
   details: () => Effect.succeedNone,
   icon: () => Effect.succeedNone,
 }
@@ -645,13 +646,15 @@ describe("Show", () => {
       },
       // He muted the Tezos one, and rig's relay, by their keys.
       new Set([`t3:Rosie:${tezos.id}`, `t3:rig:${relay.id}`]),
+      // And has the build cleanup's subagents read to him.
+      new Set([`t3:Rosie:${waiting.id}`]),
     )
-    const keyed = (machine: string, id: string, muted = false) => ({ key: `t3:${machine}:${id}`, muted })
+    const keyed = (machine: string, id: string, muted = false, subagents = false) => ({ key: `t3:${machine}:${id}`, muted, subagents })
     expect(machines).toEqual([
       {
         machine: "Rosie",
         threads: [
-          { id: waiting.id, ...keyed("Rosie", waiting.id), project: "yapd", title: "Clean up the build", state: "approval", since: "2026-10-08T21:55:00.000Z" },
+          { id: waiting.id, ...keyed("Rosie", waiting.id, false, true), project: "yapd", title: "Clean up the build", state: "approval", since: "2026-10-08T21:55:00.000Z" },
           {
             id: tezos.id,
             ...keyed("Rosie", tezos.id, true),

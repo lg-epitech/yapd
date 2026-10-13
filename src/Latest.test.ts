@@ -167,6 +167,7 @@ describe("Latest", () => {
       muted: false,
       waiting: false,
       replayable: true,
+      subagents: false,
     })
   })
 
@@ -244,6 +245,56 @@ describe("Latest", () => {
     expect(result.forgotten).toEqual({ ...result.first, "session:Rosie:claude:s-heard": false })
     expect(result.away).toEqual({ ...result.forgotten, "t3:rig:t-rig": false })
     expect(result.found).toBe(false)
+  })
+
+  test("a thread's subagents read to him take one row, the newest, by the thread they're part of, kept quiet when it's muted; those kept to yapd take none, though a muted thread keeps its row", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const of = { lineage: { parentThreadId: "t-jarvis", relationshipToParent: "subagent" } }
+        const { latest, journal, mutes } = yield* listing({
+          Rosie: [
+            thread("t-jarvis", "Reimagine Yapd as a Jarvis Companion"),
+            thread("t-tezos", "Migrate the Tezos integration"),
+            thread("t-held", "Sol review: first pass", of),
+            thread("t-review", "Sol review: release blockers", of),
+            thread("t-review2", "Sol review: second pass", of),
+          ],
+        })
+        yield* mutes.read({ key: "t3:Rosie:t-jarvis" }, true)
+        const part = (session: string) => ({ session, subagent: true, head: "t-jarvis" })
+        yield* journal.write({ at: 1, kind: "update", machine: "Rosie", thread: "t-review", said: "For the Jarvis work: one blocker.", detail: part("codex:s-review") })
+        yield* journal.write({ at: 2, kind: "update", machine: "Rosie", thread: "t-review2", said: "For the Jarvis work: clean.", detail: part("codex:s-review2") })
+        // Kept to yapd, newer than both, it never takes their row.
+        yield* journal.write({ at: 3, kind: "update", machine: "Rosie", thread: "t-held", said: "For the Jarvis work: nits.", detail: { ...part("codex:s-held"), muted: true } })
+        yield* journal.write({ at: 4, kind: "update", machine: "Rosie", thread: "t-tezos", said: "integration. Halfway.", detail: { session: "claude:s-tezos", muted: true } })
+        yield* journal.write({ at: 5, kind: "update", machine: "Rosie", thread: "t-jarvis", said: "yapd. Merged.", detail: { session: "claude:s-jarvis" } })
+        yield* TestClock.adjust("250 millis")
+        yield* flush
+        const rows = (yield* latest.current).map(({ key, title, muted, subagents, head, replayable }) => ({ key, title, muted, subagents, head, replayable }))
+        yield* mutes.mute({ key: "t3:Rosie:t-jarvis" })
+        yield* TestClock.adjust("250 millis")
+        yield* flush
+        return { rows, muted: (yield* latest.current).map(({ key, muted }) => [key, muted]) }
+      }),
+    )
+    expect(result.rows).toEqual([
+      { key: "t3:Rosie:t-jarvis", title: "Reimagine Yapd as a Jarvis Companion", muted: false, subagents: true, head: undefined, replayable: true },
+      { key: "t3:Rosie:t-tezos", title: "Migrate the Tezos integration", muted: false, subagents: false, head: undefined, replayable: true },
+      // Titled as T3 Code titles it, and heard again only while what it said is among what he heard, which it isn't.
+      {
+        key: "t3:Rosie:t-review2",
+        title: "Sol review: second pass",
+        muted: false,
+        subagents: true,
+        head: { key: "t3:Rosie:t-jarvis", title: "Reimagine Yapd as a Jarvis Companion" },
+        replayable: false,
+      },
+    ])
+    expect(result.muted).toEqual([
+      ["t3:Rosie:t-jarvis", true],
+      ["t3:Rosie:t-tezos", false],
+      ["t3:Rosie:t-review2", true],
+    ])
   })
 
   test("a session's own row is the thread's once the thread shows an update of it, as when its link timed out once, and a session's mute shows on its thread", async () => {
@@ -595,6 +646,27 @@ describe("Latest", () => {
         { key: "t3:Rosie:t-tezos", called: "Migrate the Tezos integration", project: undefined, ends: 10 * 60_000 },
       ])
     })
+
+    test("has the subagents of a thread T3 Code has read, with subagents yet or not, but never a session's, a subagent's own or a thread it doesn't know", async () => {
+      const result = await run(
+        Effect.gen(function* () {
+          const review = thread("t-review", "Sol review", { lineage: { parentThreadId: "t-tezos", relationshipToParent: "subagent" } })
+          const { journal, menu, mutes, settle } = yield* menuOf([], true, { Rosie: [thread("t-tezos", "Migrate the Tezos integration"), review] })
+          yield* journal.write({ at: 1, kind: "update", host: "Rosie", thread: "claude:s-term", directory: "/code/integration", project: "integration", said: "integration. Done." })
+          yield* settle
+          const outcomes = [
+            yield* menu.subagents("t3:Rosie:t-tezos", true),
+            yield* menu.subagents("session:Rosie:claude:s-term", true),
+            yield* menu.subagents("t3:Rosie:t-review", true),
+            yield* menu.subagents("t3:Rosie:t-nope", true),
+            yield* menu.subagents("whatever", true),
+          ]
+          return { outcomes, reading: (yield* mutes.reading).map(({ key, called }) => [key, called]) }
+        }),
+      )
+      expect(result.outcomes).toEqual(["done", "invalid", "subagent", "unknown", "invalid"])
+      expect(result.reading).toEqual([["t3:Rosie:t-tezos", "Migrate the Tezos integration"]])
+    })
   })
 
   describe("details", () => {
@@ -626,6 +698,7 @@ describe("Latest", () => {
             id: "t-tezos",
             key: "t3:Rosie:t-tezos",
             muted: true,
+            subagents: false,
             project: "integration",
             title: "Migrate the Tezos integration",
             state: "running",
@@ -666,6 +739,7 @@ describe("Latest", () => {
         state: "running",
         since: "2026-10-12T13:40:00.000Z",
         branch: "t3/tezos",
+        subagents: false,
         pr: { number: 412, url: "https://github.com/lg-epitech/integration/pull/412", state: "open", checks: "passing" },
         muted: true,
         until: at(60 * 60_000),
@@ -711,8 +785,8 @@ describe("Latest", () => {
           shown: { key: "session:Rosie:claude:term", machine: "Rosie", thread: null, muted: false, updates: [{ id: term, at: at(1), kind: "update", said: "The terminal one is done.", unheard: true }] },
           unchanged: true,
         },
-        archived: { shown: { key: "t3:Rosie:t-old", machine: "Rosie", thread: "t-old", muted: false, updates: [] }, unchanged: true },
-        muted: { shown: { key: "t3:rig:t-rig", machine: "rig", thread: "t-rig", muted: true, updates: [] }, unchanged: true },
+        archived: { shown: { key: "t3:Rosie:t-old", machine: "Rosie", thread: "t-old", muted: false, subagents: false, updates: [] }, unchanged: true },
+        muted: { shown: { key: "t3:rig:t-rig", machine: "rig", thread: "t-rig", muted: true, subagents: false, updates: [] }, unchanged: true },
         unknown: { shown: undefined, unchanged: true },
         notKey: { shown: undefined, unchanged: true },
       })
@@ -785,6 +859,7 @@ describe("Latest", () => {
         machine: "rig",
         thread: "t-rig",
         muted: false,
+        subagents: false,
         updates: [
           { id: result.sent, at: at(2), kind: "sent", text: "Ship it." },
           { id: result.done, at: at(1), kind: "update", said: "rig, done.", unheard: true },
