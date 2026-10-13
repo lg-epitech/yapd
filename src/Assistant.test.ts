@@ -11422,7 +11422,7 @@ describe("Assistant reminders", () => {
             if (heard.startsWith("Tell the Tezos one")) return Brain.decision({ act: "send", target: handle(situation, tezos), text: "Use the fee table.", how: "now", rest: "let me know when it finishes" })
             if (heard === "let me know when it finishes") return Brain.decision({ act: "remind", how: "finished", target: handle(situation, tezos) })
             if (heard === "Take back the message to the Tezos one.") return Brain.decision({ act: "undo", target: handle(situation, tezos), how: "message" })
-            if (heard === "tell the Mina one to rebase") return Brain.decision({ act: "send", target: handle(situation, mina), text: "Rebase.", how: "now" })
+            if (heard === "Tell the Mina one to rebase.") return Brain.decision({ act: "send", target: handle(situation, mina), text: "Rebase.", how: "now" })
             if (heard === "Cancel that reminder.") return Brain.decision({ act: "undo", how: "reminder" })
             return undefined
           },
