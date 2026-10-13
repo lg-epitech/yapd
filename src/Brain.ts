@@ -2310,7 +2310,10 @@ const alsoCredentials = new RegExp(
  * it, which may say what else: a key, a token, a secret, a code or a
  * combination. A code an app's name ends in, like T3 Code's, is never one.
  */
-const vague = /(?<![a-z0-9])((?:t3|claude|vs|studio) (?=code))?(key|token|secret|code|combination|combo)(s?)(?![a-z0-9])(?=(?:[ -]([a-z]+))?)/gi
+const vague = new RegExp(
+  String.raw`(?<![a-z0-9])((?:${T3Actions.codeApps}) (?=code))?(key|token|secret|code|combination|combo)(s?)(?![a-z0-9])(?=(?:[ -]([a-z]+))?)`,
+  "gi",
+)
 
 /**
  * What a key, a token, a secret or a code is when the word after it says so,
@@ -2325,39 +2328,31 @@ const somethingElse: Readonly<Record<string, ReadonlySet<string>>> = {
   code: new Set(["base", "bases", "review", "reviews", "style", "path", "paths"]),
 }
 
-/** What could say what one is, before it: "hunter2 is my Vercel token". */
-const being = /(?<![a-z0-9])(?:is|are|was|were|equals)(?![a-z0-9])/i
-
-/** What could set one to its value, or say what it is, after it: "is", "was", "are", "'s", a colon, an equals sign, a comma or a dash. */
-const setting = /(?<![a-z0-9])(?:is|are|was|were|am|be|been|being|equals)(?![a-z0-9])|['’]s(?![a-z0-9])|[:=,;—–]|\s-|-\s/i
-
 /**
- * Whether what's said may give one of those words' values: one that isn't
- * an app's name or what the word after it says, with anything after it that
- * could set or say what it is, a sentence away too, as in "my Vercel token.
- * It's …", or "is" before it, as in "… is my Vercel token".
+ * Whether what's said mentions one of those words that isn't an app's name or
+ * what the word after it says, however it's put, since its value can come
+ * anywhere, as in "my Vercel token hunter2" or "hunter2 is my Vercel token".
  */
-const givesVague = (words: string) =>
+const mentionsVague = (words: string) =>
   [...words.matchAll(vague)].some(
-    ({ 0: found, 1: app, 2: name, 3: plural, 4: after, index }) =>
-      app === undefined &&
-      (plural !== "" || !somethingElse[name!.toLowerCase()]?.has(after?.toLowerCase() ?? "")) &&
-      (being.test(words.slice(0, index)) || setting.test(words.slice(index + found.length))),
+    ({ 1: app, 2: name, 3: plural, 4: after }) =>
+      app === undefined && (plural !== "" || !somethingElse[name!.toLowerCase()]?.has(after?.toLowerCase() ?? "")),
   )
 
 /**
  * Whether what he asked to be kept in mind may give a secret away, in all he
- * said or in what the model made of it: whatever looks like one; anything
- * that names a password, a PIN, a recovery phrase, a login or similar, even
- * one that isn't secret, like the name of his password manager; or a key, a
- * token, a secret or a code with anything that could say what it is. Refused
- * broadly, since a secret kept is in every prompt. It's refused as a secret
+ * said or in what the model made of it: whatever looks like one; or anything
+ * that names a password, a PIN, a recovery phrase, a login, a key, a token, a
+ * secret, a code or similar, even one that isn't secret, like the name of his
+ * password manager. Refused broadly, since a secret kept is in every prompt,
+ * and still only a best effort: one said without any word that names it,
+ * like "the garage opens with 4827", gets through. It's refused as a secret
  * before anything else would turn it down, since only that keeps his words
  * out of the journal.
  */
 export const secretive = (choice: Pick<Decision, "text">, utterance: Pick<Assistant.Utterance, "heard" | "whole">) =>
   [utterance.heard, utterance.whole ?? "", choice.text].some(
-    (words) => T3Actions.revealing(words) || T3Actions.namesCredential(words) || alsoCredentials.test(words) || givesVague(words),
+    (words) => T3Actions.revealing(words) || T3Actions.namesCredential(words) || alsoCredentials.test(words) || mentionsVague(words),
   )
 
 /** What's said of what can't be kept in mind, or forgotten. */

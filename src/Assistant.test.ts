@@ -12328,7 +12328,7 @@ describe("Assistant memories", () => {
     expect(result.journal).not.toContain("4 8 2 7")
   })
 
-  test("a fact that mentions a password, a PIN, a recovery phrase, a login or similar, or gives a key, a token, a secret or a code, isn't remembered, while one that only uses those words for something else is", async () => {
+  test("a fact that mentions a password, a PIN, a recovery phrase, a login, a key, a token, a secret, a code or similar, however it's said, isn't remembered, while one that only uses those words for something else or in an app's name is", async () => {
     const refused = [
       "my password for GitHub is hunter2",
       "the GitHub password: hunter2",
@@ -12350,8 +12350,15 @@ describe("Assistant memories", () => {
       "as for my GitHub password, it's hunter2",
       "hunter2 is my Vercel token",
       "my Vercel token, hunter2",
+      // However it's said, or Whisper writes it down.
+      "my Vercel token hunter2",
+      "the Wi-Fi pass is fennel42",
+      "my AWS creds are laurent and hunter2",
+      "my seed is abandon ability able about",
+      "the Mina database is postgres://admin:hunter2@rig:5432/mina",
+      "the CVV is 123",
     ]
-    const kept = ["the Tezos repo uses pnpm", "rig's key bindings are vim-style", "the token budget is tight", "the Mina repo needs Node 22"]
+    const kept = ["the Tezos repo uses pnpm", "rig's key bindings are vim-style", "the token budget is tight", "the Mina repo needs Node 22", "T3 Code is on the nightly"]
     const facts = [...refused, ...kept]
     const result = await run(
       Effect.gen(function* () {
@@ -12373,7 +12380,7 @@ describe("Assistant memories", () => {
     )
     expect(result.said.slice(0, refused.length)).toEqual(refused.map(() => "I won't keep that, sir. It looks like a secret."))
     expect(result.kept).toEqual(kept)
-    for (const value of ["hunter2", "fennel42", "8kq2zz", "4827", "apple banana", "12 34 56"]) expect(result.journal).not.toContain(value)
+    for (const value of ["hunter2", "fennel42", "8kq2zz", "4827", "apple banana", "12 34 56", "abandon ability"]) expect(result.journal).not.toContain(value)
   })
 
   test("a secret the model's answer says back is said, but kept in the journal and logged nowhere", async () => {
@@ -12508,8 +12515,8 @@ describe("Assistant memories", () => {
 
   describe("a routine's steps never reach the model but by its name", () => {
     // Words of his own, never the example the model is shown.
-    const steps = "have Codex audit the fee code twice"
-    const defining = "When I say review it, have Codex audit the fee code twice."
+    const steps = "have Codex audit the fee tables twice"
+    const defining = "When I say review it, have Codex audit the fee tables twice."
     /** Every section of what the model is told for what he said last, which only code can put a routine's steps in. */
     const told = (made: { readonly seen: ReadonlyArray<Brain.Situation> }) => Brain.prompt(made.seen.at(-1)!, Option.none())
     const routine = (situation: Brain.Situation) => Brain.remembered(situation).find(({ name }) => name === "review it")?.handle ?? ""
@@ -12532,9 +12539,9 @@ describe("Assistant memories", () => {
         }),
       )
       // He hears the steps read back, and the journal keeps what was heard and said as it was.
-      expect(result.said).toBe("Noted, sir. Review it: have Codex audit the fee code twice.")
+      expect(result.said).toBe("Noted, sir. Review it: have Codex audit the fee tables twice.")
       expect(result.journaled).toContainEqual(["dictation", defining])
-      expect(result.journaled).toContainEqual(["action", "Noted, sir. Review it: have Codex audit the fee code twice."])
+      expect(result.journaled).toContainEqual(["action", "Noted, sir. Review it: have Codex audit the fee tables twice."])
       expect(result.prompt).not.toContain(steps)
       expect(result.prompt).toContain("he asked you to keep his routine «review it»")
       expect(result.prompt).toContain("you kept his routine «review it», reading its steps back to him")
@@ -12619,8 +12626,8 @@ describe("Assistant memories", () => {
         }),
       )
       // He hears the steps, as for any offer.
-      expect(result.set).toMatch(/I'll offer to tell Open Mina SSV2 Bug Tickets: have Codex audit the fee code twice, sir\.$/)
-      expect(result.asked).toBe("Shall I tell Open Mina SSV2 Bug Tickets: have Codex audit the fee code twice, sir?")
+      expect(result.set).toMatch(/I'll offer to tell Open Mina SSV2 Bug Tickets: have Codex audit the fee tables twice, sir\.$/)
+      expect(result.asked).toBe("Shall I tell Open Mina SSV2 Bug Tickets: have Codex audit the fee tables twice, sir?")
       for (const prompt of [result.offered, result.due]) expect(prompt).not.toContain(steps)
       expect(result.offered).toContain("offer his routine «review it» to")
       expect(result.offered).toContain("you set an offer of his routine «review it»")
