@@ -2928,7 +2928,7 @@ export const make = (options: {
           yield* Effect.logWarning("Could not keep a reminder", kept.left)
           return reply(told.unwritten, thought.subject)
         }
-        noted = { at: now, kind: "reminder", id: kept.right.id }
+        noted = { at: now, kind: "reminder", id: kept.right.id, about: Reminders.ref(asked) }
         // A thread to hear finish that isn't at work now is heard of when it next finishes, which he's told.
         const running = listed === undefined || ["running", "finishing", "queued", "approval", "question"].includes(listed.state)
         const line = told.set(asked, called, running)
@@ -2947,7 +2947,7 @@ export const make = (options: {
         const told = Reminders.lines(said, now)
         const cancelled = yield* reminders.cancel(found.value.id)
         if (Option.isNone(cancelled)) return reply(told.over, thought.subject)
-        noted = { at: now, kind: "forgot", id: cancelled.value.id }
+        noted = { at: now, kind: "forgot", id: cancelled.value.id, about: Reminders.ref(cancelled.value) }
         const line = told.cancelled(cancelled.value, Reminders.calling(cancelled.value, thought.situation.desk))
         yield* journal.write({ at: now, kind: "action", ...under(cancelled.value), said: line, utterance: thought.utterance.id, detail: { forgot: cancelled.value.id } })
         return remindedOf(line, cancelled.value)
@@ -2963,7 +2963,7 @@ export const make = (options: {
         const changed = last.kind === "reminder" ? yield* reminders.cancel(last.id) : yield* reminders.restore(last.id)
         if (Option.isNone(changed)) return reply(last.kind === "reminder" ? told.over : `There's nothing to take back${addressed(said)}.`, thought.subject)
         // Taken back, it's a change of its own, so taking that back too puts it as it was.
-        noted = { at: now, kind: last.kind === "reminder" ? "forgot" : "reminder", id: changed.value.id }
+        noted = { at: now, kind: last.kind === "reminder" ? "forgot" : "reminder", id: changed.value.id, about: Reminders.ref(changed.value) }
         const line = told.cancelled(changed.value, Reminders.calling(changed.value, thought.situation.desk), last.kind === "forgot")
         yield* journal.write({
           at: now,
@@ -2978,15 +2978,17 @@ export const make = (options: {
 
     /**
      * Takes back the newest change he made, as "scratch that" or "undo that"
-     * means it, whatever thread the model named: the reminder he just set or
-     * cancelled, or a mute, made since what yapd last did to a thread, or else
-     * that, so a message sent a minute before a reminder is never withdrawn in
-     * its place. Carrying on after a stop is always the thread's.
+     * means it: the reminder he just set or cancelled, or a mute, made since
+     * what yapd last did to a thread, or else that, so a message sent a
+     * minute before a reminder is never withdrawn in its place. Of the thread
+     * the model took him to name, only what was changed of it, so a message
+     * he names is never left for a reminder or a mute made since. Carrying on
+     * after a stop is always the thread's.
      */
     const undoing = (plan: Brain.Plan, thought: Thought, said: Lines, at: Stepping): Effect.Effect<Outcome> =>
       Effect.gen(function* () {
         const { situation } = thought
-        const latest = Brain.newest(situation)
+        const latest = Brain.newest(situation, Option.getOrUndefined(plan.target)?.ref)
         const last = Option.getOrUndefined(situation.noted ?? Option.none())
         if (plan.decision.how !== "carry" && latest === "noted" && last !== undefined) {
           return yield* Effect.flatMap(retracting(last, thought, said), (outcome) => onward(thought, outcome, Brain.about(outcome.subject), at.step + 1, said))

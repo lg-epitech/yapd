@@ -11340,7 +11340,7 @@ describe("Assistant reminders", () => {
     expect(result.last).toBe("On it, sir.")
   })
 
-  test("scratch that, or undo that, right after a reminder cancels it, not the last message", async () => {
+  test("scratch that, or undo that, right after a reminder cancels it, not the last message, unless he names that", async () => {
     const result = await run(
       Effect.gen(function* () {
         const made = yield* assistant(
@@ -11348,7 +11348,9 @@ describe("Assistant reminders", () => {
             const { heard } = situation.utterance
             if (heard === "Tell the Tezos one to use the fee table.") return Brain.decision({ act: "send", target: handle(situation, tezos), text: "Use the fee table.", how: "now" })
             if (heard.startsWith("Remind me")) return Brain.decision({ act: "remind", how: "at", when: local(soon), text: "call the bank" })
-            if (heard === "No, undo that please.") return Brain.decision({ act: "undo", target: handle(situation, tezos) })
+            // He names no thread, so the model names none.
+            if (heard === "No, undo that please.") return Brain.decision({ act: "undo" })
+            if (heard === "Take back the message to the Tezos one.") return Brain.decision({ act: "undo", target: handle(situation, tezos) })
             return undefined
           },
           undefined,
@@ -11365,7 +11367,10 @@ describe("Assistant reminders", () => {
         const back = { said: made.spoken().at(-1), pending: (yield* made.reminders!.pending).length }
         yield* made.dictate("Remind me in a couple of hours to call the bank.")
         yield* made.dictate("No, undo that please.")
-        return { scratched, back, undone: { said: made.spoken().at(-1), pending: (yield* made.reminders!.pending).length, sent: types() } }
+        const undone = { said: made.spoken().at(-1), pending: (yield* made.reminders!.pending).length, sent: types() }
+        // Named, the message is what's taken back, however newer the reminder is.
+        yield* made.dictate("Take back the message to the Tezos one.")
+        return { scratched, back, undone, named: { said: made.spoken().at(-1), pending: (yield* made.reminders!.pending).length } }
       }),
     )
     expect(result.scratched.said).toMatch(/^Cancelled your reminder .*, sir: call the bank\.$/)
@@ -11374,10 +11379,11 @@ describe("Assistant reminders", () => {
     expect(result.scratched.sent).toEqual(["message.dispatch"])
     expect(result.back.said).toMatch(/^Kept your reminder .*, sir: call the bank\.$/)
     expect(result.back.pending).toBe(1)
-    // The model's undo, naming the thread the message went to, still takes back the reminder he set since.
+    // The model's undo, naming no thread, takes back the reminder he set since.
     expect(result.undone.said).toMatch(/^Cancelled your reminder .*, sir: call the bank\.$/)
     expect(result.undone.pending).toBe(1)
     expect(result.undone.sent).toEqual(["message.dispatch"])
+    expect(result.named).toEqual({ said: "Migrate Tezos Integration has already read it, sir. Shall I tell it to ignore that?", pending: 1 })
   })
 })
 

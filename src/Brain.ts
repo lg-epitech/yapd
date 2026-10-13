@@ -116,6 +116,8 @@ export interface Noted {
   readonly at: number
   readonly kind: "reminder" | "forgot"
   readonly id: number
+  /** The thread it's about, if it's about one. */
+  readonly about: Option.Option<Threads.Ref>
 }
 
 /** All the brain goes by, gathered from memory before it's asked. */
@@ -1699,13 +1701,17 @@ const glimpsed = (situation: Situation, lines: Lines): Decision | undefined => {
  * back, of those in the last two minutes: a mute, a reminder he set or
  * cancelled, or whatever else yapd did for him, as the ledger has it. Made
  * at the same time, a mute or a reminder is taken for the later, as it's
- * noted once what it went with is done.
+ * noted once what it went with is done. With the thread the model took him
+ * to name, `on`, only what was changed of that thread, so what he names is
+ * never left for a change made since of another.
  */
-export const newest = (situation: Pick<Situation, "acted" | "muteChange" | "noted">): "mute" | "noted" | "acted" | undefined => {
+export const newest = (situation: Pick<Situation, "acted" | "muteChange" | "noted">, on?: Threads.Ref): "mute" | "noted" | "acted" | undefined => {
+  const of = (ref: Threads.Ref | undefined) => on === undefined || (ref !== undefined && Threads.same(ref, on))
+  const muted = (change: Mutes.Change) => on === undefined || [...change.added, ...change.removed].some(({ key }) => key === Mutes.key.thread(on))
   const changes = [
-    ...Option.toArray(Option.map(situation.noted ?? Option.none(), ({ at }) => ({ what: "noted" as const, at }))),
-    ...Option.toArray(Option.map(situation.muteChange, ({ at }) => ({ what: "mute" as const, at }))),
-    ...Option.toArray(Option.map(situation.acted, ({ at }) => ({ what: "acted" as const, at }))),
+    ...Option.toArray(Option.map(Option.filter(situation.noted ?? Option.none(), ({ about }) => of(Option.getOrUndefined(about))), ({ at }) => ({ what: "noted" as const, at }))),
+    ...Option.toArray(Option.map(Option.filter(situation.muteChange, muted), ({ at }) => ({ what: "mute" as const, at }))),
+    ...Option.toArray(Option.map(Option.filter(situation.acted, ({ machine, thread }) => of({ machine, id: thread })), ({ at }) => ({ what: "acted" as const, at }))),
   ]
   return changes.reduce<(typeof changes)[number] | undefined>((latest, change) => (latest === undefined || change.at > latest.at ? change : latest), undefined)?.what
 }
