@@ -1150,18 +1150,20 @@ export const make = (options: {
                   ),
                 ),
               )
-            const settled = yield* settle(outcome.ear, first, outcome.audio, unlogged, !unsure, echo, (heard, voiced, afterPause, halt) =>
-              Effect.gen(function* () {
+            const settled = yield* settle(outcome.ear, first, outcome.audio, unlogged, !unsure, echo, (heard, voiced, afterPause, halt) => {
+              // Asked as each attempt is made, never once it runs, so what it does at once is done even for one cut short: only the work is timed.
+              const hooked = halt ? Option.none() : (options.mute?.(update, heard, voiced, echo) ?? Option.none())
+              return Effect.gen(function* () {
                 const began = yield* Clock.currentTimeMillis
                 const worked = yield* halt
                   ? Effect.succeed<Worked>({ reply: { intent: "dismiss", spoken: "", message: "" }, source: "halt" })
-                  : Option.match(options.mute?.(update, heard, voiced, echo) ?? Option.none(), {
+                  : Option.match(hooked, {
                       onSome: (muting) => Effect.succeed<Worked>({ reply: { intent: "mute", spoken: "", message: "", muting }, source: "mute" }),
                       onNone: () => responding(heard, afterPause),
                     })
                 return { ...worked, ms: (yield* Clock.currentTimeMillis) - began, voiced }
-              }),
-            )
+              })
+            })
             const { heard, afterPause, halt } = settled
             const { reply, source, modelMs, ms, voiced } = settled.reply
             // "Mute." turns yapd off at once, which cuts this off, with nothing of it noted or sent. Should yapd stay on, it's a stop.
