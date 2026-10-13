@@ -3838,6 +3838,9 @@ export const make = (options: {
         const situation = yield* situate(utterance, { _tag: "Nothing" }, [])
         const on = Option.isNone(about) ? situation.desk : yield* threads.desk(about, [about.value], desk.asked)
         const listed = Option.flatMap(about, (ref) => Option.fromNullable(on.threads.find((listed) => Threads.same(listed.ref, ref))))
+        // Its machine's threads out of sight, like rig's while it can't be reached, it isn't gone: he's told why it can't be asked.
+        const away = Option.isNone(about) ? Option.none<string>() : yield* threads.unseen(about.value.machine)
+        if (Option.isNone(listed) && Option.isSome(away)) return yield* tell(`${told.offer(reminder, reminder.called ?? "that thread")} ${away.value}`)
         if (Option.isNone(listed) || reminder.propose === undefined) return yield* tell(told.gone(reminder, reminder.called ?? "that thread"))
         const called = Reminders.named(listed.value)
         const decision = Brain.decision({ act: "send", target: listed.value.handle, text: reminder.propose, how: "now", sure: "high" })
