@@ -1618,6 +1618,46 @@ describe("Brain", () => {
       expect(checked._tag === "Do" ? checked.plan.decision.how : checked).toBe("clear")
     })
 
+    test("'read its subagents' or 'stop reading their subagents' are the thread he's on about, or the one a subagent's update is part of, with no model, and any other way is the model's", () => {
+      // An update from T3 Code's review of the Tezos migration, run as its subagent.
+      const subagent: Assistant.Subject = {
+        _tag: "Session",
+        update: {
+          session: "codex:s-review",
+          project: "integration",
+          turn: { prompt: Option.none(), message: "One blocker." },
+          needsYou: false,
+          spoken: "For Migrate Tezos Integration: one blocker.",
+          audio: "/tmp/update.wav",
+          thread: { agent: "codex", session: "s-review", cwd: "/code/integration", message: "One blocker.", origin: {} },
+          at: now - 20_000,
+          subagent: { child: { machine: "Rosie", id: "t-review" }, called: "Sol review", head: { ref: ref(tezos), called: "Migrate Tezos Integration" } },
+        },
+        said: "For Migrate Tezos Integration: one blocker.",
+      }
+      expect(mute("Read me its subagents.")).toMatchObject({ act: "mute", how: "subagents", target: tezosHandle(), when: "" })
+      expect(mute("Stop reading their subagents.")).toMatchObject({ act: "mute", how: "nosubagents", target: tezosHandle(), when: "" })
+      expect(mute("Don't read its subagents.", { subject: subagent })).toMatchObject({ act: "mute", how: "nosubagents", target: "" })
+      for (const heard of ["Read me the Tezos one's subagents.", "Read its subagents for an hour.", "Can you read me its subagents?", "Keep its subagents to yourself."]) {
+        expect([heard, mute(heard)]).toEqual([heard, undefined])
+      }
+      // Asked for a while, as the model may take it, it's said to last until he says otherwise, and nothing changes.
+      const timed = Brain.check(Brain.decision({ act: "mute", how: "subagents", target: tezosHandle(), when: "2026-10-08T23:00" }), situation("Read me the Tezos one's subagents for an hour."), lines)
+      expect(timed).toEqual({ _tag: "Say", spoken: "I can't read you the subagents of Migrate Tezos Integration for a set time, sir, only until you tell me to stop." })
+      // "What's muted?" ends with whose subagents are read.
+      const reading = [{ key: `t3:Rosie:${tezos.id}`, at: now - 60_000 }]
+      expect(mute("What's muted?", { reading })?.spoken).toBe("Nothing's muted, sir. I'm reading you the subagents of Migrate Tezos Integration.")
+    })
+
+    test("the model is told which threads' subagents are read, only while any are, and that reading them lasts until he says otherwise", () => {
+      const reading = [{ key: `t3:Rosie:${tezos.id}`, at: now - 60_000 }]
+      const shown = Brain.prompt(situation("Read me the Tezos one's subagents.", { reading }), Option.none())
+      expect(shown).toContain(`SUBAGENTS READ, threads whose subagents you read him, as you keep every other thread's to yourself: ${tezosHandle()}`)
+      expect(shown).toContain(`"how" "subagents" when he wants a thread's subagents read to him from now on`)
+      expect(shown).toContain(`"when" always "", as it lasts until he says otherwise`)
+      expect(Brain.prompt(situation("Read me the Tezos one's subagents."), Option.none())).not.toContain("SUBAGENTS READ")
+    })
+
     test("'scratch that' takes back a mute made since the last thing yapd did, and that thing when it came after", () => {
       const sent: Ledger.Row = {
         commandId: "yapd:u0:0",

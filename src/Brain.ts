@@ -84,7 +84,8 @@ export const Decision = Schema.Struct({
   /** With OPEN shown: "answers" if this answers it, "replaces" if it's something new. "" without OPEN. */
   pending: Schema.Literal("answers", "replaces", ""),
   /** send: now|after|restart · decide: accept|session|decline · again: same|more|instead|which · dismiss: later
-   *  · reply: skip · find: threads|journal · mute: mute|unmute|clear|undo · catchup: more|muted · undo: reminder|memory|message|carry
+   *  · reply: skip · find: threads|journal · mute: mute|unmute|clear|undo|subagents|nosubagents · catchup: more|muted|subagents
+   *  · undo: reminder|memory|message|carry
    *  mode: focus|quiet|normal|brief|full · remember: fact|routine · remind and offer: at|finished|asked
    *  tidy: archive|unarchive|rename|snooze|settle|pin · show: threads|thread|pr|usage|missed|said|hide|memories */
   how: Schema.String,
@@ -160,7 +161,9 @@ export interface Situation {
   readonly missed: Missed.Missed
   /** The threads he muted. */
   readonly mutes: ReadonlyArray<Mutes.Mute>
-  /** The last change he made to what's muted, in the last two minutes, which "scratch that" may mean. */
+  /** The threads whose subagents he has read to him. */
+  readonly reading?: ReadonlyArray<Mutes.Reading>
+  /** The last change he made to what's muted, or to whose subagents are read, in the last two minutes, which "scratch that" may mean. */
   readonly muteChange: Option.Option<Mutes.Change>
   readonly usage: Option.Option<Threads.Usage>
   /** On a second look: what a thread is doing, or what a search found. */
@@ -1224,12 +1227,24 @@ export const modeCommand = (heard: string, asks = false): Option.Option<ModeChan
 /** The ways a mode can go, as the model names them, and the rundown alone, which a yes to yapd's offer of it gives. */
 const modes: ReadonlySet<string> = new Set(["focus", "quiet", "normal", "brief", "full", "rundown"])
 
-/** What's muted, in a line: each thread by name, with when its mute ends, if it does. */
-export const mutedList = (situation: Pick<Situation, "mutes" | "desk" | "now">, lines: Lines) => {
+/** What a thread whose subagents are read is called aloud: as the desk calls it, on its machine when that isn't this one, or else as it was called then. */
+export const readingName = (reading: Mutes.Reading, desk: Threads.Desk) => {
+  const listed = desk.threads.find(({ ref }) => Mutes.key.thread(ref) === reading.key)
+  if (listed !== undefined) return `${listed.called}${listed.here ? "" : ` on ${listed.ref.machine}`}`
+  return reading.called ?? "a thread"
+}
+
+/**
+ * What's muted, in a line: each thread by name, with when its mute ends, if
+ * it does, and after it whose subagents he has read to him, while any are.
+ */
+export const mutedList = (situation: Pick<Situation, "mutes" | "reading" | "desk" | "now">, lines: Lines) => {
   const { mutes, desk, now } = situation
-  if (mutes.length === 0) return `Nothing's muted${addressed(lines)}.`
+  const reading = situation.reading ?? []
+  const read = reading.length === 0 ? "" : ` I'm reading you the subagents of ${both(reading.map((one) => readingName(one, desk)))}.`
+  if (mutes.length === 0) return `Nothing's muted${addressed(lines)}.${read}`
   const named = mutes.map((mute) => `${mutedName(mute, desk)}${mute.ends === undefined ? "" : ` until ${until(mute.ends, now)}`}`)
-  return `You've muted ${both(named)}${addressed(lines)}.`
+  return `You've muted ${both(named)}${addressed(lines)}.${read}`
 }
 
 /**
@@ -1694,6 +1709,7 @@ const glimpsed = (situation: Situation, lines: Lines): Decision | undefined => {
     return decision({ act: "mode", how, when: minutes === undefined ? "" : new Date(situation.now + minutes * 60_000).toISOString(), pending: replacing })
   }
   // Muting what he's on about: the thread, or a session's update off the desk, which the assistant mutes by its own keys. Nothing he's on about, it's the model's.
+  // Reading him its subagents, or no longer, as the thread's they are: a subagent's own update's are the thread's it's part of.
   const muting = Mutes.command(utterance.heard)
   if (Option.isSome(muting)) {
     const { how, minutes } = muting.value
@@ -1783,7 +1799,8 @@ const glimpsed = (situation: Situation, lines: Lines): Decision | undefined => {
  */
 export const newest = (situation: Pick<Situation, "acted" | "muteChange" | "noted">, on?: Threads.Ref): "mute" | "noted" | "acted" | undefined => {
   const of = (ref: Threads.Ref | undefined) => on === undefined || (ref !== undefined && Threads.same(ref, on))
-  const muted = (change: Mutes.Change) => on === undefined || [...change.added, ...change.removed].some(({ key }) => key === Mutes.key.thread(on))
+  const muted = (change: Mutes.Change) =>
+    on === undefined || [...change.added, ...change.removed, ...(change.read ?? []), ...(change.unread ?? [])].some(({ key }) => key === Mutes.key.thread(on))
   const changes = [
     ...Option.toArray(Option.map(Option.filter(situation.noted ?? Option.none(), ({ about }) => of(Option.getOrUndefined(about))), ({ at }) => ({ what: "noted" as const, at }))),
     ...Option.toArray(Option.map(Option.filter(situation.muteChange, muted), ({ at }) => ({ what: "mute" as const, at }))),
@@ -2616,6 +2633,16 @@ const checking = (choice: Decision, situation: Situation, lines: Lines): Checked
       // Said over something, too little speech is talk or noise nearby, never something to do.
       if (murmured(choice, situation.utterance)) return doing({ decision: { ...choice, act: "resume" }, target: Option.none() })
       if (choice.how === "clear" || choice.how === "undo") return doing({ decision: { ...choice, target: "" }, target: Option.none() })
+      if (choice.how === "subagents" || choice.how === "nosubagents") {
+        // A lasting setting, never one for a set time, which he's told rather than have it taken for another.
+        if (choice.when.trim() !== "") {
+          const name = Option.match(target, { onNone: () => "it", onSome: (listed) => `${listed.called}${listed.here ? "" : ` on ${listed.ref.machine}`}` })
+          return { _tag: "Say", spoken: subagentLines(lines, name).untimed(choice.how === "subagents") }
+        }
+        if (Option.isSome(target)) return choice.sure === "low" && candidates.length >= 2 ? ask(candidates) : doing({ decision: choice, target })
+        // With nothing named, it's what he's on about, which only "read its subagents" said in so many words can mean.
+        return candidates.length >= 2 ? ask(candidates) : doing({ decision: choice, target })
+      }
       if (choice.how !== "mute" && choice.how !== "unmute") return { _tag: "Say", spoken: lines.cantTell }
       // One of MUTED by its own handle, like a session in a terminal, which isn't a thread on the desk.
       if (Option.isNone(target) && Option.isSome(mutedBy(choice.target, situation))) return doing({ decision: choice, target })
@@ -2893,7 +2920,7 @@ const contract = `Reply with only a JSON object with the keys "act", "target", "
 
 "act", what he wants:
 - "answer": he asked something you can answer from THREADS, WAITING ON YOU, LATELY, UNHEARD, USAGE, REMINDERS and MEMORIES, or from what you know yourself. "spoken" is the answer. "target" is the thread it's about, if it's about one. Asked what a routine does, like "what's my ship routine?", say you can't read its steps out.
-- "catchup": he wants to hear what he hasn't heard or missed, or what came in while he was away or had you off, about everything or one thread, project or machine, however he puts it, even when UNHEARD could answer it. yapd gathers it from what it kept and briefs him; only yapd knows what he has heard. "target" is a handle from THREADS, UNHEARD or MUTED for one thread, a muted one too; "text" is a project as written in UNHEARD, for all of it; "machine" is one machine; "when" is the time for "since …", as his clock reads it, "YYYY-MM-DDTHH:mm"; leave them "" for everything, which leaves out the threads he muted. "how" is "more" when he wants more of the catch-up he just heard, "muted" for what his muted threads said. "spoken" is "". A question about it that isn't asking to be caught up, like whether a thread finished or how much he missed, is "answer" from UNHEARD. Catching up is only ever about what he hears: telling a thread something, even put as catching it up, bringing it up to speed or filling it in on a decision, is "send" to that thread.
+- "catchup": he wants to hear what he hasn't heard or missed, or what came in while he was away or had you off, about everything or one thread, project or machine, however he puts it, even when UNHEARD could answer it. yapd gathers it from what it kept and briefs him; only yapd knows what he has heard. "target" is a handle from THREADS, UNHEARD or MUTED for one thread, a muted one too; "text" is a project as written in UNHEARD, for all of it; "machine" is one machine; "when" is the time for "since …", as his clock reads it, "YYYY-MM-DDTHH:mm"; leave them "" for everything, which leaves out the threads he muted. "how" is "more" when he wants more of the catch-up he just heard, "muted" for what his muted threads said, "subagents" for what a thread's subagents said, which you keep to yourself unless he has them read, with "target" that thread in THREADS, like "what did its subagents say?". "spoken" is "". A question about it that isn't asking to be caught up, like whether a thread finished or how much he missed, is "answer" from UNHEARD. Catching up is only ever about what he hears: telling a thread something, even put as catching it up, bringing it up to speed or filling it in on a decision, is "send" to that thread.
 - "look": he asked what a thread is doing right now, or for detail none of the lines below give. "target" is the thread; "spoken" is empty. You'll be shown what it's doing and asked again.
 - "find": he named something specific that nothing in THREADS fits, or asked what was said or done a while ago. "text" is the words to search for, "how" is "threads" to search what was written in the threads, or "journal" for what you heard and said. You'll be shown what's found and asked again.
 - "again": he wants to hear what you said last again. "how" is "same"; "spoken" is that line.
@@ -2906,7 +2933,7 @@ const contract = `Reply with only a JSON object with the keys "act", "target", "
 - "reply": he answers a thread's question, in WAITING ON YOU or OPEN. "target" is the thread; "text" is his answer: the option he picked, as it's written, or his own words. A question in several parts is answered a part at a time: "text" answers only the part he's at, and yapd asks him the rest. "text" empty when he wants to hear a thread's question before answering: yapd reads it to him.
 - "dismiss": he wants you to stop talking, or it needs nothing: thanks, okay, an acknowledgement, or no to OPEN, unless OPEN asks a thread's question, which a no answers.
 - "resume": it wasn't meant for you: talk with someone else, noise, or words that make no sense.
-- "mute": he wants you to stop reading a thread's progress and finished work aloud, or start again. "how" "mute" or "unmute"; "target" the thread, or the handle of one in MUTED that has one, like m1, which isn't in THREADS; "when" the time it ends, if he says, worked out from NOW as his clock reads it, "YYYY-MM-DDTHH:mm", like an hour from now for "for an hour". What needs him still comes through. Not "mode", which is how you talk, nor "tidy", which snoozes it in T3 Code. "how" "clear" unmutes every thread.
+- "mute": he wants you to stop reading a thread's progress and finished work aloud, or start again. "how" "mute" or "unmute"; "target" the thread, or the handle of one in MUTED that has one, like m1, which isn't in THREADS; "when" the time it ends, if he says, worked out from NOW as his clock reads it, "YYYY-MM-DDTHH:mm", like an hour from now for "for an hour". What needs him still comes through. Not "mode", which is how you talk, nor "tidy", which snoozes it in T3 Code. "how" "clear" unmutes every thread. "how" "subagents" when he wants a thread's subagents read to him from now on, like "read me the Tezos migration's subagents", and "nosubagents" to stop, like "keep its subagents to yourself": "target" the thread in THREADS they're part of, never a subagent; "when" always "", as it lasts until he says otherwise. Every thread's are kept to yourself until he asks. Asking a thread to use subagents, like "have a subagent review it", is "send" to it.
 - "show": he wants to see something on his screen, or to stop seeing it. "how" is "threads" for what's going on across his threads, "thread" for one thread, "pr" for a thread's pull request, which opens it in his browser too, "usage" for his limits, "missed" for what he hasn't heard, "said" for what you said last, or "hide" to take down what's on his screen. "target" is the thread for "thread" and "pr". yapd says what's on it.
 - "mode": he wants you to change how and when you talk. "how" is "focus" to say only what needs him for a while, "quiet" for the night, like "goodnight", "I'm off to bed" or "turn yourself off", which also says only what needs him, "normal" when he's back, like "I'm back" or "you can talk normally again", which gives him the catch-up, "brief" to say only headlines again, like "talk shorter", or "full" to say every update in full, like "give me everything" or "stop giving me the short version". "when" is when focus or quiet ends, if he says, worked out from NOW as his clock reads it, "YYYY-MM-DDTHH:mm", like three o'clock today for "till three". It's about you, never a message for a thread, and never "mute", which is one thread. "stop", "quiet" or "be quiet" on their own only mean stop talking: "dismiss".
 - "remind": he wants to be told something later. At a time: "how" is "at", and "when" the time worked out from NOW, as his clock reads it, "YYYY-MM-DDTHH:mm" with no offset, like "2026-10-12T15:00" for three this afternoon. Or once a thread finishes its turn, "how" "finished", or asks him something, "how" "asked", with "target" that thread. "text" is what to tell him then, in a few words, like "call the bank", or "" when it's only that the thread finished or asks. "rest" keeps its meaning: what he wants done now, in the same breath, like "and tell the Mina one to rebase". Not "send" with "after", which tells the thread itself once it's done; something he wants offered to a thread then is "offer". You don't watch pull requests: told to say when one's checks pass or it's merged, "answer" that you don't.
@@ -3116,7 +3143,9 @@ export const missedName = (group: Pick<Missed.Group, "called" | "project"> & { r
   const detail = group.rows?.[0]?.detail as { readonly reminder?: unknown; readonly usage?: unknown } | null | undefined
   // What's about no thread or session, like a reminder or how much of a limit is used, by what it is.
   const own = typeof detail !== "object" || detail === null ? undefined : detail.reminder !== undefined ? "a reminder" : detail.usage !== undefined ? "your usage" : undefined
-  return group.called || group.project || own || "a session"
+  // One of a thread's subagents, which is never on the desk, by what it is.
+  const subagent = group.rows?.some(Missed.subagent) === true ? "a subagent" : undefined
+  return group.called || subagent || group.project || own || "a session"
 }
 
 /** What was said, or would have been, of the newest of a thread's unheard rows, as the model sees it: never a routine's steps. */
@@ -3146,7 +3175,8 @@ const span = (group: Pick<Missed.Group, "oldest" | "newest" | "rows">, now: numb
  * its own, so a catch-up can be asked about it.
  */
 const unheardLines = (missed: Missed.Missed, now: number, muted: ReadonlySet<string>) => {
-  const { groups } = missed
+  // Never a thread's subagents', which are asked about by the thread they're part of.
+  const groups = missed.groups.filter(({ head }) => head === undefined)
   if (groups.length === 0) return "UNHEARD, what he hasn't heard yet: Nothing."
   const rows = groups.reduce((sum, { rows }) => sum + rows.length, 0)
   const off = groups.reduce((sum, group) => sum + group.off, 0)
@@ -3312,10 +3342,13 @@ const focus = (situation: Situation) => {
     case "Session": {
       const { update } = subject
       const handle = update.about === undefined ? undefined : handleOf(desk, update.about.machine, update.about.id)
+      const head = update.subagent?.head?.ref
       return [
-        handle === undefined
-          ? `Your update about ${updateAbout(update.project)}, ${lasted(now - update.at)} ago, from work in ${fenced(update.thread.cwd, 120)} that yapd hasn't tied to a thread yet: ${fenced(update.spoken, 400)}`
-          : `${handle}. Your update about it, ${lasted(now - update.at)} ago: ${fenced(update.spoken, 400)}`,
+        update.subagent !== undefined
+          ? `Your update from one of the subagents of ${(head === undefined ? undefined : handleOf(desk, head.machine, head.id)) ?? "a thread not in THREADS"}, ${lasted(now - update.at)} ago: ${fenced(update.spoken, 400)}`
+          : handle === undefined
+            ? `Your update about ${updateAbout(update.project)}, ${lasted(now - update.at)} ago, from work in ${fenced(update.thread.cwd, 120)} that yapd hasn't tied to a thread yet: ${fenced(update.spoken, 400)}`
+            : `${handle}. Your update about it, ${lasted(now - update.at)} ago: ${fenced(update.spoken, 400)}`,
         // Like an answer to what he asked over it, which is what he heard last.
         ...(subject.said === update.spoken
           ? []
@@ -3532,6 +3565,13 @@ export const prompt = (situation: Situation, style: Option.Option<string>) => {
               (mute, index) =>
                 `${mutedListed(mute, desk) === undefined ? `${mutedHandle(index)} ` : ""}${fenced(mutedName(mute, desk), 90)}${mute.ends === undefined ? "" : ` until ${until(mute.ends, now)}`}`,
             )
+            .join(", ")}`,
+        ]),
+    ...((situation.reading ?? []).length === 0
+      ? []
+      : [
+          `SUBAGENTS READ, threads whose subagents you read him, as you keep every other thread's to yourself: ${(situation.reading ?? [])
+            .map((reading) => desk.threads.find(({ ref }) => Mutes.key.thread(ref) === reading.key)?.handle ?? fenced(readingName(reading, desk), 90))
             .join(", ")}`,
         ]),
     unheardLines(situation.missed, now, muted),

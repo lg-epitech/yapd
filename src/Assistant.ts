@@ -202,8 +202,9 @@ export type Subject =
 
 /**
  * What a catch-up was about: a thread, by its machine and its id or session,
- * a project, a machine, what came since when, and whether it was what his
- * muted threads said; with how it's named aloud, when it's one of them.
+ * a project, a machine, what came since when, whether it was what his muted
+ * threads said, or what a thread's subagents said; with how it's named
+ * aloud, when it's one of them.
  */
 export interface Scope {
   readonly thread?: { readonly machine: string | undefined; readonly thread: string | undefined }
@@ -211,6 +212,8 @@ export interface Scope {
   readonly machine?: string
   readonly since?: number
   readonly muted?: true
+  /** The thread whose subagents' it was. */
+  readonly subagents?: Threads.Ref
   readonly named?: string
 }
 
@@ -1083,7 +1086,7 @@ export const make = (options: {
         const pending = Option.match(open, { onNone: () => [], onSome: ({ candidates }) => candidates })
         // A reply is about what he just heard, which is on the desk already.
         const found = utterance.via === "reply" ? [] : yield* searching(utterance.heard)
-        const [shortlist, recent, spoke, usage, asked, coming, acted, mutes, muteChange, mode, reminders, kept, written] = yield* Effect.all([
+        const [shortlist, recent, spoke, usage, asked, coming, acted, mutes, muteChange, mode, reminders, kept, written, reading] = yield* Effect.all([
           threads.desk(focus, pending, utterance.via === "reply" ? desk.reply : desk.asked, found, desk.named, utterance.heard),
           // Never what was held for later, which he was never told.
           journal.since(now - lately.span, { most: 2 * lately.most, kinds: ["update", "reply", "dictation", "answer", "started", "notice", "sent", "action", "brief"], held: false }),
@@ -1099,6 +1102,7 @@ export const make = (options: {
           options.reminders?.pending ?? Effect.succeed<ReadonlyArray<Reminders.Reminder>>([]),
           options.memories?.list ?? Effect.succeed<ReadonlyArray<Memory.Memory>>([]),
           options.routines ?? Effect.succeed<ReadonlyArray<Preferences.Routine>>([]),
+          options.mutes?.reading ?? Effect.succeed<ReadonlyArray<Mutes.Reading>>([]),
         ])
         // What he hasn't heard, a thread at a time: what was never read out, however much he's spoken since, and what was cut off since
         // he last said something, other than catching up, which he may never have heard the answer to, or something only heard as noise,
@@ -1106,8 +1110,11 @@ export const make = (options: {
         // it's read, not twice.
         const since = spoke.findLast((kept) => !catchUp(kept) && !noise(kept))?.at ?? now - day
         const missed = yield* Missed.gather(journal, { now, spoke: since, coming: [...coming, ...(yield* options.telling ?? Effect.succeed([]))], desk: shortlist })
-        // What was done, like a stop, even what he was never told of since he turned yapd off, but not the bookkeeping of questions closed, which says nothing.
-        const done = recent.filter((kept) => kept.kind !== "action" || kept.said !== undefined || Brain.unsaid(kept) !== undefined).slice(-lately.most)
+        // What was done, like a stop, even what he was never told of since he turned yapd off, but not the bookkeeping of questions closed, which says nothing,
+        // nor what a thread's subagents said that yapd kept to itself, which he never asked to hear.
+        const done = recent
+          .filter((kept) => (kept.kind !== "action" || kept.said !== undefined || Brain.unsaid(kept) !== undefined) && !(Missed.subagent(kept) && Missed.muted(kept)))
+          .slice(-lately.most)
         const sent = about._tag === "Session" && about.update.about !== undefined ? yield* routinesSent(about.update.about) : []
         const seen = yield* options.show.seen
         return {
@@ -1121,6 +1128,7 @@ export const make = (options: {
           missed,
           ...Option.match(mode, { onNone: () => ({}), onSome: (mode) => ({ mode }) }),
           mutes,
+          ...(reading.length === 0 ? {} : { reading }),
           muteChange,
           usage,
           second: Option.none(),
@@ -2719,6 +2727,8 @@ export const make = (options: {
         const called = options.naming ?? ((host: string) => host.split(".")[0] ?? host)
         const [key] = Mutes.keysOf(update, called)
         if (key === undefined) return Option.none()
+        // One of a thread's subagents, which is never on the desk, is muted by itself, by what it's called.
+        if (update.subagent !== undefined) return Option.some({ key, called: update.subagent.called, project: update.project, it: true })
         const machine = called(update.thread.origin.host ?? hostname())
         const where = machine === called(hostname()) ? "" : ` on ${machine}`
         const agent = update.thread.agent === "codex" ? "Codex" : "Claude"
@@ -2745,11 +2755,8 @@ export const make = (options: {
         if (controls === undefined) return reply(Brain.notYet(said), thought.subject)
         const now = yield* Clock.currentTimeMillis
         if (decision.how === "clear") return stays(Brain.muteLines(said, "it", now).cleared((yield* controls.clear).length > 0))
-        if (decision.how === "undo") {
-          const undone = yield* controls.undo
-          const told = Brain.muteLines(said, "it", now)
-          return stays(Option.match(undone, { onNone: () => told.unchanged, onSome: ({ added }) => told.again(added.length > 0) }))
-        }
+        if (decision.how === "undo") return stays(Brain.takenBack(said, yield* controls.undo, now))
+        if (decision.how === "subagents" || decision.how === "nosubagents") return yield* reading(plan, thought, said, stays)
         const target = muted(plan, thought)
         if (Option.isNone(target)) return reply(said.cantTell, thought.subject)
         const { key, called, project, it } = target.value
@@ -2762,6 +2769,57 @@ export const make = (options: {
         const lasts = Mutes.ending(decision.when, now)
         const done = yield* controls.mute({ key, ...(called === undefined ? {} : { called }), ...(project === undefined ? {} : { project }) }, lasts)
         return answered(done ? told.muted(lasts) : told.already)
+      })
+
+    /**
+     * The thread whose subagents he means: the one picked, or, said in so many
+     * words, what he's on about, by its thread, the one a subagent's update is
+     * part of, or none for a session that isn't a T3 Code thread's. With what
+     * it's called, and whether that's "it".
+     */
+    const head = (plan: Brain.Plan, thought: Thought) => {
+      if (Option.isSome(plan.target)) {
+        const listed = plan.target.value
+        const it = Option.exists(Brain.focused(thought.situation), ({ handle }) => handle === listed.handle)
+        return { _tag: "Thread" as const, ref: listed.ref, called: `${listed.called}${listed.here ? "" : ` on ${listed.ref.machine}`}`, project: listed.project, it }
+      }
+      // Only "read its subagents", worked out without the model, means what he's on about with nothing named.
+      const { subject } = thought.situation
+      if (thought.source !== "fast") return { _tag: "Unknown" as const }
+      if (subject._tag === "Session") {
+        const { update } = subject
+        const ref = update.subagent === undefined ? (update.about ?? update.owner) : update.subagent.head?.ref
+        if (ref === undefined) return update.subagent === undefined ? { _tag: "Session" as const } : { _tag: "Unknown" as const }
+        return { _tag: "Thread" as const, ref, called: update.subagent?.head?.called, project: update.project, it: true }
+      }
+      return Option.match(Brain.about(subject), {
+        onNone: () => ({ _tag: "Unknown" as const }),
+        onSome: (ref) => ({ _tag: "Thread" as const, ref, called: undefined, project: undefined, it: true }),
+      })
+    }
+
+    /**
+     * Has a thread's subagents read to him from now on, or no longer, and says
+     * so, naming the thread only when it isn't "it": a lasting setting, which
+     * reads nothing now, so turned on, he's told he can ask what they said so
+     * far, when they said anything. Never anything sent to a thread.
+     */
+    const reading = (plan: Brain.Plan, thought: Thought, said: Lines, stays: (line: string) => Outcome) =>
+      Effect.gen(function* () {
+        const { controls } = options
+        if (controls === undefined) return reply(Brain.notYet(said), thought.subject)
+        const found = head(plan, thought)
+        if (found._tag === "Session") return reply(Brain.subagentLines(said, "it").session, thought.subject)
+        if (found._tag === "Unknown") return reply(said.cantTell, thought.subject)
+        const { ref, called, project, it } = found
+        const told = Brain.subagentLines(said, it || called === undefined ? "it" : called)
+        const on = plan.decision.how === "subagents"
+        const changed = yield* controls.subagents({ key: Mutes.key.thread(ref), ...(called === undefined ? {} : { called }), ...(project === undefined ? {} : { project }) }, on)
+        // Named, "it" is that thread from now on.
+        const answered = (line: string): Outcome => (it ? stays(line) : { say: line, subject: { _tag: "Answer", said: line, about: Option.some(ref) }, kind: "done" })
+        if (!on) return answered(changed ? told.off : told.notOn)
+        if (!changed) return answered(told.already)
+        return answered((yield* Missed.keptBy(journal, ref, yield* Clock.currentTimeMillis)) ? `${told.on} ${told.kept}` : told.on)
       })
 
     /**
@@ -2813,6 +2871,9 @@ export const make = (options: {
      * his muted threads said.
      */
     const within = (scope: Scope, group: Missed.Group, loosely = false) => {
+      // A thread's subagents', only theirs, whatever was kept of them, and never theirs otherwise but where a catch-up of everything tells of
+      // them, as when they were read to him and cut off.
+      if (scope.subagents !== undefined) return Missed.of(group, scope.subagents) ? Missed.only(group, (kept) => scope.since === undefined || kept.at >= scope.since) : undefined
       // By its machine only when both are known: a session's rows kept before machines were, or a scope without one, go by the thread alone.
       if (
         scope.thread !== undefined &&
@@ -2823,7 +2884,9 @@ export const make = (options: {
       if (scope.machine !== undefined && group.machine?.toLowerCase() !== scope.machine.toLowerCase()) return undefined
       return Missed.only(
         group,
-        (kept) => (scope.since === undefined || kept.at >= scope.since) && (scope.muted === true ? Missed.muted(kept) : scope.thread !== undefined || !Missed.muted(kept)),
+        (kept) =>
+          (scope.since === undefined || kept.at >= scope.since) &&
+          (scope.muted === true ? Missed.muted(kept) && !Missed.subagent(kept) : scope.thread !== undefined || !Missed.muted(kept)),
       )
     }
 
@@ -2858,6 +2921,15 @@ export const make = (options: {
       })
       const project = decision.text.trim()
       const machine = decision.machine.trim()
+      // What a thread's subagents said, which a subagent's own update means too, by the thread it's part of.
+      if (decision.how === "subagents") {
+        const { subject } = situation
+        const head = Option.match(target, {
+          onNone: () => (subject._tag === "Session" ? subject.update.subagent?.head : undefined),
+          onSome: ({ ref, called }) => ({ ref, called }),
+        })
+        if (head !== undefined) return { subagents: head.ref, named: head.called === undefined ? "its subagents" : `the subagents of ${head.called}` }
+      }
       // A time to come, as when the model took his clock for another's, is no window at all: everything is gathered rather than nothing.
       const at = decision.when.trim() === "" ? Number.NaN : Brain.instant(decision.when)
       const since = at > situation.now ? Number.NaN : at
@@ -2879,7 +2951,8 @@ export const make = (options: {
     }
 
     /** Whether a catch-up is of everything he hasn't heard, muted threads aside. */
-    const whole = (scope: Scope) => scope.thread === undefined && scope.project === undefined && scope.machine === undefined && scope.since === undefined && scope.muted === undefined
+    const whole = (scope: Scope) =>
+      scope.thread === undefined && scope.project === undefined && scope.machine === undefined && scope.since === undefined && scope.muted === undefined && scope.subagents === undefined
 
     /**
      * Catches him up on what he hasn't heard in `scope`, with the threads on

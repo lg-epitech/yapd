@@ -10243,6 +10243,56 @@ describe("Assistant muting", () => {
     expect(result.model).toBe(1)
   })
 
+  test("a thread's subagents are read to him from now on by its name, telling him he can ask what they said only when some was kept, until he says otherwise or 'scratch that'", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, spoken, journal, mutes, dispatched } = yield* assistant(
+          (situation) => {
+            const { heard } = situation.utterance
+            const of = heard.includes("Tezos") ? tezos : mina
+            return heard.startsWith("Stop")
+              ? Brain.decision({ act: "mute", how: "nosubagents", target: handle(situation, of) })
+              : Brain.decision({ act: "mute", how: "subagents", target: handle(situation, of) })
+          },
+          undefined,
+          { muting: true },
+        )
+        // A review T3 Code ran for the Tezos migration, kept to yapd.
+        yield* journal.write({
+          at: now - 10 * 60_000,
+          kind: "update",
+          machine: "Rosie",
+          thread: "t-review",
+          project: "integration",
+          said: "For Migrate Tezos Integration: one release blocker is left.",
+          detail: { priority: "done", session: "codex:s-review", subagent: true, head: tezos.id, muted: true },
+        })
+        for (const heard of [
+          "Read me the Tezos migration's subagents.",
+          "Read me the Tezos migration's subagents.",
+          "Read me the Mina tickets' subagents.",
+          "Stop reading the Mina tickets' subagents.",
+          "Scratch that.",
+          "What's muted?",
+        ]) {
+          yield* dictate(heard)
+        }
+        return { spoken: spoken(), reading: (yield* mutes!.reading).map(({ key }) => key), dispatched: dispatched.length }
+      }),
+    )
+    expect(result.spoken).toEqual([
+      "From now on I'll read you the subagents of Migrate Tezos Integration, sir. Ask me what they said for the ones so far.",
+      // Named, it's what "it" means from then on.
+      "I'm reading you its subagents already, sir.",
+      "From now on I'll read you the subagents of Open Mina SSV2 Bug Tickets, sir.",
+      "I'll keep its subagents to myself, sir.",
+      "I'll read you its subagents again, sir.",
+      "Nothing's muted, sir. I'm reading you the subagents of Open Mina SSV2 Bug Tickets and Migrate Tezos Integration.",
+    ])
+    expect(result.reading.toSorted()).toEqual([`t3:Rosie:${tezos.id}`, `t3:Rosie:${mina.id}`].toSorted())
+    expect(result.dispatched).toBe(0)
+  })
+
   test("a thread named to the model is muted by name, and 'it' is that thread from then on", async () => {
     const result = await run(
       Effect.gen(function* () {
@@ -10866,6 +10916,29 @@ describe("Assistant catching up", () => {
       expect(result.general).toEqual(["Tezos pass 7 is done."])
       expect(result.after).toEqual(["Tezos pass 7 is done."])
     }
+  })
+
+  test("what a thread's subagents said is told only when he asks about them by that thread, never in a catch-up of everything or of what his muted threads said", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const decided: Record<string, (situation: Brain.Situation) => Brain.Decision> = {
+          "Catch me up.": () => Brain.decision({ act: "catchup" }),
+          "What did the muted ones say?": () => Brain.decision({ act: "catchup", how: "muted" }),
+          "What did the Tezos migration's subagents say?": (situation) => Brain.decision({ act: "catchup", how: "subagents", target: handle(situation, tezos) }),
+        }
+        const { dictate, spoken, journal, mutes } = yield* assistant((situation) => decided[situation.utterance.heard]!(situation), undefined, {
+          muting: true,
+          briefs: (rows) => rows.map(({ said }) => said).join(" "),
+        })
+        yield* mutes!.mute({ key: Mutes.key.session("Rosie", "claude:docs"), called: "the docs sweep" })
+        yield* journal.write({ at: now - 30 * 60_000, kind: "update", machine: "Rosie", thread: "claude:docs", project: "yapd", said: "Docs sweep rewrote the API page intro.", detail: { priority: "done", muted: true } })
+        yield* kept(journal, 25, "t-review", "One release blocker is left.", { priority: "needs-you", session: "codex:s-review", subagent: true, head: tezos.id, muted: true })
+        yield* kept(journal, 20, mina.id, "The Mina tickets are filed.")
+        for (const heard of Object.keys(decided)) yield* dictate(heard)
+        return spoken()
+      }),
+    )
+    expect(result).toEqual(["The Mina tickets are filed.", "Docs sweep rewrote the API page intro.", "One release blocker is left."])
   })
 
   test("a since the model put in the future, as when it took his clock for another's, gathers everything rather than nothing", async () => {

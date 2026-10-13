@@ -2549,6 +2549,17 @@ describe("Responder", () => {
     expect(prompt).toContain(`Agreeing with what the agent already said it would do changes nothing, so that's "dismiss".`)
   })
 
+  test("keeps which subagents are read aloud for yapd, never the agent, while asking the agent to use one is still its", () => {
+    const prompt = Responder.prompt(
+      { project: "yapd", turn: { prompt: Option.none(), message: "Done." }, needsYou: false, lines: [], heard: "Could you start reading me the subagents from now on?" },
+      Option.none(),
+    )
+    expect(prompt).toContain(
+      `Which threads you read aloud to them, a thread's subagents included, like "read me its subagents", "start reading the subagents" or "keep its subagents to yourself", is for you, never the agent: never "send".`,
+    )
+    expect(prompt).toContain(`Asking the agent to use subagents, like "have a subagent review it", is the agent's as usual.`)
+  })
+
   test("passes on every step without saying it back", () => {
     const prompt = Responder.prompt(
       {
