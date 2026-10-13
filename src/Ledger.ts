@@ -47,9 +47,15 @@ export interface Prepared extends Row {
   readonly fresh: boolean
 }
 
-/** The ids a step goes under, the same however often it's worked out: `yapd:<utterance>:<step>`, and its message's with `:m`. */
-export const ids = (utterance: string, step: number, message: boolean) => ({
-  commandId: `yapd:${utterance}:${step}`,
+/**
+ * The ids a step goes under, the same however often it's worked out:
+ * `yapd:<utterance>:<step>`, and its message's with `:m`. A step done to
+ * several threads at once, like archiving four, goes under one id a thread,
+ * by `part`, from 1, `yapd:<utterance>:<step>:<part>`, so it stays one step
+ * of its request.
+ */
+export const ids = (utterance: string, step: number, message: boolean, part?: number) => ({
+  commandId: `yapd:${utterance}:${step}${part === undefined ? "" : `:${part}`}`,
   messageId: message ? `yapd:${utterance}:${step}:m` : null,
 })
 
@@ -81,6 +87,9 @@ export interface Filter {
   readonly states?: ReadonlyArray<State>
   readonly machine?: string
   readonly thread?: string
+  /** Only the steps of one request, and of those only one, like every thread one tidy did. */
+  readonly utterance?: string
+  readonly step?: number
 }
 
 /** The steps yapd committed to, each written before it goes out. */
@@ -98,6 +107,8 @@ export class Ledger extends Context.Tag("yapd/Ledger")<
       readonly body: (ids: { readonly commandId: string; readonly messageId: string | null }) => unknown
       readonly message: boolean
       readonly digest?: string
+      /** Which thread of a step done to several it is, from 1, as `ids` has it. */
+      readonly part?: number
     }) => Effect.Effect<Prepared, Store.StoreError>
     /**
      * Notes what came of a step, only while it's in one of `from` when that's
@@ -209,10 +220,20 @@ const among = (at: number, filter: Filter): readonly [string, Array<string | num
     ...(states.length === 0 ? [] : [`state in (${states.map(() => "?").join(", ")})`]),
     ...(filter.machine === undefined ? [] : ["machine = ?"]),
     ...(filter.thread === undefined ? [] : ["thread = ?"]),
+    ...(filter.utterance === undefined ? [] : ["utterance = ?"]),
+    ...(filter.step === undefined ? [] : ["step = ?"]),
   ].join(" and ")
   return [
     where,
-    [at, ...kinds, ...states, ...(filter.machine === undefined ? [] : [filter.machine]), ...(filter.thread === undefined ? [] : [filter.thread])],
+    [
+      at,
+      ...kinds,
+      ...states,
+      ...(filter.machine === undefined ? [] : [filter.machine]),
+      ...(filter.thread === undefined ? [] : [filter.thread]),
+      ...(filter.utterance === undefined ? [] : [filter.utterance]),
+      ...(filter.step === undefined ? [] : [filter.step]),
+    ],
   ]
 }
 
@@ -225,7 +246,7 @@ export const fromStore = (store: Store.Store["Type"]): Ledger["Type"] => ({
   prepare: (step) =>
     Effect.gen(function* () {
       const at = yield* Clock.currentTimeMillis
-      const { commandId, messageId } = ids(step.utterance, step.step, step.message)
+      const { commandId, messageId } = ids(step.utterance, step.step, step.message, step.part)
       const body = JSON.stringify(step.body({ commandId, messageId }) ?? null)
       return yield* store.transaction((database: Database): Prepared => {
         const written = database
