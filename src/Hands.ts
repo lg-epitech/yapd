@@ -3,6 +3,7 @@ import * as Brain from "./Brain.ts"
 import * as Launcher from "./Launcher.ts"
 import * as Ledger from "./Ledger.ts"
 import { addressed, type Lines, unaddressed } from "./Persona.ts"
+import * as Reminders from "./Reminders.ts"
 import * as T3Actions from "./T3Actions.ts"
 import * as T3CodeLauncher from "./T3CodeLauncher.ts"
 import type * as T3CodeServer from "./T3CodeServer.ts"
@@ -26,8 +27,25 @@ import type * as Threads from "./Threads.ts"
 export type Act =
   | { readonly _tag: "Message"; readonly to: Threads.Ref; readonly text: string; readonly how: T3Actions.When }
   | { readonly _tag: "Stop"; readonly to: Threads.Ref }
-  /** Takes back what was just done: a stop, by letting the thread carry on, or a message, by withdrawing it. */
-  | { readonly _tag: "Undo"; readonly to: Option.Option<Threads.Ref>; readonly carry: boolean }
+  /**
+   * Takes back what was just done: a stop, by letting the thread carry on, a
+   * message, by withdrawing it, or a tidy, by doing the opposite to each
+   * thread it tidied. `only` when he said which he meant: a message, or
+   * what was done to a thread by tidying it.
+   */
+  | { readonly _tag: "Undo"; readonly to: Option.Option<Threads.Ref>; readonly carry: boolean; readonly only?: "message" | "tidy" }
+  /**
+   * Tidies threads in T3 Code, in the order given, each once, as he agreed
+   * to: renamed to `title`, as he said it, or snoozed `until` then, in UTC
+   * to the millisecond, as T3 Code takes it and gives it back.
+   */
+  | {
+      readonly _tag: "Tidy"
+      readonly to: ReadonlyArray<Tidied>
+      readonly what: Tidying
+      readonly title?: string
+      readonly until?: string
+    }
   /** Allows, or turns down, what the thread waits on him for: only `requestId`, the request he heard. Never for always. */
   | { readonly _tag: "Decide"; readonly to: Threads.Ref; readonly requestId: string; readonly decision: Decision }
   /**
@@ -48,6 +66,33 @@ export type Act =
 
 /** What an approval is answered with by voice: allowed, for the rest of the thread's work when he says so, or turned down. */
 export type Decision = "accept" | "acceptForSession" | "decline"
+
+/** The ways a thread is tidied by voice, as the brain names them. */
+export type Tidying = "archive" | "unarchive" | "rename" | "snooze" | "unsnooze" | "settle" | "unsettle" | "pin" | "unpin"
+
+/** A thread to tidy, and what it's called aloud as he asked, which is how it's named once it's gone from the desk, as an archived one is. */
+export interface Tidied {
+  readonly ref: Threads.Ref
+  readonly called: string
+}
+
+/** What came of tidying one thread, or of taking that back. */
+export interface Tidy {
+  readonly to: Threads.Ref
+  readonly called: string
+  /** What went to T3 Code for it, or was to. */
+  readonly command: TidyCommand
+  readonly outcome: Went
+  /** Archived, how many of the reminders on it were dropped with it; unarchived as he took that back, how many came back. */
+  readonly reminders?: number
+  /** Unarchived as he took archiving it back, it was at work when it was archived, which stopped that for good. */
+  readonly stopped?: boolean
+  /** Taken back, what T3 Code had cleared that was put back as it was: a snooze until then, a settle or a pin. */
+  readonly restored?: ReadonlyArray<{ readonly _tag: "Snooze"; readonly until: string } | { readonly _tag: "Settle" } | { readonly _tag: "Pin" }>
+}
+
+/** What tidies a thread, as T3 Code takes it: the one way, and for a rename or a snooze, the title or until when. */
+export type TidyCommand = Extract<T3Actions.Command, { readonly _tag: "Archive" | "Unarchive" | "Rename" | "Snooze" | "Unsnooze" | "Settle" | "Unsettle" | "Pin" | "Unpin" }>
 
 /**
  * For a message in place of the turn under way, done as a stop, as a step of
@@ -88,9 +133,11 @@ export type Outcome =
   | { readonly _tag: "Read"; readonly row: Ledger.Row }
   /** What it answers no longer waits on him, as when it was dealt with in T3 Code meanwhile: nothing's done, and nothing's said. */
   | { readonly _tag: "Moot" }
+  /** What came of tidying each thread, in order, or, `undone`, of taking a tidy back, each thread by what went to it. */
+  | { readonly _tag: "Tidied"; readonly each: ReadonlyArray<Tidy>; readonly undone: boolean }
 
 /** What came of a step that was written down: gone, turned down, never sent or unknown. */
-type Went = Exclude<Outcome, { readonly _tag: "Twin" | "Read" | "Moot" }>
+export type Went = Exclude<Outcome, { readonly _tag: "Twin" | "Read" | "Moot" | "Tidied" }>
 
 /** What a message in the queue waits on: the turn under way, for something it asked him, or its last bits of work; or the queue, on hold. */
 export type Waiting = "asked" | "finishing" | "held"
@@ -127,6 +174,17 @@ export interface Reconciled {
 export interface Step {
   readonly utterance: string
   readonly step: number
+}
+
+/** A step, or, for one done to several threads, which of them, from 1, as the ledger has it. */
+interface Part extends Step {
+  readonly part?: number
+}
+
+/** What reaches a thread's machine, and the thread as it is, unless it's archived, which nothing shows. */
+interface Reached {
+  readonly actions: T3Actions.Actions
+  readonly thread: T3Live.Thread | undefined
 }
 
 /** What yapd does to threads, each step once. */
@@ -284,11 +342,27 @@ const unconfirmedAnswer = "I couldn't confirm your earlier answer got there, so 
  */
 const unsettled = (row: Pick<Ledger.Row, "state" | "reason">) => row.state === "abandoned" && ![replaced, unreadable].includes(row.reason ?? "")
 
+/** A thread as it was before it was tidied, which taking that back puts back as far as T3 Code lets it. */
+const Before = Schema.Struct({
+  title: Schema.String,
+  pinnedAt: Schema.NullOr(Schema.String),
+  snoozedUntil: Schema.NullOr(Schema.String),
+  settledOverride: Schema.NullOr(Schema.String),
+})
+
+/** What every tidy keeps beside its command, which T3 Code isn't sent: what the thread was called aloud then, and how it was. */
+const beside = {
+  called: Schema.optionalWith(Schema.String, { exact: true }),
+  before: Schema.optionalWith(Before, { exact: true }),
+}
+
 /**
  * The commands kept in the ledger, read back to send again. A stop to tell a
  * turn something in its place, and letting go of a queue to ask it to carry
  * on, keep what it's to be told next, which T3 Code isn't sent, so a restart
- * between the two can say it never was.
+ * between the two can say it never was. An archive keeps the reminders it
+ * drops, and whether the thread was at work, which it stops for good; an
+ * unarchive that takes one back, the reminders it brings back.
  */
 const Body = Schema.Union(
   Schema.Struct({ _tag: Schema.Literal("Send"), text: Schema.String, messageId: Schema.String, how: Schema.Literal("now", "after", "restart") }),
@@ -301,8 +375,101 @@ const Body = Schema.Union(
     requestId: Schema.String,
     answers: Schema.Record({ key: Schema.String, value: Schema.Union(Schema.String, Schema.Array(Schema.String)) }),
   }),
+  Schema.Struct({
+    _tag: Schema.Literal("Archive"),
+    ...beside,
+    reminders: Schema.optionalWith(Schema.Array(Schema.Number), { exact: true }),
+    working: Schema.optionalWith(Schema.Boolean, { exact: true }),
+  }),
+  Schema.Struct({ _tag: Schema.Literal("Unarchive"), ...beside, reminders: Schema.optionalWith(Schema.Array(Schema.Number), { exact: true }) }),
+  Schema.Struct({ _tag: Schema.Literal("Rename"), title: Schema.String, ...beside }),
+  Schema.Struct({ _tag: Schema.Literal("Snooze"), until: Schema.String, ...beside }),
+  Schema.Struct({ _tag: Schema.Literal("Unsnooze"), ...beside }),
+  Schema.Struct({ _tag: Schema.Literal("Settle"), ...beside }),
+  Schema.Struct({ _tag: Schema.Literal("Unsettle"), ...beside }),
+  Schema.Struct({ _tag: Schema.Literal("Pin"), ...beside }),
+  Schema.Struct({ _tag: Schema.Literal("Unpin"), ...beside }),
 )
 const command = Schema.decodeUnknownOption(Body)
+
+/** A tidy as the ledger keeps it. */
+type TidyBody = Extract<typeof Body.Type, { readonly _tag: TidyCommand["_tag"] }>
+
+const tidyTags: ReadonlyArray<string> = ["Archive", "Unarchive", "Rename", "Snooze", "Unsnooze", "Settle", "Unsettle", "Pin", "Unpin"]
+
+/** A tidy in the ledger as it went, or was to, with what it kept beside it. */
+const tidyOf = (body: unknown): Option.Option<TidyBody> => Option.filter(command(body), (sent): sent is TidyBody => tidyTags.includes(sent._tag))
+
+/** What went to T3 Code for a tidy, without what it kept beside it. */
+const sentOf = (body: TidyBody): TidyCommand => {
+  switch (body._tag) {
+    case "Rename":
+      return { _tag: "Rename", title: body.title }
+    case "Snooze":
+      return { _tag: "Snooze", until: body.until }
+    default:
+      return { _tag: body._tag }
+  }
+}
+
+/** What each way of tidying goes to T3 Code as. */
+const tidyings: Readonly<Record<Tidying, TidyCommand["_tag"]>> = {
+  archive: "Archive",
+  unarchive: "Unarchive",
+  rename: "Rename",
+  snooze: "Snooze",
+  unsnooze: "Unsnooze",
+  settle: "Settle",
+  unsettle: "Unsettle",
+  pin: "Pin",
+  unpin: "Unpin",
+}
+
+/** What a tidy goes to T3 Code as: none for a rename with no title, or a snooze with no end. */
+const tidyCommand = (act: Extract<Act, { readonly _tag: "Tidy" }>): TidyCommand | undefined => {
+  const tag = tidyings[act.what]
+  if (tag === "Rename") return act.title === undefined || act.title.trim() === "" ? undefined : { _tag: tag, title: act.title.trim() }
+  if (tag === "Snooze") return act.until === undefined ? undefined : { _tag: tag, until: act.until }
+  return { _tag: tag }
+}
+
+/** What's kept in the ledger for a tidy: what goes to T3 Code, with what it keeps beside it, which an archive or an unarchive has more of. */
+const tidyBody = (
+  sending: TidyCommand,
+  extra: {
+    readonly called: string
+    readonly before?: typeof Before.Type
+    readonly reminders?: ReadonlyArray<number>
+    readonly working?: boolean
+  },
+): TidyBody => {
+  const { reminders, working, ...rest } = extra
+  switch (sending._tag) {
+    case "Archive":
+      return { ...sending, ...rest, ...(reminders === undefined ? {} : { reminders }), ...(working === undefined ? {} : { working }) }
+    case "Unarchive":
+      return { ...sending, ...rest, ...(reminders === undefined ? {} : { reminders }) }
+    default:
+      return { ...sending, ...rest }
+  }
+}
+
+/**
+ * The threads yapd archived for him, as the ledger has it, newest first, each
+ * as it was called then: archived, and not unarchived since, by his word or
+ * as he took it back. Not those he archived by hand in T3 Code.
+ */
+export const archives = (rows: ReadonlyArray<Ledger.Row>): ReadonlyArray<Tidied & { readonly at: number }> => {
+  const archived = new Map<string, Tidied & { readonly at: number }>()
+  for (const row of rows.toSorted((one, other) => one.at - other.at)) {
+    if (row.state !== "sent") continue
+    const key = `${row.machine}\n${row.thread}`
+    const body = tidyOf(row.body)
+    if (Option.exists(body, ({ _tag }) => _tag === "Archive")) archived.set(key, { ref: refOf(row), called: Option.getOrUndefined(body)?.called ?? "a thread", at: row.at })
+    if (Option.exists(body, ({ _tag }) => _tag === "Unarchive")) archived.delete(key)
+  }
+  return [...archived.values()].toSorted((one, other) => other.at - one.at)
+}
 
 /** Answers to a request's questions in an order that doesn't depend on how they were put together. */
 const ordered = (answers: Readonly<Record<string, string | ReadonlyArray<string>>>) =>
@@ -338,6 +505,19 @@ const reasons: ReadonlyArray<readonly [RegExp, string]> = [
   [/\bis (expired|cancelled)\b/i, "It isn't waiting on that any more."],
   // It acts on a thread only while it's neither archived nor deleted.
   [/\bthread\b.*\bis not active\b/i, "It's been archived or deleted."],
+  // A thread already as tidying it would leave it, or archived meanwhile.
+  [/\bis already archived\b/i, "It's already archived."],
+  [/\bis not archived\b/i, "It isn't archived."],
+  [/^\s*thread\b[^:]*\bis archived\b/i, "It's been archived."],
+  // A snooze ends only ahead of now, and a thread waiting on him, or with a run in its queue, isn't snoozed.
+  [/\bis not in the future\b/i, "That time's already gone."],
+  [/\bpending approval or user-input request\b/i, "It's waiting on you, so it can't be snoozed."],
+  [/\bhas a queued run\b/i, "It has something waiting in its queue, so it can't be snoozed."],
+  // It settles only a thread with nothing going on, and says what to do first.
+  [/\bstill running\b.*\bbefore settling\b/i, "It's still working, so it can't be settled."],
+  [/\bwaiting on an approval or question\b.*\bbefore settling\b/i, "It's waiting on you, so it can't be settled."],
+  [/\bqueued message\b.*\bbefore settling\b/i, "It has a message waiting in its queue, so it can't be settled."],
+  [/\bbefore settling\b/i, "It's busy, so it can't be settled."],
   // It lets go of a queue only once a turn that ran into a usage limit is carried on, from T3 Code's app.
   [/\blimited thread\b/i, "It's hit a usage limit."],
 ]
@@ -437,6 +617,23 @@ const answered = (thread: T3Live.Thread, at: number, own: Option.Option<{ readon
 
 /** Whether it's in the middle of something a message would go into, or wait behind. */
 const busy = (thread: T3Live.Thread) => T3Live.busy(thread) || thread.activityRunStatus === "waiting"
+
+/** Whether it's at work, has a run in its queue, or waits on him, which archiving it stops for good. */
+const occupied = (thread: T3Live.Thread) => busy(thread) || thread.pendingRuntimeRequest !== null || thread.status === "queued"
+
+/** How a thread is before it's tidied, as the live view has it, to put back what can be should he take it back. */
+const stateOf = (thread: T3Live.Thread): typeof Before.Type => ({
+  title: thread.title,
+  pinnedAt: thread.pinnedAt,
+  snoozedUntil: thread.snoozedUntil,
+  settledOverride: thread.settledOverride,
+})
+
+/** What a tidy is noted with once it's taken back, so it's never taken back twice. */
+const takenBack = "Taken back."
+
+/** Why a tidy isn't taken back when it's one that's a way back itself, or kept nothing of how the thread was. */
+const oneWay = "I can only take back archiving, renaming, snoozing, settling or pinning a thread."
 
 /**
  * What its turn under way is waiting on, if it is: a turn finishing off takes
@@ -547,6 +744,8 @@ export const make = (options: {
   readonly ledger: Ledger.Ledger["Type"]
   /** When yapd started, in ms: what it did since is its own to settle, which a restart's look leaves alone. */
   readonly started?: number
+  /** What he set on threads, which archiving one drops, and taking that back brings back. */
+  readonly reminders?: Pick<Reminders.Reminders, "on" | "cancel" | "restore">
 }): Hands["Type"] => {
   const { threads, ledger, started = Number.POSITIVE_INFINITY } = options
 
@@ -733,13 +932,13 @@ export const make = (options: {
    */
   const dispatch = (
     row: Ledger.Row,
-    reached: { readonly actions: T3Actions.Actions; readonly thread: T3Live.Thread },
+    reached: Reached,
     last = false,
     at?: T3Actions.When,
   ): Effect.Effect<Went> =>
     Effect.gen(function* () {
-      const { actions } = reached
-      const wasBusy = busy(reached.thread)
+      const { actions, thread } = reached
+      const wasBusy = thread !== undefined && busy(thread)
       const what = doing[row.kind]
       const read = command(row.body)
       if (Option.isNone(read)) {
@@ -753,7 +952,7 @@ export const make = (options: {
       const earlier = last && row.state !== "failed"
       const result = yield* Effect.either(actions.run(row.thread, sent, row.commandId))
       if (Either.isRight(result)) {
-        const gone = earlier ? yield* kept(row, reached) : Option.none<Went>()
+        const gone = earlier && thread !== undefined ? yield* kept(row, { actions, thread }) : Option.none<Went>()
         if (Option.isSome(gone)) return gone.value
         return yield* entering(row, yield* entered(row, actions, wasBusy, how))
       }
@@ -768,10 +967,10 @@ export const make = (options: {
         return yield* failing({ _tag: "NotSent", reason, again } satisfies Outcome, `${what}, it never went`)
       }
       // It went, and may have been done: looked for once, never sent again on its own.
-      if (earlier && row.kind === "message" && row.messageId !== null) {
+      if (earlier && row.kind === "message" && row.messageId !== null && thread !== undefined) {
         // Sent once more, what's found may be there from the first time, so it's made of as it is when T3 Code answers for it.
         const look = yield* Effect.either(actions.traced(row.thread, row.messageId))
-        if (Either.isRight(look) && Option.isSome(look.right)) return yield* placed(row, look.right.value, reached.thread, `found after: ${reason}`)
+        if (Either.isRight(look) && Option.isSome(look.right)) return yield* placed(row, look.right.value, thread, `found after: ${reason}`)
       } else {
         const found = yield* Effect.either(landed(row, actions))
         if (Either.isRight(found) && found.right) return yield* entering(row, yield* entered(row, actions, wasBusy, how), `found after: ${reason}`)
@@ -790,17 +989,17 @@ export const make = (options: {
    * as if it never went when it may have.
    */
   const once = (
-    step: Step,
+    step: Part,
     kind: Ledger.Kind,
     to: Threads.Ref,
     body: (ids: { readonly commandId: string; readonly messageId: string | null }) => typeof Body.Type,
-    reached: { readonly actions: T3Actions.Actions; readonly thread: T3Live.Thread },
+    reached: Reached,
     wanted: Effect.Effect<boolean>,
     digest?: string,
   ) =>
     Effect.gen(function* () {
       if (!(yield* wanted)) {
-        const there = yield* ledger.get(Ledger.ids(step.utterance, step.step, false).commandId)
+        const there = yield* ledger.get(Ledger.ids(step.utterance, step.step, false, step.part).commandId)
         if (Option.isSome(there)) return settled(there.value)
         return yield* failing({ _tag: "NotSent", reason: switchedOff, again: Option.none() } satisfies Outcome, doing[kind])
       }
@@ -1192,17 +1391,23 @@ export const make = (options: {
 
   /**
    * Withdraws the message just sent while it's still in the queue; once it's
-   * been read, it can only be told to ignore it. It's only ever the last thing
-   * done, never anything before it.
+   * been read, it can only be told to ignore it. A tidy just done is taken
+   * back, every thread of it, as `untidy` has it. It's only ever the last
+   * thing done, never anything before it, of what he said he meant, `only`.
    */
-  const withdraw = (step: Step, to: Option.Option<Threads.Ref>, wanted: Effect.Effect<boolean>) =>
+  const withdraw = (step: Step, to: Option.Option<Threads.Ref>, wanted: Effect.Effect<boolean>, only?: "message" | "tidy") =>
     Effect.gen(function* () {
-      const last = yield* ledger.latest(scratch, Option.match(to, { onNone: () => ({}), onSome: ({ machine, id }) => ({ machine, thread: id }) }))
+      const kinds: ReadonlyArray<Ledger.Kind> = only === "tidy" ? ["tidy"] : only === "message" ? ["message", "stop", "undo", "decide", "reply", "start", "relay"] : []
+      const last = yield* ledger.latest(scratch, {
+        ...Option.match(to, { onNone: () => ({}), onSome: ({ machine, id }) => ({ machine, thread: id }) }),
+        ...(kinds.length === 0 ? {} : { kinds }),
+      })
       const refused = (reason: string) => failing({ _tag: "Refused", reason } satisfies Outcome, "take it back")
-      if (Option.isNone(last)) return yield* refused("I haven't done anything in the last couple of minutes.")
+      if (Option.isNone(last)) return yield* refused(only === "tidy" ? "I haven't tidied anything in the last couple of minutes." : "I haven't done anything in the last couple of minutes.")
       const row = last.value
       if (row.kind === "stop") return yield* refused("It was a stop, which carrying on takes back.")
       if (row.kind === "start") return yield* refused("Starting work can't be taken back yet.")
+      if (row.kind === "tidy") return yield* untidy(step, row, wanted)
       const messageId = row.messageId
       if (row.kind !== "message" || messageId === null) return yield* refused("There's nothing more to take back.")
       if (row.state !== "sent" && row.state !== "unknown") return yield* refused("It never went, so there's nothing to take back.")
@@ -1234,6 +1439,177 @@ export const make = (options: {
       }
       yield* Effect.logInfo(`${row.commandId} was read already, so it can only be told to ignore it`)
       return { _tag: "Read", row } satisfies Outcome
+    })
+
+  /** What reaches an archived thread's machine, with nothing of the thread itself, which the live view no longer shows: only T3 Code's word says whether it's still archived. */
+  const archivedOn = (to: Threads.Ref): Either.Either<Reached, string> =>
+    Option.match(threads.actions(to.machine), {
+      onNone: () => Either.left(`I can't reach the threads on ${to.machine} right now.`),
+      onSome: (actions) => Either.right({ actions, thread: undefined }),
+    })
+
+  /**
+   * Tidies each thread as he agreed to, in order, each once, under an id of
+   * its own when there are several: its row is written first, with how the
+   * thread was, then sent once, as any step is. Worked out again, each is
+   * what it came to. Archived, what he set on a thread goes with it, as it
+   * would once T3 Code says it's gone, but said with it and kept in its row,
+   * to bring back should he take it back.
+   */
+  const tidy = (step: Step, act: Extract<Act, { readonly _tag: "Tidy" }>, wanted: Effect.Effect<boolean>) =>
+    Effect.gen(function* () {
+      const each: Array<Tidy> = []
+      const sending = tidyCommand(act)
+      if (sending === undefined) {
+        return yield* failing({ _tag: "Refused", reason: act.what === "rename" ? "I didn't catch the new title." : "I couldn't tell until when." } satisfies Outcome, doing.tidy)
+      }
+      for (const [index, { ref: to, called }] of act.to.entries()) {
+        const at: Part = act.to.length === 1 ? step : { ...step, part: index + 1 }
+        const there = yield* ledger.get(Ledger.ids(at.utterance, at.step, false, at.part).commandId)
+        if (Option.isSome(there)) {
+          each.push({ to, called, command: Option.getOrElse(Option.map(tidyOf(there.value.body), sentOf), () => sending), outcome: settled(there.value) })
+          continue
+        }
+        const reached = act.what === "unarchive" ? archivedOn(to) : yield* reach(to)
+        if (Either.isLeft(reached)) {
+          each.push({ to, called, command: sending, outcome: yield* failing({ _tag: "Refused", reason: reached.left } satisfies Outcome, doing.tidy) })
+          continue
+        }
+        const { thread } = reached.right
+        // What he set on it that's still to come, read as it's written down, so what archiving it drops is what taking that back brings back.
+        const reminders = sending._tag === "Archive" && options.reminders !== undefined ? (yield* options.reminders.on(to)).map(({ id }) => id) : undefined
+        const body = tidyBody(sending, {
+          called,
+          ...(thread === undefined ? {} : { before: stateOf(thread) }),
+          ...(reminders === undefined ? {} : { reminders }),
+          ...(sending._tag === "Archive" ? { working: thread !== undefined && occupied(thread) } : {}),
+        })
+        const outcome = yield* once(at, "tidy", to, () => body, reached.right, wanted)
+        const dropped = outcome._tag === "Done" ? yield* dropping(reminders ?? []) : 0
+        each.push({ to, called, command: sending, outcome, ...(dropped === 0 ? {} : { reminders: dropped }) })
+      }
+      return { _tag: "Tidied", each, undone: false } satisfies Outcome
+    })
+
+  /** Cancels what he set on a thread just archived, by id, and how many were still to come. */
+  const dropping = (ids: ReadonlyArray<number>) =>
+    Option.match(Option.fromNullable(options.reminders), {
+      onNone: () => Effect.succeed(0),
+      onSome: (reminders) => Effect.map(Effect.forEach(ids, reminders.cancel), (cancelled) => cancelled.filter(Option.isSome).length),
+    })
+
+  /** Brings back what archiving a thread dropped, by id, now it's unarchived, and how many came back. */
+  const bringing = (ids: ReadonlyArray<number>) =>
+    Option.match(Option.fromNullable(options.reminders), {
+      onNone: () => Effect.succeed(0),
+      onSome: (reminders) => Effect.map(Effect.forEach(ids, reminders.restore), (restored) => restored.filter(Option.isSome).length),
+    })
+
+  /** The way back from a tidy, as it went: none for one that's a way back itself, or a rename that kept nothing of the title before. */
+  const opposite = (was: TidyBody, now: number): TidyCommand | undefined => {
+    switch (was._tag) {
+      case "Archive":
+        return { _tag: "Unarchive" }
+      case "Rename":
+        return was.before === undefined ? undefined : { _tag: "Rename", title: was.before.title }
+      case "Snooze": {
+        // Snoozed till then before, and still to wake later, it's snoozed till then again.
+        const earlier = was.before?.snoozedUntil ?? null
+        return earlier !== null && Date.parse(earlier) > now ? { _tag: "Snooze", until: earlier } : { _tag: "Unsnooze" }
+      }
+      case "Settle":
+        return { _tag: "Unsettle" }
+      case "Pin":
+        return { _tag: "Unpin" }
+      default:
+        return undefined
+    }
+  }
+
+  /**
+   * Takes back the tidy just done, every thread of it, as far as T3 Code
+   * lets it: the way back from what went to each, under ids of this step,
+   * then what T3 Code cleared as it was tidied that can be put back, as
+   * `putBack` has it. Each taken back is noted so, and never taken back
+   * twice. Unarchived, what archiving it dropped comes back; what it stopped
+   * never starts again, which is never claimed, nor is unsettling it ever
+   * taken for leaving it as T3 Code would have it on its own.
+   */
+  const untidy = (step: Step, last: Ledger.Row, wanted: Effect.Effect<boolean>) =>
+    Effect.gen(function* () {
+      const refused = (reason: string) => failing({ _tag: "Refused", reason } satisfies Outcome, "take a tidy back")
+      const rows = yield* ledger.steps(0, { kinds: ["tidy"], utterance: last.utterance, step: last.step })
+      const now = yield* Clock.currentTimeMillis
+      const going = rows.flatMap((row) =>
+        (row.state === "sent" || row.state === "unknown") && row.reason !== takenBack
+          ? Option.toArray(Option.map(tidyOf(row.body), (was) => ({ row, was, back: opposite(was, now) })))
+          : [],
+      )
+      if (going.length === 0) {
+        return yield* refused(rows.some(({ reason }) => reason === takenBack) ? "I've taken that back already." : "It never went, so there's nothing to take back.")
+      }
+      // Never some of them and not the rest, for want of a way back.
+      if (going.some(({ back }) => back === undefined)) return yield* refused(oneWay)
+      let part = 0
+      const next = (): Part => ({ ...step, part: ++part })
+      const each: Array<Tidy> = []
+      for (const { row, was, back } of going) {
+        if (back === undefined) continue
+        const to = refOf(row)
+        const called = was.called ?? "that thread"
+        const reached = back._tag === "Unarchive" ? archivedOn(to) : yield* reach(to)
+        if (Either.isLeft(reached)) {
+          each.push({ to, called, command: back, outcome: yield* failing({ _tag: "Refused", reason: reached.left } satisfies Outcome, doing.undo) })
+          continue
+        }
+        const reminders = was._tag === "Archive" ? was.reminders : undefined
+        const outcome = yield* once(next(), "undo", to, () => tidyBody(back, { called, ...(reminders === undefined ? {} : { reminders }) }), reached.right, wanted)
+        if (outcome._tag !== "Done") {
+          each.push({ to, called, command: back, outcome })
+          continue
+        }
+        yield* ledger.settle(row.commandId, "abandoned", { reason: takenBack, from: [row.state] })
+        const brought = yield* bringing(reminders ?? [])
+        const restored = yield* putBack(was, to, called, reached.right, wanted, next, now)
+        each.push({
+          to,
+          called,
+          command: back,
+          outcome,
+          ...(brought === 0 ? {} : { reminders: brought }),
+          ...(was._tag === "Archive" && was.working === true ? { stopped: true } : {}),
+          ...(restored.length === 0 ? {} : { restored }),
+        })
+      }
+      return { _tag: "Tidied", each, undone: true } satisfies Outcome
+    })
+
+  /**
+   * What T3 Code cleared as a thread was tidied, put back as it was, once
+   * that's taken back, as far as the thread, as `reached` read it before it
+   * was, shows it cleared, each under an id of this step, and what went:
+   * a pin clears a snooze and a settle, so taking it back snoozes it again
+   * till then, while that's still ahead, and settles it again; a settle may
+   * clear a pin, so taking it back pins it again, unless it's snoozed now,
+   * which pinning would clear.
+   */
+  const putBack = (was: TidyBody, to: Threads.Ref, called: string, reached: Reached, wanted: Effect.Effect<boolean>, next: () => Part, now: number) =>
+    Effect.gen(function* () {
+      const { before } = was
+      const { thread } = reached
+      if (before === undefined || thread === undefined) return []
+      const wanting: Array<Extract<TidyCommand, { readonly _tag: "Snooze" | "Settle" | "Pin" }>> = []
+      if (was._tag === "Pin") {
+        if (before.snoozedUntil !== null && Date.parse(before.snoozedUntil) > now && thread.snoozedUntil === null) wanting.push({ _tag: "Snooze", until: before.snoozedUntil })
+        if (before.settledOverride === "settled" && thread.settledOverride !== "settled") wanting.push({ _tag: "Settle" })
+      }
+      if (was._tag === "Settle" && before.pinnedAt !== null && thread.pinnedAt === null && thread.snoozedUntil === null) wanting.push({ _tag: "Pin" })
+      const restored: Array<NonNullable<Tidy["restored"]>[number]> = []
+      for (const command of wanting) {
+        const went = yield* once(next(), "undo", to, () => tidyBody(command, { called }), reached, wanted)
+        if (went._tag === "Done") restored.push(command)
+      }
+      return restored
     })
 
   /**
@@ -1358,7 +1734,9 @@ export const make = (options: {
         case "Stop":
           return stop(step, act.to, wanted)
         case "Undo":
-          return act.carry ? carry(step, act.to, wanted) : withdraw(step, act.to, wanted)
+          return act.carry ? carry(step, act.to, wanted) : withdraw(step, act.to, wanted, act.only)
+        case "Tidy":
+          return tidy(step, act, wanted)
       }
     },
     // Taken to send again, it's seen through, as a step is once written.
@@ -1566,7 +1944,95 @@ export const failed = (act: Act, outcome: Extract<Outcome, { readonly reason: st
       if (outcome.reason === unconfirmedAnswer) return `I couldn't confirm ${name ?? "it"} got ${answer} before${sir}, so I won't risk sending it again: it needs T3 Code.`
       return outcome._tag === "Unknown" ? `I couldn't confirm ${name ?? "it"} got ${answer}${sir}.` : `I couldn't get ${answer} to ${name ?? "it"}${sir}: ${reason}`
     }
+    case "Tidy": {
+      const { verb, past } = tidyWords[tidyings[act.what]]
+      return outcome._tag === "Unknown" ? `I couldn't confirm ${name ?? "it"} was ${past}${sir}.` : `I couldn't ${verb} ${name ?? "it"}${sir}: ${reason}`
+    }
   }
+}
+
+/** How each way of tidying is said: what's done, and what's been done. */
+const tidyWords: Readonly<Record<TidyCommand["_tag"], { readonly verb: string; readonly past: string }>> = {
+  Archive: { verb: "archive", past: "archived" },
+  Unarchive: { verb: "unarchive", past: "unarchived" },
+  Rename: { verb: "rename", past: "renamed" },
+  Snooze: { verb: "snooze", past: "snoozed" },
+  Unsnooze: { verb: "unsnooze", past: "unsnoozed" },
+  Settle: { verb: "settle", past: "settled" },
+  Unsettle: { verb: "unsettle", past: "unsettled" },
+  Pin: { verb: "pin", past: "pinned" },
+  Unpin: { verb: "unpin", past: "unpinned" },
+}
+
+/** Until when a thread's snoozed, as it's said: "3:00 PM" today, "tomorrow at 9:00 AM", "Tuesday at 3:00 PM", never as T3 Code writes it. */
+const waking = (until: string, now: number) => Reminders.ahead(Date.parse(until), now).replace(/^(at|on) /, "")
+
+/** "Was" for one, "were" for several. */
+const were = (names: ReadonlyArray<string>) => (names.length === 1 ? "was" : "were")
+
+/**
+ * What's said once threads are tidied, or a tidy taken back, naming the
+ * thread, and with several, how many went, naming each that didn't and why:
+ * what went, never more. A renamed title is said only when it can be read
+ * aloud. An archive says what of his it dropped, and taking it back what
+ * came back, that what it stopped stays stopped, and what else it put back.
+ */
+export const tidied = (outcome: Extract<Outcome, { readonly _tag: "Tidied" }>, lines: Lines, now: number) => {
+  const sir = addressed(lines)
+  const { each, undone } = outcome
+  const went = each.filter(({ outcome }) => outcome._tag === "Done")
+  const first = each[0]
+  if (first === undefined) return `There was nothing to tidy${sir}.`
+  const { verb, past } = tidyWords[first.command._tag]
+  /** One thread's, done. */
+  const one = ({ command, called }: Tidy) => {
+    switch (command._tag) {
+      case "Rename":
+        if (undone) return Brain.readable(command.title) ? `Renamed it back to ${command.title}${sir}.` : `Renamed it back${sir}: ${called}.`
+        return Brain.readable(command.title) ? `Renamed ${called} to ${command.title}${sir}.` : `Renamed${sir}: ${called}.`
+      case "Snooze":
+        return `Snoozed until ${waking(command.until, now)}${sir}: ${called}.`
+      default:
+        return `${capital(past)}${sir}: ${called}.`
+    }
+  }
+  /** All of them, or some, done. */
+  const several = () => {
+    const until = first.command._tag === "Snooze" ? ` until ${waking(first.command.until, now)}` : ""
+    if (went.length === each.length) return `${capital(past)} ${each.length === 2 ? "both" : `all ${Brain.count(each.length)}`}${until}${sir}.`
+    return `${capital(past)} ${Brain.count(went.length)} of the ${Brain.count(each.length)}${until}${sir}.`
+  }
+  // What didn't go, by why, each named; with nothing done, the first of it addresses him.
+  const failed = each.filter(({ outcome }) => outcome._tag !== "Done")
+  const reasons = [...new Set(failed.map(({ outcome }) => (outcome._tag === "Unknown" ? "" : "reason" in outcome ? outcome.reason : "")))]
+  const whys = reasons.map((reason, index) => {
+    const names = failed.filter(({ outcome }) => (outcome._tag === "Unknown" ? "" : "reason" in outcome ? outcome.reason : "") === reason).map(({ called }) => called)
+    const address = went.length === 0 && index === 0 ? sir : ""
+    return reason === "" ? `I couldn't confirm ${Brain.both(names)} ${were(names)} ${past}${address}.` : `I couldn't ${verb} ${Brain.both(names)}${address}: ${after(reason)}`
+  })
+  const done = went.length === 0 ? [] : [each.length === 1 ? one(first) : several()]
+  // What of his went with it, or came back.
+  const reminders = went.reduce((sum, { reminders }) => sum + (reminders ?? 0), 0)
+  const its = each.length === 1 ? "its" : "their"
+  const kept =
+    reminders === 0
+      ? []
+      : undone
+        ? [reminders === 1 ? `${capital(its)} reminder is back.` : `${capital(its)} ${Brain.count(reminders)} reminders are back.`]
+        : [
+            reminders === 1
+              ? `I dropped ${its} reminder; scratch that to bring both back.`
+              : `I dropped ${its} ${Brain.count(reminders)} reminders; scratch that to bring them all back.`,
+          ]
+  const stopped = went.filter(({ stopped }) => stopped === true).map(({ called }) => called)
+  const still = stopped.length === 0 ? [] : [`What ${each.length === 1 ? "it" : Brain.both(stopped)} ${were(stopped)} doing stays stopped.`]
+  const restored = went.flatMap(({ restored, called }) =>
+    (restored ?? []).map((back) => {
+      const it = each.length === 1 ? "It's" : `${capital(called)} is`
+      return back._tag === "Snooze" ? `${it} snoozed until ${waking(back.until, now)} again.` : `${it} ${back._tag === "Pin" ? "pinned" : "settled"} again.`
+    }),
+  )
+  return [...done, ...whys, ...kept, ...still, ...restored].join(" ")
 }
 
 /** That the same words went to the same thread lately: "I sent that a minute ago, sir." */
@@ -1610,6 +2076,8 @@ export const unsure = (
   const name = Option.getOrUndefined(called)
   const sent = command(row.body)
   if (row.kind === "start" && row.state === "failed") return `Before I restarted, I asked for new work${addressed(lines)}, but ${after(why)}`
+  const tidying = tidyOf(row.body)
+  if (Option.isSome(tidying)) return untidied([{ ...row, called: name ?? tidying.value.called ?? "a thread" }], lines)
   if (why === unfollowed) {
     return row.kind === "stop"
       ? `Before I restarted, I stopped ${name ?? "the work"}${addressed(lines)}, but didn't get to tell it what to do instead.`
@@ -1629,6 +2097,26 @@ export const unsure = (
             : `what I last did${name === undefined ? "" : ` to ${name}`} went through`
   return `Before I restarted, I couldn't confirm ${what}${addressed(lines)}.${why === unconfirmable ? "" : ` ${why}`}`
 }
+
+/**
+ * Said after a restart, once for a step that tidied several threads, or took
+ * that back, none of which it could confirm, naming each as it was called
+ * then: never done again.
+ */
+export const untidied = (rows: ReadonlyArray<Pick<Ledger.Row, "body"> & { readonly called: string }>, lines: Lines) => {
+  const names = rows.map(({ called }) => called)
+  const past = Option.match(Option.flatMap(Option.fromNullable(rows[0]), ({ body }) => tidyOf(body)), {
+    onNone: () => "tidied",
+    onSome: ({ _tag }) => tidyWords[_tag].past,
+  })
+  return `Before I restarted, I couldn't confirm ${Brain.both(names)} ${were(names)} ${past}${addressed(lines)}.`
+}
+
+/** Whether a step in the ledger tidied a thread, or took that back. */
+export const tidies = (row: Pick<Ledger.Row, "body">) => Option.isSome(tidyOf(row.body))
+
+/** What a thread was called aloud as a step tidied it, as the ledger kept it. */
+export const tidiedAs = (row: Pick<Ledger.Row, "body">) => Option.getOrUndefined(Option.flatMap(tidyOf(row.body), ({ called }) => Option.fromNullable(called)))
 
 /** Said after a restart, for a message that wasn't found where it went and can't be offered to go again, with why, like "It's too long ago to send it again now." */
 export const unoffered = (lines: Lines, called: Option.Option<string>, why: string) =>

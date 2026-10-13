@@ -140,7 +140,8 @@ export const serve = Effect.gen(function* () {
     journal,
     store,
   })
-  const hands = Hands.make({ threads, ledger, started })
+  // Archiving a thread drops what he set on it, and taking that back brings it back.
+  const hands = Hands.make({ threads, ledger, started, reminders })
   const naming = yield* Journal.naming
   // What he muted, kept quiet whoever tells of it, until he unmutes it.
   const mutes = yield* Mutes.make(store)

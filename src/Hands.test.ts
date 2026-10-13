@@ -364,7 +364,7 @@ const resentLater = (again: "kept" | "lost", meanwhile: (bounded: Bounded) => Bo
         said:
           outcome._tag === "Done"
             ? Hands.done(message, outcome.how, lines, Option.none(), outcome)
-            : outcome._tag === "Twin" || outcome._tag === "Read" || outcome._tag === "Moot"
+            : outcome._tag === "Twin" || outcome._tag === "Read" || outcome._tag === "Moot" || outcome._tag === "Tidied"
               ? outcome._tag
               : Hands.failed(message, outcome, lines, Option.none()),
         noted: Option.getOrNull(Option.map(yield* ledger.get("yapd:u1:0"), ({ state, how, reason }) => ({ state, how, reason }))),
@@ -433,6 +433,26 @@ describe("Hands", () => {
     ])
     // Names of things, like a model, are said as they are.
     expect(Hands.plainly("Model gpt-6-sol isn't available.")).toBe("Model gpt-6-sol isn't available.")
+    // Tidying refused, as T3 Code 0.0.46 words it live: never an id, nor a time as it writes one.
+    expect(
+      [
+        "Thread thread_01JA is already archived.",
+        "Thread thread_01JA is not archived.",
+        "Thread thread_01JA snooze wake time 2026-10-13T07:00:00.000Z is not in the future.",
+        "Thread thread_01JA has a pending approval or user-input request and cannot be snoozed.",
+        "Thread thread_01JA is still running. Stop it before settling.",
+        "Thread thread_01JA is waiting on an approval or question. Answer it before settling.",
+        "Thread thread_01JA has a queued message. Send it or remove it from the queue before settling.",
+      ].map(Hands.plainly),
+    ).toEqual([
+      "It's already archived.",
+      "It isn't archived.",
+      "That time's already gone.",
+      "It's waiting on you, so it can't be snoozed.",
+      "It's still working, so it can't be settled.",
+      "It's waiting on you, so it can't be settled.",
+      "It has a message waiting in its queue, so it can't be settled.",
+    ])
   })
 
   test("a request that never left is said as not sent, and yes sends it again under the same ids", async () => {

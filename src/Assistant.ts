@@ -1842,11 +1842,19 @@ export const make = (options: {
             ? outcome.to
             : outcome._tag === "Twin" || outcome._tag === "Read"
               ? { machine: outcome.row.machine, id: outcome.row.thread }
-              : Option.isSome(kept)
-                ? { machine: kept.value.machine, id: kept.value.thread }
-                : act._tag === "Undo"
-                  ? Option.getOrUndefined(act.to)
-                  : act.to
+              : outcome._tag === "Tidied"
+                ? outcome.each.length === 1
+                  ? outcome.each[0]?.to
+                  : undefined
+                : Option.isSome(kept)
+                  ? { machine: kept.value.machine, id: kept.value.thread }
+                  : act._tag === "Undo"
+                    ? Option.getOrUndefined(act.to)
+                    : act._tag === "Tidy"
+                      ? act.to.length === 1
+                        ? act.to[0]?.ref
+                        : undefined
+                      : act.to
         const called = ref === undefined ? Option.none<string>() : naming(ref, situation)
         // In a question it's always named, since the question has to say what it's about.
         const name = (ref === undefined ? undefined : situation.desk.threads.find((listed) => Threads.same(listed.ref, ref))?.called) ?? "it"
@@ -1943,6 +1951,18 @@ export const make = (options: {
               news: Hands.readAlready(said, called),
               question: Hands.readAsks,
             })
+          }
+          case "Tidied": {
+            // Every thread named, whatever he's on about, and with several, each that didn't go, and why.
+            const line = Hands.tidied(outcome, said, now)
+            const went = outcome.each.some(({ outcome }) => outcome._tag === "Done")
+            yield* noting(line, {
+              tidied: outcome.each.map(({ to, command, outcome }) => ({ ...to, command: command._tag, outcome: outcome._tag, ...("reason" in outcome ? { reason: outcome.reason } : {}) })),
+              ...(outcome.undone ? { undone: true } : {}),
+            })
+            const told: Outcome = { say: line, subject: { ...subject, said: line }, kind: "done" }
+            // None of it went, the rest of the request doesn't either.
+            return went ? yield* free(onward(thought, told, Option.fromNullable(ref), at.step + 1, said)) : unfinished(told, decision.rest, said, situation.desk)
           }
           case "Moot": {
             // Dealt with in T3 Code meanwhile: nothing's done, and he's told so, and the rest of the request still is.
