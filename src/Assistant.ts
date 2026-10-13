@@ -3610,23 +3610,37 @@ export const make = (options: {
      * a minute before a reminder is never withdrawn in its place. Reminders
      * an archive just dropped come back with the thread, as taking that back
      * brings both, never as a reminder he set or cancelled before it: of the
-     * thread yapd archived he named, by its handle in ARCHIVED, that thread
-     * alone, only when the model's sure which, never every thread of it.
+     * thread he named, on the desk or by its handle in ARCHIVED, that thread
+     * alone, only when the model's sure which, and nothing for a handle
+     * that's neither. Every thread a tidy did is taken back, with none named,
+     * only when the model's sure he means that, never on a guess, which
+     * would tidy threads he didn't ask about.
      */
     const undoing = (plan: Brain.Plan, thought: Thought, said: Lines, at: Stepping): Effect.Effect<Outcome> =>
       Effect.gen(function* () {
         const { situation } = thought
         const taking = Brain.undoes(plan.decision.how)
-        if (taking === "thread") return yield* write(plan, thought, said, at)
-        const archived = taking === "reminder" ? Brain.archivedBy(plan.decision.target, situation) : Option.none()
-        const named = Option.orElse(Option.map(plan.target, ({ ref }) => ref), () => Option.map(archived, ({ ref }) => ref))
-        if (taking === "reminder" && (yield* droppedLately(situation, named))) {
-          if (Option.isSome(archived) && Option.isNone(Brain.archivedSurely(plan.decision, situation))) {
-            return unfinished(reply(said.cantTell, thought.subject), plan.decision.rest, said, situation.desk)
+        const handle = plan.decision.target.trim()
+        const unsure = () => unfinished(reply(said.cantTell, thought.subject), plan.decision.rest, said, situation.desk)
+        const unnamed = handle === "" && Option.isNone(plan.target)
+        if (taking === "thread") return plan.decision.how === "tidy" && unnamed && plan.decision.sure !== "high" ? unsure() : yield* write(plan, thought, said, at)
+        const archived = taking === "reminder" ? Brain.archivedBy(handle, situation) : Option.none()
+        // The thread he named, on the desk, even one taken for filled in for a reminder of none, or in ARCHIVED.
+        const listed = taking === "reminder" ? Option.orElse(plan.target, () => Option.fromNullable(situation.desk.threads.find((one) => one.handle === handle))) : plan.target
+        const whose = Option.orElse(Option.map(listed, ({ ref }) => ref), () => Option.map(archived, ({ ref }) => ref))
+        const dropping = taking === "reminder" && (yield* droppedLately(situation, Option.none()))
+        if (dropping) {
+          if (unnamed && plan.decision.sure !== "high") return unsure()
+          if (unnamed) return yield* write({ decision: { ...plan.decision, how: "tidy", target: "" }, target: Option.none() }, thought, said, at)
+          if (Option.isNone(whose)) return unsure()
+          if (yield* droppedLately(situation, whose)) {
+            if (!Brain.surely(plan.decision.sure, whose.value, situation)) return unsure()
+            return yield* write({ decision: { ...plan.decision, how: "tidy", target: handle }, target: listed }, thought, said, at)
           }
-          const target = Option.isSome(archived) ? plan.decision.target.trim() : ""
-          return yield* write({ decision: { ...plan.decision, how: "tidy", target }, target: Option.none() }, thought, said, at)
         }
+        // Of the thread he named, if he did, and while what an archive dropped is what he'd take back, even one taken for filled in: never
+        // a reminder of none he set before it, as if he'd named none.
+        const named = dropping ? whose : Option.orElse(Option.map(plan.target, ({ ref }) => ref), () => Option.map(archived, ({ ref }) => ref))
         // A reminder, a memory or the catch-up, only when he means that, never another.
         const changed = Option.filter(situation.noted ?? Option.none(), (last) => taking === "last" || Brain.changeOf(last) === taking)
         const last = Option.getOrUndefined(changed)

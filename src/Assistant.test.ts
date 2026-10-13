@@ -13549,6 +13549,47 @@ describe("Assistant tidying", () => {
     expect(await undoing("medium")).toEqual({ said: "I couldn't tell which one you meant, sir.", pending: [], sent: archived })
   })
 
+  test("taking back an archive of several, or the reminders it dropped, with no thread named, takes back all of it only when the model's sure, and a thread named that's nowhere or not one of them none of it", async () => {
+    /** The Tezos importer and fees, each with a reminder on it, archived together, then taken back as the model takes `how` he means it, of `target`, `sure` of it. */
+    const undoing = (how: "reminder" | "tidy", target: (situation: Brain.Situation) => string, sure: Brain.Sure) =>
+      run(
+        Effect.gen(function* () {
+          const made = yield* assistant(
+            (situation) => {
+              const { heard } = situation.utterance
+              if (heard.startsWith("Archive")) {
+                return Brain.decision({ act: "tidy", how: "archive", target: [importer, fees].map((one) => handle(situation, one)).join(", "), sure: "high" })
+              }
+              if (heard === "Take it back.") return Brain.decision({ act: "undo", how, target: target(situation), sure })
+              return undefined
+            },
+            undefined,
+            { others: tezosThreads, reminders: true },
+          )
+          for (const [one, called] of [[importer, "the Tezos importer"], [fees, "the Tezos fees"]] as const) {
+            yield* made.reminders!.add({ at: now, heard: `Tell me when ${called} finishes.`, text: "", event: "finished", machine: "Rosie", thread: one.id, called })
+          }
+          yield* made.dictate("Archive the Tezos importer and fees.")
+          yield* made.answer("Yes.")
+          // T3 Code archived them, which the shell then shows them as.
+          for (const one of [importer, fees]) yield* made.becomes({ ...one, archivedAt: "2026-10-01T02:18:01.000Z" })
+          yield* made.dictate("Take it back.")
+          return { said: made.spoken().at(-1), pending: (yield* made.reminders!.pending).length, sent: tidied(made.dispatched).map(({ type }) => type) }
+        }),
+      )
+    const none = () => ""
+    const archived = ["thread.archive", "thread.archive"]
+    const both = await undoing("reminder", none, "high")
+    expect({ pending: both.pending, sent: both.sent }).toEqual({ pending: 2, sent: [...archived, "thread.unarchive", "thread.unarchive"] })
+    // Not sure, or of a thread that's nowhere, nothing is taken back.
+    const unsure = { said: "I couldn't tell which one you meant, sir.", pending: 0, sent: archived }
+    expect(await undoing("reminder", none, "low")).toEqual(unsure)
+    expect(await undoing("tidy", none, "medium")).toEqual(unsure)
+    expect(await undoing("reminder", () => "a9", "high")).toEqual(unsure)
+    // The Tezos docs, never archived, had no reminder it dropped.
+    expect(await undoing("reminder", (situation) => handle(situation, docs), "high")).toEqual({ said: "There's nothing to take back, sir.", pending: 0, sent: archived })
+  })
+
   test("taking back the reminder of a thread he names by its handle in ARCHIVED, with none the archive dropped to bring back, takes back nothing, never another thread's", async () => {
     /** The Tezos one's reminder set before archiving the Mina one, which had none, or after an archive that dropped the Mina one's, then the Mina one's asked back. */
     const undoing = (then: "before" | "after") =>

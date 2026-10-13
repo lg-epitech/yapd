@@ -1124,16 +1124,17 @@ export const archivedBy = (handle: string, situation: Pick<Situation, "archived"
   return Option.fromNullable(index >= 0 && index < archivedShown ? situation.archived?.[index] : undefined)
 }
 
+/** Whether the model's sure enough a thread it names is the one he means: sure of it, or fairly sure and it's the one he's on about. */
+export const surely = (sure: Sure, ref: Threads.Ref, situation: Pick<Situation, "subject">) =>
+  sure === "high" || (sure === "medium" && Option.exists(about(situation.subject), (focus) => Threads.same(focus, ref)))
+
 /**
  * The thread yapd archived that a decision names by its handle in ARCHIVED,
  * as of one on the desk: only when the model's sure of it, or fairly sure
  * and it's the one he's on about.
  */
-export const archivedSurely = (choice: Pick<Decision, "target" | "sure">, situation: Pick<Situation, "archived" | "subject">): Option.Option<Archived> =>
-  Option.filter(
-    archivedBy(choice.target, situation),
-    ({ ref }) => choice.sure === "high" || (choice.sure === "medium" && Option.exists(about(situation.subject), (focus) => Threads.same(focus, ref))),
-  )
+const archivedSurely = (choice: Pick<Decision, "target" | "sure">, situation: Pick<Situation, "archived" | "subject">): Option.Option<Archived> =>
+  Option.filter(archivedBy(choice.target, situation), ({ ref }) => surely(choice.sure, ref, situation))
 
 /** The handle in ARCHIVED of a thread yapd archived, while it's shown there. */
 export const archivedAs = (ref: Threads.Ref, situation: Pick<Situation, "archived">) => {
@@ -3035,9 +3036,10 @@ const writing = (
     undoes(choice.how) === "catchup" ||
     (undoes(choice.how) === "reminder" && !Option.exists(situation.noted ?? Option.none(), ({ about }) => Option.isSome(about)))
   if (choice.act === "undo" && (undoes(choice.how) === "last" || unthreaded || (Option.isNone(target) && (choice.target.trim() === "" || undoes(choice.how) !== "thread")))) {
-    // A reminder of a thread yapd archived, by its handle in ARCHIVED, keeps it: what an archive dropped comes back with that thread alone.
-    const archived = undoes(choice.how) === "reminder" && Option.isSome(archivedBy(choice.target, situation)) ? choice.target.trim() : ""
-    return { _tag: "Do", plan: { decision: { ...choice, target: archived }, target: Option.none() } }
+    // A reminder keeps the thread he named, if he did, by its handle on the desk or in ARCHIVED, or a handle that's neither: what an
+    // archive dropped comes back with that thread alone, and a handle that's no thread is never taken for none, which would take back
+    // every thread of it.
+    return { _tag: "Do", plan: { decision: { ...choice, target: undoes(choice.how) === "reminder" ? choice.target.trim() : "" }, target: Option.none() } }
   }
   // Taking back what was done to a thread he names that yapd archived, by its handle in ARCHIVED, is of that thread alone, as of one on
   // the desk: a handle that's neither is never taken for none, which would take back every thread of the tidy.
