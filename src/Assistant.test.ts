@@ -10949,27 +10949,45 @@ describe("Assistant catching up", () => {
     }
   })
 
-  test("what a thread's subagents said is told only when he asks about them by that thread, never in a catch-up of everything or of what his muted threads said", async () => {
+  test("what a thread's subagents said is told only when he asks about them by that thread, never in a catch-up of everything or of what his muted threads said, nor counted or shown as unheard", async () => {
     const result = await run(
       Effect.gen(function* () {
+        const prompts: Array<string> = []
         const decided: Record<string, (situation: Brain.Situation) => Brain.Decision> = {
-          "Catch me up.": () => Brain.decision({ act: "catchup" }),
+          "Show me what I missed.": () => Brain.decision({ act: "show", how: "missed" }),
+          "Catch me up.": (situation) => {
+            prompts.push(Brain.prompt(situation, Option.none()))
+            return Brain.decision({ act: "catchup" })
+          },
           "What did the muted ones say?": () => Brain.decision({ act: "catchup", how: "muted" }),
           "What did the Tezos migration's subagents say?": (situation) => Brain.decision({ act: "catchup", how: "subagents", target: handle(situation, tezos) }),
         }
-        const { dictate, spoken, journal, mutes } = yield* assistant((situation) => decided[situation.utterance.heard]!(situation), undefined, {
+        const { dictate, spoken, journal, mutes, show } = yield* assistant((situation) => decided[situation.utterance.heard]!(situation), undefined, {
           muting: true,
           briefs: (rows) => rows.map(({ said }) => said).join(" "),
         })
         yield* mutes!.mute({ key: Mutes.key.session("Rosie", "claude:docs"), called: "the docs sweep" })
         yield* journal.write({ at: now - 30 * 60_000, kind: "update", machine: "Rosie", thread: "claude:docs", project: "yapd", said: "Docs sweep rewrote the API page intro.", detail: { priority: "done", muted: true } })
         yield* kept(journal, 25, "t-review", "One release blocker is left.", { priority: "needs-you", session: "codex:s-review", subagent: true, head: tezos.id, muted: true })
+        // One whose chain up to a thread was broken, a needs-you one kept a week as any is.
+        yield* kept(journal, 3 * 24 * 60, "t-orphan", "Two flaky tests are left.", { priority: "needs-you", session: "codex:s-orphan", subagent: true, muted: true })
         yield* kept(journal, 20, mina.id, "The Mina tickets are filed.")
-        for (const heard of Object.keys(decided)) yield* dictate(heard)
-        return spoken()
+        const card = yield* Effect.scoped(Effect.zipRight(show.watch, Effect.zipRight(dictate("Show me what I missed."), show.seen)))
+        for (const heard of Object.keys(decided).slice(1)) yield* dictate(heard)
+        return { spoken: spoken(), prompt: prompts[0] ?? "", card: Option.getOrElse(Option.map(card, ({ markdown }) => markdown), () => "") }
       }),
     )
-    expect(result).toEqual(["The Mina tickets are filed.", "Docs sweep rewrote the API page intro.", "One release blocker is left."])
+    expect(result.spoken).toEqual([
+      "It's on your screen. Two things you haven't heard.",
+      "The Mina tickets are filed.",
+      "Docs sweep rewrote the API page intro.",
+      "One release blocker is left.",
+    ])
+    for (const shown of [result.prompt, result.card]) {
+      expect(shown).toContain("The Mina tickets are filed.")
+      expect(shown).not.toContain("release blocker")
+      expect(shown).not.toContain("flaky tests")
+    }
   })
 
   test("a since the model put in the future, as when it took his clock for another's, gathers everything rather than nothing", async () => {

@@ -1107,13 +1107,13 @@ export const make = (options: {
         // What he hasn't heard, a thread at a time: what was never read out, however much he's spoken since, and what was cut off since
         // he last said something, other than catching up, which he may never have heard the answer to, or something only heard as noise,
         // like a cough taken for "Thank you.". Not what's waiting to be read, like an update his asking cut off: he's told of that as
-        // it's read, not twice.
+        // it's read, not twice. Nor what a thread's subagents said that yapd kept to itself, which he never asked to hear.
         const since = spoke.findLast((kept) => !catchUp(kept) && !noise(kept))?.at ?? now - day
         const missed = yield* Missed.gather(journal, { now, spoke: since, coming: [...coming, ...(yield* options.telling ?? Effect.succeed([]))], desk: shortlist })
         // What was done, like a stop, even what he was never told of since he turned yapd off, but not the bookkeeping of questions closed, which says nothing,
         // nor what a thread's subagents said that yapd kept to itself, which he never asked to hear.
         const done = recent
-          .filter((kept) => (kept.kind !== "action" || kept.said !== undefined || Brain.unsaid(kept) !== undefined) && !(Missed.subagent(kept) && Missed.muted(kept)))
+          .filter((kept) => (kept.kind !== "action" || kept.said !== undefined || Brain.unsaid(kept) !== undefined) && !Missed.withheld(kept))
           .slice(-lately.most)
         const sent = about._tag === "Session" && about.update.about !== undefined ? yield* routinesSent(about.update.about) : []
         const seen = yield* options.show.seen
@@ -2983,7 +2983,8 @@ export const make = (options: {
         const coming = yield* options.upcoming
         // Caught up, however he asked, what came in while yapd was off isn't offered after.
         if (offered?.kind === "missed") offered = undefined
-        const missed = yield* Missed.gather(journal, { now, spoke: given.spoke, coming: [...coming, ...(yield* options.telling ?? Effect.succeed([]))], desk })
+        // What a thread's subagents said that yapd kept to itself too, which only asking about them by that thread tells of.
+        const missed = yield* Missed.gather(journal, { now, spoke: given.spoke, coming: [...coming, ...(yield* options.telling ?? Effect.succeed([]))], desk, withheld: true })
         // A project he named as it's called, or else by whole words of its name, like "connectors"; one named nowhere, he's told yapd
         // couldn't tell what he meant, rather than that nothing came in.
         const { project } = scope

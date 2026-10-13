@@ -79,6 +79,13 @@ export const cut = (kept: Kept) => kept.kind === "update" && !muted(kept) && det
 /** Whether a row is one of T3 Code's own subagents', kept under it. */
 export const subagent = (kept: Pick<Kept, "detail">) => detail(kept).subagent === true
 
+/**
+ * Whether a row is what one of T3 Code's own subagents said that yapd kept to
+ * itself, as he never asked to hear them: never what he hasn't heard, only
+ * what he asks about by the thread it's part of.
+ */
+export const withheld = (kept: Kept) => subagent(kept) && muted(kept)
+
 /** The thread a subagent's row is part of, when its chain could be followed up to one: on the same machine. */
 export const headOf = (kept: Pick<Kept, "machine" | "detail">): Option.Option<Threads.Ref> => {
   const head = detail(kept).head
@@ -91,7 +98,7 @@ export const headOf = (kept: Pick<Kept, "machine" | "detail">): Option.Option<Th
  */
 export const unsaid = (kept: Kept): "subagent" | "muted" | Held | undefined => {
   if (kept.kind !== "update") return undefined
-  if (subagent(kept) && muted(kept)) return "subagent"
+  if (withheld(kept)) return "subagent"
   if (muted(kept)) return "muted"
   const { held } = detail(kept)
   return held === "focus" || held === "quiet" || held === "progress" || held === "off" ? held : undefined
@@ -203,12 +210,19 @@ export interface Missed {
  * What came in while yapd was off, what needs him and what he's to hear
  * whatever he muted count for a week, whenever he had yapd off, so a short
  * time off since, or another night off, never makes them drop out unheard.
+ * What a thread's subagents said that yapd kept to itself is in it only
+ * when `withheld`, as for a catch-up, which tells of it when he asks.
  */
-export const gather = (journal: Pick<Journal["Type"], "missed" | "switched">, given: { readonly now: number; readonly spoke: number; readonly coming: ReadonlyArray<number>; readonly desk: Threads.Desk }) =>
+export const gather = (
+  journal: Pick<Journal["Type"], "missed" | "switched">,
+  given: { readonly now: number; readonly spoke: number; readonly coming: ReadonlyArray<number>; readonly desk: Threads.Desk; readonly withheld?: boolean },
+) =>
   Effect.gen(function* () {
     const last = off(yield* journal.switched(given.now - week, switches))
     const from = since(given.now, last?.from)
-    const rows = (yield* journal.missed(from, Math.max(from, given.spoke), undefined, given.now - week)).filter(({ id }) => !given.coming.includes(id))
+    const rows = (yield* journal.missed(from, Math.max(from, given.spoke), undefined, given.now - week)).filter(
+      (kept) => !given.coming.includes(kept.id) && (given.withheld === true || !withheld(kept)),
+    )
     const switched = last === undefined ? undefined : { from: last.from, ...(last.to === undefined ? {} : { to: last.to }) }
     return {
       since: Math.min(from, ...rows.map(({ at }) => at)),
@@ -226,7 +240,7 @@ export const of = (group: Pick<Group, "head">, head: Threads.Ref) => group.head 
  * catch-up of them would tell him of, as of `now`.
  */
 export const keptBy = (journal: Pick<Journal["Type"], "missed" | "switched">, head: Threads.Ref, now: number) =>
-  Effect.map(gather(journal, { now, spoke: now, coming: [], desk: { threads: [], away: [] } }), ({ groups }) => groups.some((group) => of(group, head)))
+  Effect.map(gather(journal, { now, spoke: now, coming: [], desk: { threads: [], away: [] }, withheld: true }), ({ groups }) => groups.some((group) => of(group, head)))
 
 /** How much of it there is, threads and rows. */
 export const counted = (groups: ReadonlyArray<Group>) => ({ threads: groups.length, rows: groups.reduce((sum, { rows }) => sum + rows.length, 0) })
