@@ -5,6 +5,7 @@ import { Condenser, english } from "./Condenser.ts"
 import * as Hands from "./Hands.ts"
 import type { Notice } from "./Inbox.ts"
 import type { Entry, Journal } from "./Journal.ts"
+import * as Payload from "./Payload.ts"
 import { addressed, type Lines, Persona } from "./Persona.ts"
 import * as Questions from "./Questions.ts"
 import type * as T3Actions from "./T3Actions.ts"
@@ -500,6 +501,34 @@ export const make = (options: {
     const generations = new Map<string, number>()
     const generation = (ref: Threads.Ref) => generations.get(`${ref.machine}:${ref.id}`) ?? 0
 
+    /**
+     * Whether something was kept since `since` of a thread's turns on its
+     * machine: an update under T3 Code's id for the thread, or under the
+     * session of one of its agent's conversations, `natives`, as their hooks
+     * report them, which is where a hook's is kept when it couldn't be tied
+     * to the thread, as rig's often can't.
+     */
+    const keptSince = (ref: Threads.Ref, natives: ReadonlyArray<string>, since: number) =>
+      Effect.map(
+        Effect.forEach([ref.id, ...natives.flatMap((native) => Payload.Agent.literals.map((agent) => Payload.key(agent, native)))], (thread) =>
+          journal.byThread(ref.machine, thread, 1, ["update"]),
+        ),
+        (found) => found.flat().some(({ at }) => at >= since),
+      )
+
+    /**
+     * Whether a run is the first turn of work yapd started lately, begun with
+     * the message the ledger's `start` row has, and what it told was kept since.
+     */
+    const firstKept = (ref: Threads.Ref, run: Pick<T3Actions.Ran, "userMessageId" | "natives">) =>
+      Effect.gen(function* () {
+        const { started } = options
+        if (started === undefined || !sent(run)) return false
+        const starts = yield* started(ref.machine, (yield* Clock.currentTimeMillis) - lately)
+        const start = starts.find(({ thread, messageId }) => thread === ref.id && messageId !== null && Option.contains(run.userMessageId, messageId))
+        return start !== undefined && (yield* keptSince(ref, run.natives, start.at))
+      })
+
     /** What goes wrong looking into a change is only logged: nothing else waits on it. */
     const trouble = <A, E>(looking: Effect.Effect<A, E>) =>
       Effect.catchAllCause(looking, (cause) => (Cause.isInterruptedOnly(cause) ? Effect.void : Effect.logError("Could not look into what happened to a thread", cause)))
@@ -634,6 +663,7 @@ export const make = (options: {
      * What `ran` does, failing when the run can't be read, and telling
      * whether something of it may still be to keep: what it said, handed on
      * to be said, or a run that couldn't be seen. Not one left to its hook,
+     * as the first turn of work yapd started whose hook's update was kept is,
      * failed, stopped, started again since, or that said nothing.
      */
     const looking = (ref: Threads.Ref, runId: string, turns: number, at: number, current: Effect.Effect<boolean>) =>
@@ -664,6 +694,9 @@ export const make = (options: {
           return yield* Effect.as(Effect.logInfo("Left to its hook"), false)
         }
         if (status === "failed") return yield* Effect.as(failure, false)
+        // Left to its hook too, the first turn of work yapd started whose hook's update was kept, though its Stop came before yapd
+        // restarted, or so long ago it's forgotten.
+        if (yield* firstKept(ref, run.value)) return yield* Effect.as(Effect.logInfo("Left to its hook, whose update was kept"), false)
         const thread = yield* threads.find(ref)
         // Archived, he's done with it: nothing of it is said, or ever to keep.
         if (Option.exists(thread, ({ archivedAt }) => archivedAt !== null)) return false
@@ -817,13 +850,13 @@ export const make = (options: {
     /**
      * Whether the first turn of work yapd started that the ledger's `start`
      * row is of may still be to keep, looking into it as a turn no hook told
-     * of when it is: once it's over, while nothing of its thread was kept
-     * since it started, and only the turn its message began. Still at it,
-     * it may be too: it's heard of as it ends, but that can come to nothing,
-     * as when its hook drops it and T3 Code fails a moment as it's read, and
-     * its run's key keeps it said once. Not once its thread is gone or
-     * archived; but it may be while the machine's threads can't be seen.
-     * Failing when it can't be read.
+     * of when it is: once it's over, while nothing of its turns was kept
+     * since it started, as `keptSince` tells, and only the turn its message
+     * began. Still at it, it may be too: it's heard of as it ends, but that
+     * can come to nothing, as when its hook drops it and T3 Code fails a
+     * moment as it's read, and its run's key keeps it said once. Not once
+     * its thread is gone or archived; but it may be while the machine's
+     * threads can't be seen. Failing when it can't be read.
      */
     const unkept = (
       machine: string,
@@ -841,9 +874,9 @@ export const make = (options: {
         const busy = T3Live.busy(thread.value)
         const over = latestRunCompletedAt === null ? Number.NaN : Date.parse(latestRunCompletedAt)
         if (latestRunId === null || (!busy && !(over > start.at))) return false
-        if ((yield* journal.byThread(machine, ref.id, 1, ["update"])).length > 0) return false
         const run = yield* actions.ran(ref.id, latestRunId)
-        if (!Option.exists(run, ({ userMessageId }) => Option.contains(userMessageId, start.messageId))) return false
+        if (Option.isNone(run) || !Option.contains(run.value.userMessageId, start.messageId)) return false
+        if (yield* keptSince(ref, run.value.natives, start.at)) return false
         // Looked into once it's over, should what's heard of it as it ends come to nothing.
         if (busy) return true
         yield* Effect.logInfo("Looking into the first turn of work I started, which ended while I couldn't hear it").pipe(Effect.annotateLogs({ thread: thread.value.title }))

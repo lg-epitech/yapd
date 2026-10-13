@@ -1369,6 +1369,47 @@ describe("Notices while yapd is off", () => {
     expect(result).toBe(5)
   })
 
+  test("the first turn of work yapd started on rig, heard from a hook that couldn't be tied to its thread, isn't said again after a restart, nor when T3 Code tells of it again", async () => {
+    // He started it ten hours ago, and its answer was said from rig's Stop, kept under the hook's session rather than the thread.
+    const asr = thread("asr", "OpenAI ASR releases", { latestRunId: "run-asr", latestRunCompletedAt: minutes(599) })
+    const asked = { id: "yapd:asr:0:m", runId: "run-asr", role: "user", text: "Look up when OpenAI last released an ASR model.", createdAt: minutes(600) }
+    const rig = {
+      view: [asr],
+      bounded: {
+        asr: {
+          runs: [{ id: "run-asr", status: "completed", ordinal: 1, startedAt: minutes(600), completedAt: minutes(599), userMessageId: asked.id }],
+          messages: [asked, { id: "a-asr", runId: "run-asr", role: "assistant", text: "OpenAI's last speech model came out in March.", createdAt: minutes(599) }],
+          sessions: ["5dba8e2d-b807520"],
+        },
+      },
+    }
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* notices({ view: [], bounded: {}, rig, started: [{ at: now - 601 * 60_000, thread: "asr", messageId: asked.id }] })
+        yield* made.journal.write({
+          at: now - 599 * 60_000,
+          kind: "update",
+          machine: "rig",
+          thread: "claude:5dba8e2d-b807520",
+          project: "asr",
+          said: "OpenAI's last speech model came out in March.",
+          heardAt: now - 599 * 60_000,
+          detail: { priority: "done", prompt: asked.text },
+        })
+        // Rig's T3 Code catches up after the restart.
+        yield* made.rig.reached(true)
+        yield* made.reconcileOn("rig")
+        for (let i = 0; i < 18; i++) yield* made.wait(5)
+        const recovered = [...made.finished]
+        // Its word that the turn ended comes again, as after a reconnect, with its Stop long forgotten.
+        yield* made.rig.hear(ended(asr, "run-asr"))
+        for (let i = 0; i < 18; i++) yield* made.wait(5)
+        return { recovered, heard: made.finished, told: made.told }
+      }),
+    )
+    expect(result).toEqual({ recovered: [], heard: [], told: [] })
+  })
+
   test("the first turn of work yapd started in a thread he archived since is never looked into", async () => {
     const archived = thread("glucose", "glucose", { latestRunId: "run-glucose", latestRunCompletedAt: minutes(2), archivedAt: minutes(1) })
     const bounded = {
