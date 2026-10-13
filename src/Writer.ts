@@ -31,7 +31,7 @@ export const Decision = Schema.Struct({
   action: Action,
   about: Schema.String,
   settled: Settled,
-  /** Their words that settled the project, which are looked for in what they said. */
+  /** Their words that settled the project, which are looked for in what they said. Outside them, only the words that put it there, or none. */
   evidence: Schema.String,
   project: Schema.String,
   machine: Schema.String,
@@ -152,9 +152,9 @@ const deciding = (answering: boolean) =>
       `- "named": they named it in this dictation or in an answer to you. Dictation mangles names, like "yap D" for yapd or "crypto sources" for cryptio-sources, so take the listed project it sounds like. A name that sounds like nothing listed is a project you don't know: that's "unclear", and you never make one up or fall back on another.`,
       `- "referred": they pointed at earlier work in so many words, like "the same", "that one", "as before", "then do it in", or "follow up on what the std agent just finished", and that work was in the project. What you read out lately and what they dictated before are there to work out what such words point at, and for nothing else.`,
       `- "subject": what the request is about exists in exactly one project, like shower timing statistics, which only nowish has. It has to be about what the project is or contains. A request that would make sense in any project, like a test, a question about git or "fix the failing build", is about none of them.`,
-      `- "outside": they named no project, and it's about nothing in any of them, like something on the web or in the world. It starts outside their projects. So does what they say to start in scratch or outside their projects, like "look into it in scratch". Anything about code, a build, tests, a branch or a pull request is never "outside", wherever they say to start it: with no project named or settled, it's "unclear", and you ask.`,
+      `- "outside": they named no project, and it's about nothing in any of them, like something on the web or in the world. It starts outside their projects. So does what they say to start in scratch or outside their projects, like "look into it in scratch". A request that names one of their projects is never "outside", and neither is anything about code, a build, tests, a branch or a pull request, wherever they say to start it: with no project named or settled, it's "unclear", and you ask.`,
       `- "unclear": anything else, and then you ask. That a request resembles one they made before, was dictated soon after it, or would most likely go where the last one went is not a reason: it's a guess, and they expect to be asked. So is two projects fitting about as well.`,
-      `"evidence": their words that settle it, copied from what they said exactly as transcribed, mistakes included: the name they said, the words that point at earlier work, or the words that name the subject. Empty when unclear or outside.`,
+      `"evidence": their words that settle it, copied from what they said exactly as transcribed, mistakes included: the name they said, the words that point at earlier work, or the words that name the subject. Outside their projects, only their words that put it there, like "in scratch", or else empty. Empty when unclear.`,
       `"project": its name exactly as listed. Empty when unclear or outside.`,
       `"machine": as listed, the one the project is on. When it's on several and nothing says which, the one where it was worked on last. Outside their projects, only the one they said, or else empty. Only where they say to run it counts as said, like "on rig": a machine that's part of what the work is about, like "why is the rig relay slow", says nothing about where it goes.`,
       `"model": a model's name as listed. They name models loosely, like "Fable", "opus five five" or "the big GPT": take the listed model it means, the newest when several fit.`,
