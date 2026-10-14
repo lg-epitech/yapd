@@ -350,11 +350,13 @@ export interface Outcome {
   readonly confirmed?: Effect.Effect<void>
   /**
    * Whether it says what yapd just changed for him that "scratch that"
-   * reaches, as `Brain.newest` has it: a step done to a thread, like a
-   * message sent or queued, a stop or a tidy, new work started, a reminder
-   * set or cancelled, a memory kept or forgotten, the catch-up cleared, or a
-   * mute. Never a mode, nothing changed, like a mute there already, nor
-   * something that didn't go.
+   * reaches, as `Brain.newest` has it: a step done to a thread that taking
+   * back acts on, like a message sent or queued, a stop, the word to carry
+   * on or a tidy, new work started, a reminder set or cancelled, a memory
+   * kept or forgotten, the catch-up cleared, or a mute. Never a mode,
+   * nothing changed, like a mute there already, something that didn't go,
+   * nor what taking back does nothing to, like a message withdrawn or an
+   * answer to a thread's question.
    */
   readonly changed?: true
   /**
@@ -2163,11 +2165,14 @@ export const make = (options: {
               ...(outcome.waiting === undefined ? {} : { waiting: outcome.waiting }),
               ...(outcome.stopped === undefined ? {} : { stopped: outcome.stopped }),
             })
+            // Only what taking it back acts on, a message, a stop or the word to carry on, never a message withdrawn or an answer to a thread's
+            // question, which it only refuses.
+            const undoable = act._tag === "Message" || act._tag === "Stop" || (act._tag === "Undo" && act.carry)
             const first: Outcome = {
               say: line,
               subject: { ...subject, said: line },
               kind: "done",
-              changed: true,
+              ...(undoable ? { changed: true } : {}),
               // Only once it's known to play, so a line for going ahead dropped as yapd was turned off, or that couldn't be played, never counts as the last one he heard.
               // With none of its own, like a stop, the one said before it in the same breath is still the one the next is kept from being.
               ...(onIt === undefined ? (at.besides === undefined ? {} : { onIt: at.besides }) : { onIt, confirmed: persona.said(onIt) }),
