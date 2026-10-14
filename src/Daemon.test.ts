@@ -7611,7 +7611,7 @@ describe("Daemon handing over what's yapd's to do", () => {
     expect(result.said).toBe("I left that: Tell it I'll mute it if it keeps logging.")
   }, 30_000)
 
-  test("words over an update's first seconds with nothing after a pause, handed over, are never acted on: no send, mute, mode or card, at most code's own question to stop, after which the update is read again from where it stopped, needs him or not", async () => {
+  test("words over an update's first seconds with nothing after a pause, handed over, are never acted on: no send, mute, mode, card or tidy, at most code's own question to stop, after which the update is read again from where it stopped, needs him or not", async () => {
     /** He says `said` over the Tezos update's first seconds, which may all be yapd's own voice, as the model takes it. */
     const over = (said: string, model: (situation: Brain.Situation) => Brain.Decision) =>
       run(
@@ -7657,9 +7657,10 @@ describe("Daemon handing over what's yapd's to do", () => {
       ["Tell the Mina one to wait.", (situation: Brain.Situation) => Brain.decision({ act: "send", target: minaHandle(situation), text: "Wait." })],
       ["Mute the Tezos one.", (situation: Brain.Situation) => Brain.decision({ act: "mute", how: "mute", target: tezosHandle(situation) })],
       ["Let me focus till three.", () => Brain.decision({ act: "mode", how: "focus" })],
+      ["Settle it.", (situation: Brain.Situation) => Brain.decision({ act: "tidy", how: "settle", target: tezosHandle(situation) })],
     ] as const) {
       const result = await over(said, model)
-      // Let go: picked up again a word or two back, nothing done, sent, muted or shown.
+      // Let go: picked up again a word or two back, nothing done, sent, muted, tidied or shown.
       expect(result.sent).toEqual([])
       expect(result.mutes).toEqual([])
       expect(result.shown).toBe(false)
