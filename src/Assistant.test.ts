@@ -2467,6 +2467,34 @@ describe("Assistant", () => {
     })
   })
 
+  test("what may all be yapd's own words said back to a done line, let go, leave a thread's question he's heard open as it was, never asked again for them", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(
+          (situation) => {
+            const { heard } = situation.utterance
+            if (heard.startsWith("Tell the Tesla")) return tezosMessage("high")(situation)
+            // Its own "On it." heard ahead of more, which the model takes for a message to another thread.
+            if (heard.startsWith("On it")) return Brain.decision({ act: "send", target: handle(situation, mina), text: "Wait.", how: "now" })
+            return undefined
+          },
+          undefined,
+          { others: [cloud], items: card("q1", [colour, extras]) },
+        )
+        yield* made.dictate("Tell the Tesla's migration to use the fee table from the Mina work.")
+        const sent = made.notices().findLast(({ kind }) => kind === "done")
+        yield* asked(made, cloud)
+        const before = made.spoken().length
+        yield* made.followUp("On it. Tell the Mina one to wait.", 2, sent, sent?.spoken, undefined, undefined, true)
+        const over = made.spoken().slice(before)
+        yield* made.answer("Blue.")
+        return { over, then: made.spoken().slice(before), sent: made.dispatched.filter(({ type }) => type === "message.dispatch").length }
+      }),
+    )
+    expect(result).toEqual({ over: [], then: ["Blue, sir. And last: Which test extras should run? Any of Alpha, Beta and Gamma?"], sent: 1 })
+  })
+
   test("a message said over a question that can't go as its answer, to a form that takes only its options or as T3 Code takes a message, goes in the queue behind it, and the question is asked again after", async () => {
     const cloud = waitingOn({ id: "q1", kind: "user_input" })
     const telling = (items: ReadonlyArray<Record<string, unknown>>, text: string) =>

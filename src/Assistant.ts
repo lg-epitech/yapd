@@ -4230,6 +4230,14 @@ export const make = (options: {
         // A thread's question is settled here only by letting it go: anything else, like a message to its thread that can't go as its
         // answer, leaves it waiting in T3 Code, so it's asked again after, unless that dealt with it.
         const settles = answers && (open.kind !== "question" || decision.act === "dismiss")
+        // What may all be yapd's own words, not its answer, close it only for code's own question about them, which takes its place: let
+        // go, or anything else, it's left open as it was, so a thread's is never asked again for them, nor let go with what he dictated.
+        if (!answers && Brain.mayBeOwn(utterance)) {
+          const checked = Brain.check(decision, decided.situation, said)
+          if (checked._tag !== "Ask") return yield* follow(checked, decided, said)
+          yield* close(open, "replaced", utterance.id)
+          return ahead(yield* follow(checked, decided, said), open.decision.rest, said)
+        }
         yield* close(open, decision.act === "resume" ? "dropped: unclear" : settles ? "answered" : "replaced", utterance.id)
         if (!answers) return ahead(yield* follow(Brain.check(decision, decided.situation, said), decided, said), open.decision.rest, said)
         if (decision.act === "dismiss") {
