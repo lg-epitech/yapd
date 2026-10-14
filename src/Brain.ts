@@ -1854,9 +1854,11 @@ const glimpsed = (situation: Situation, lines: Lines): Decision | undefined => {
   }
   // With a question open, "cancel that" is a no to it. Otherwise it takes back the newest change he made: a mute, a mode, a reminder he
   // set or cancelled, a memory he had kept or forgotten, the catch-up he cleared, or whatever else yapd last did. Said back to a "done"
-  // line, only what that line said it changed: anything else, changed before it or since, is the model's.
+  // line, only what that line said it changed: anything else, changed before it or since, or new work it started, which a no to asks
+  // whether to stop, is the model's.
   const latest = reached(situation)
-  const scratched = scratching.has(said) && Option.isNone(open) && owned(situation, latest)
+  const started = latest?.what === "acted" && Option.exists(situation.acted, ({ kind }) => kind === "start")
+  const scratched = scratching.has(said) && Option.isNone(open) && owned(situation, latest) && !(situation.utterance.afterDone !== undefined && started)
   if (scratched && latest?.what === "mute") return decision({ act: "mute", how: "undo" })
   if (scratched && latest?.what === "mode") return decision({ act: "mode", how: "undo" })
   if (scratched && latest?.what === "noted") {

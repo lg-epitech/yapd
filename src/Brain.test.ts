@@ -495,6 +495,28 @@ describe("Brain", () => {
     expect(told({ afterDone: {} })).not.toContain(done)
   })
 
+  test("scratch that said back to a line saying yapd started work is the model's, which asks whether to stop it", () => {
+    const start: Ledger.Row = {
+      commandId: "yapd:u0:0",
+      messageId: "yapd:u0:0:m",
+      utterance: "u0",
+      step: 0,
+      kind: "start",
+      machine: "Rosie",
+      thread: "new-thread",
+      body: {},
+      digest: null,
+      state: "sent",
+      how: null,
+      reason: null,
+      at: now - 5_000,
+    }
+    const given = situation("Scratch that.", { acted: Option.some(start) })
+    expect(Brain.fast({ ...given, utterance: { ...given.utterance, via: "reply", afterDone: { change: { what: "acted", utterance: "u0" } } } }, lines)).toBeUndefined()
+    // Dictated, it's said at once that new work can't be taken back, as ever.
+    expect(Brain.fast(given, lines)).toMatchObject({ act: "undo" })
+  })
+
   test("over yapd's first seconds, what he said after a pause isn't taken for nothing on the strength of yapd's own word before it", () => {
     const echo = "For the loader fix, is that yapd or std?"
     const over = (heard: string, afterPause?: string, voiced = 2) => {
