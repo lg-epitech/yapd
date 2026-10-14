@@ -1290,6 +1290,25 @@ describe("Brain", () => {
     expect(faint("Thank you.", 1.2)).toBeUndefined()
   })
 
+  test("a faint 'start a thread for …' said back to something is never acted on, however many times it's worked out, while dictated it is", () => {
+    const start = Brain.decision({ act: "start", text: "Start a thread for the loader's retries." })
+    const said = (via: Assistant.Utterance["via"], voiced: number) => {
+      const given = situation("Start a thread for the loader's retries.")
+      return { ...given, utterance: { ...given.utterance, via, voiced } }
+    }
+    const checked = (via: Assistant.Utterance["via"], voiced: number) => {
+      const done = Brain.check(start, said(via, voiced), lines)
+      return done._tag === "Do" ? done.plan.decision.act : done
+    }
+    expect(Brain.murmured(start, said("reply", 0.2).utterance)).toBe(true)
+    // As when the open question changed and it was worked out again, with no check of its own.
+    expect(checked("reply", 0.2)).toBe("resume")
+    expect(checked("reply", 2)).toBe("start")
+    // What he dictates is his, however short.
+    expect(Brain.murmured(start, said("shortcut", 0.2).utterance)).toBe(false)
+    expect(checked("shortcut", 0.2)).toBe("start")
+  })
+
   test("spoken lines never carry a handle, an id, a path, 'the agent' or 'the session'", () => {
     const candidates = desk().threads
     type Asked<Tag extends string> = Extract<T3Actions.Request, { readonly _tag: Tag }>

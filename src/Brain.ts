@@ -54,14 +54,14 @@ const writes: ReadonlySet<Act> = new Set<Act>(["send", "stop", "undo", "decide",
 
 /**
  * What's only done on his word, which may not be his when it's faint or said
- * over yapd's own voice: whatever changes a thread, muting one, which changes
- * nothing there but what he hears of it, changing how yapd talks, setting,
- * offering or cancelling what he's to be told later, what yapd keeps in mind,
- * which every prompt reads as his, and clearing the catch-up, which sets
- * aside what he hasn't heard.
+ * over yapd's own voice: whatever changes a thread, starting new work, muting
+ * one, which changes nothing there but what he hears of it, changing how yapd
+ * talks, setting, offering or cancelling what he's to be told later, what
+ * yapd keeps in mind, which every prompt reads as his, and clearing the
+ * catch-up, which sets aside what he hasn't heard.
  */
 const ownWord = ({ act, how }: Pick<Decision, "act" | "how">) =>
-  writes.has(act) || act === "mute" || act === "mode" || act === "remind" || act === "offer" || act === "forget" || act === "remember" || (act === "catchup" && how === "clear")
+  writes.has(act) || act === "start" || act === "mute" || act === "mode" || act === "remind" || act === "offer" || act === "forget" || act === "remember" || (act === "catchup" && how === "clear")
 
 /** Whether it's a write said over something with too little speech to be his: talk or noise nearby, never acted on, nor taken as an answer. */
 export const murmured = (decided: Pick<Decision, "act" | "how">, utterance: Pick<Assistant.Utterance, "via" | "voiced">) =>
@@ -2780,9 +2780,12 @@ const checking = (choice: Decision, situation: Situation, lines: Lines): Checked
   const find = (handle: string) => desk.threads.find((listed) => listed.handle === handle)
   const target = Option.fromNullable(choice.target === "" ? undefined : find(choice.target))
   const doing = (plan: Plan): Checked => ({ _tag: "Do", plan })
-  if (choice.act === "dismiss" || choice.act === "resume" || choice.act === "again" || choice.act === "start") {
+  if (choice.act === "dismiss" || choice.act === "resume" || choice.act === "again") {
     return doing({ decision: choice, target: Option.none() })
   }
+  // New work starts only on his word: said over something, too little speech is talk or noise nearby, never work to start, however
+  // many times it's worked out.
+  if (choice.act === "start") return doing({ decision: murmured(choice, situation.utterance) ? { ...choice, act: "resume" } : choice, target: Option.none() })
   // Clearing it sets aside all of what a catch-up of everything would tell him, never only what he named of it, and only on his word:
   // said over something, too little speech is talk or noise nearby, never something to do.
   if (choice.act === "catchup" && choice.how === "clear") {
