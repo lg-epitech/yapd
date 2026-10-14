@@ -372,7 +372,8 @@ export interface Running {
  * does while he isn't at hand; passed to the update's own session as the
  * Responder's messages are, with a line for a rest left; or acted on, as a
  * follow-up to an answer is, once he's stopped, `aims` when at the update
- * itself, and `doubted` when all of it may be yapd's own words. With how it
+ * itself, `doubted` when all of it may be yapd's own words, and `unattended`
+ * when its first step is turned down so. With how it
  * was worked out, without the model or by it, how long that took and the
  * model's part, and what it came to, as it's logged, never his words nor the
  * model's.
@@ -382,7 +383,7 @@ export type Handed = (
   | { readonly _tag: "Dismiss" }
   | { readonly _tag: "Answer"; readonly spoken: string; readonly unattended?: true }
   | { readonly _tag: "Pass"; readonly message: string; readonly left?: string }
-  | { readonly _tag: "Act"; readonly aims: boolean; readonly doubted: boolean; readonly run: (running: Running) => Effect.Effect<void> }
+  | { readonly _tag: "Act"; readonly aims: boolean; readonly doubted: boolean; readonly unattended?: true; readonly run: (running: Running) => Effect.Effect<void> }
 ) & {
   readonly source: "fast" | "model" | "failed"
   readonly ms: number

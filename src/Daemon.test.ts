@@ -7631,19 +7631,16 @@ describe("Daemon handing over what's yapd's to do", () => {
     expect(stopped.from.at(-1)).toBeGreaterThan(0)
   }, 30_000)
 
-  test("handed over while he isn't at hand, as a TV's talk may be, what's turned down, or acted on, never puts him at hand, so what only his word does, handed over next, is turned down too", async () => {
-    const looked = "What's the Mina one doing?"
-    const said = ["Okay everyone, focus mode till three.", looked, "Right, focus mode till three."]
+  test("handed over while he isn't at hand, as a TV's talk may be, what only his word does, turned down, never puts him at hand, alone or with more after it, so the next such talk handed over is turned down too", async () => {
+    const more = "Okay everyone, focus mode till three, and then quiet."
+    const said = ["Okay everyone, focus mode till three.", more, "Right, focus mode till three."]
     const result = await run(
       Effect.gen(function* () {
         const t3 = yield* handing
         const { handle, talk, wait, nextEvent, played } = yield* assisted(
-          (situation) =>
-            situation.utterance.heard === looked
-              ? Brain.decision({ act: "answer", target: handleOf(situation, "t-mina"), spoken: "The Mina tickets are filed." })
-              : Brain.decision({ act: "mode", how: "focus" }),
+          (situation) => Brain.decision({ act: "mode", how: "focus", ...(situation.utterance.heard === more ? { rest: "and then quiet" } : {}) }),
           {
-            says: looked,
+            says: more,
             transcripts: said,
             hands: t3.hands,
             t3,
@@ -7663,13 +7660,10 @@ describe("Daemon handing over what's yapd's to do", () => {
         return [...played]
       }),
     )
-    expect(result).toEqual([
-      "yapd. The migration compiles.",
-      "Ask me that with the shortcut.",
-      "yapd. The tests pass.",
-      "The Mina tickets are filed.",
-      "yapd. The fee table is in.",
-      "Ask me that with the shortcut.",
-    ])
+    expect(result.filter((line) => line.startsWith("yapd."))).toEqual(["yapd. The migration compiles.", "yapd. The tests pass.", "yapd. The fee table is in."])
+    // Every one of them turned down, the last too.
+    expect(result.at(1)).toBe("Ask me that with the shortcut.")
+    expect(result.at(3)).toContain("Ask me that with the shortcut.")
+    expect(result.slice(4)).toEqual(["yapd. The fee table is in.", "Ask me that with the shortcut."])
   }, 30_000)
 })

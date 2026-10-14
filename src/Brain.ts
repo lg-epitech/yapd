@@ -2977,9 +2977,11 @@ export type Routed =
   /**
    * Done as a follow-up to an answer is, `aims` when its first step is at
    * the update itself, never tidying it, which answers nothing it asked,
-   * `doubted` when all of it may be yapd's own words.
+   * `doubted` when all of it may be yapd's own words, and `unattended` when
+   * its first step is what only his word does, turned down while he isn't
+   * at hand, with the rest done after.
    */
-  | { readonly _tag: "Act"; readonly aims: boolean; readonly doubted: boolean }
+  | { readonly _tag: "Act"; readonly aims: boolean; readonly doubted: boolean; readonly unattended?: true }
 
 /**
  * What a decision about what was handed over from an update comes to: let go,
@@ -3019,11 +3021,13 @@ export const route = (decision: Decision, situation: Situation, lines: Lines): R
     }
   }
   // With more after it, it's acted on, which says the same of it and does the rest, like a message to another thread, which goes either way.
-  if (handed?.present === false && unattended(decision) && decision.rest.trim() === "") return { _tag: "Answer", spoken: said.shortcut, unattended: true }
+  const away = handed?.present === false && unattended(decision)
+  if (away && decision.rest.trim() === "") return { _tag: "Answer", spoken: said.shortcut, unattended: true }
   return {
     _tag: "Act",
     aims: decision.act === "dismiss" || (writes.has(decision.act) && decision.act !== "tidy" && own !== undefined && aimed(decision, own, situation)),
     doubted: mayBeOwn(utterance),
+    ...(away ? { unattended: true as const } : {}),
   }
 }
 

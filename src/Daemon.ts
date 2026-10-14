@@ -934,9 +934,8 @@ export const make = (
     },
     // What's yapd's to do, handed over, with what's known of the update here: whether what's said over it goes to its thread by yapd's
     // own hand, whether he's at hand, and what the line he spoke over or just heard says yapd changed, which "scratch that" reaches.
-    // Acted on while he's at hand, he's still at hand, as when anything he says back is taken up. Handed over while he isn't, as a TV's
-    // talk may be, it never puts him at hand: what it came to may be no more than what only his word does turned down, and the next
-    // such talk would be acted on.
+    // Acted on, he's at hand, as when anything he says back is taken up; never when what only his word does is turned down first, while
+    // he isn't at hand, as a TV's talk may be, which takes up nothing of his, so the next such talk is turned down too.
     ...(options.over === undefined
       ? {}
       : {
@@ -945,7 +944,7 @@ export const make = (
               Effect.gen(function* () {
                 const given: Assistant.Over = { steered: steered(update), present: yield* present, done: doneBy(update, made), ...(muting ? { muting: true } : {}) }
                 const handed = yield* options.over!(update, lines, line, given)(heard, voiced, echo, afterPause, unsaid)
-                return handed._tag === "Act" && given.present
+                return handed._tag === "Act" && handed.unattended !== true
                   ? { ...handed, run: (running: Conversation.Running) => Effect.zipRight(heardHim, handed.run(running)) }
                   : handed
               }),

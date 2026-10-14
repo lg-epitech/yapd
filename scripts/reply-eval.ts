@@ -1338,7 +1338,7 @@ const run = Effect.gen(function* () {
             const checked = Brain.check(decision, handedOver, lines)
             const leftFirst = Brain.leftOver(decision, own, utterance.handed, handedOver)
             // While he isn't at hand, a first step only his word does, with more after it, is acted on only to be turned down.
-            const turnedDown = routed._tag === "Act" && !leftFirst && !present && Brain.unattended(decision)
+            const turnedDown = routed._tag === "Act" && routed.unattended === true
             /**
              * Whether a checked write is to the update's own thread, by thread, over an unsteered update: one with none, by none. Never
              * tidying it, which changes nothing of its turn.
