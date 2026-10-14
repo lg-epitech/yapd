@@ -239,6 +239,14 @@
       "needsYou": true,
       "session": "s-tezos",
       "thread": "t-tezos"
+    },
+    "tezos-warnings": {
+      "project": "integration",
+      "spoken": "The Tezos migration needs you, sir: the test run prints hundreds of deprecation warnings, so silence them in the test config, or leave them?",
+      "message": "The test run prints hundreds of deprecation warnings from the old TzKT client. Should I silence them in the test config, or leave them?",
+      "needsYou": true,
+      "session": "s-tezos",
+      "thread": "t-tezos"
     }
   },
   "cases": [
@@ -1060,6 +1068,22 @@
       "how": "hooked",
       "heard": "Tell the Mina one to wait, and tell this one to rebase.",
       "expect": { "act": ["send"], "target": "Mina", "rest": "rebase", "restLeft": true, "neverSpoken": ["couldn't tell"] }
+    },
+    {
+      "id": "S88",
+      "note": "'silence the deprecation warnings' answering the agent's own question about silencing something in its work: sent to it, never handed over to be left as talk of mutes",
+      "update": "tezos-warnings",
+      "how": "tied",
+      "heard": "Silence the deprecation warnings.",
+      "expect": { "intent": "send", "neverRoute": ["Act"] }
+    },
+    {
+      "id": "S89",
+      "note": "muting something in the agent's own work, unasked: an instruction for it, sent, never handed over to be left as talk of mutes",
+      "update": "tezos",
+      "how": "tied",
+      "heard": "Mute the debug logs in the tests.",
+      "expect": { "intent": "send", "neverRoute": ["Act"] }
     }
   ]
 }
