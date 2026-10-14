@@ -113,6 +113,9 @@ const logged = (words: string) => (T3Actions.revealing(words) ? "something that 
 /** His words as they're logged in a sentence, in quotes: never what could give a secret away, which is "what he said". */
 const quoted = (words: string) => (T3Actions.revealing(words) ? "what he said" : `"${words}"`)
 
+/** What may all be yapd's own words let go, logged in the same words wherever it's done, so how often that happens can be counted. */
+const notActing = (utterance: Pick<Utterance, "heard">) => Effect.logInfo(`Not acting on it, since ${quoted(utterance.heard)} may have been my own voice`)
+
 /** What a thread asks of the user, which a short answer can settle. */
 export type Asks =
   | {
@@ -1422,14 +1425,17 @@ export const make = (options: {
      * since what it's about was said, or another was asked since, which stays
      * open: only one ever is, so this one is left with a word instead, with
      * what didn't go and the rest of its request, and a message it would have
-     * offered to send again is never offered on its own.
+     * offered to send again is never offered on its own. Code's own question
+     * of what may all be yapd's own words is let go as they are, with
+     * nothing said, not even that it wasn't asked.
      */
     const opening = (open: Omit<Open, "id" | "version" | "at">, utterance: Utterance | Pick<Utterance, "turns" | "at">) =>
       Effect.gen(function* () {
         if (yield* outdated(utterance.turns)) return quiet({ _tag: "Nothing" })
         if (asking !== undefined && before(utterance) === undefined) {
-          yield* Effect.logInfo(`Leaving it, rather than ask in place of a question asked since: ${open.asked}`)
           yield* forgo(open, "Another question was asked before it could be.")
+          if ("heard" in utterance && Brain.mayBeOwn(utterance)) return yield* Effect.as(notActing(utterance), quiet({ _tag: "Nothing" }))
+          yield* Effect.logInfo(`Leaving it, rather than ask in place of a question asked since: ${open.asked}`)
           const said = yield* persona.lines
           const waiting = "since I'm waiting on your answer to something else"
           const left =
@@ -4073,20 +4079,20 @@ export const make = (options: {
       at: Stepping = { step: 0, twice: false },
     ): Effect.Effect<Outcome> => {
       // Anything said back to a "done" line in what may all be yapd's own words, or in the rest of what was, is only ever asked about in
-      // code's own question, or let go, which is logged so how often that happens can be counted.
+      // code's own question, or let go, which is logged so how often that happens can be counted: as asked only once it is, since one
+      // asked since they were said lets it go, which `opening` logs.
       const echoed = Brain.mayBeOwn(thought.utterance) && thought.decision.act !== "resume"
       switch (checked._tag) {
         case "Say":
           return Effect.succeed(unfinished(reply(checked.spoken, thought.subject), thought.decision.rest, said, thought.situation.desk))
         case "Ask":
-          return Effect.zipRight(
-            echoed ? Effect.logInfo(`Asking rather than acting on it, since ${quoted(thought.utterance.heard)} may have been my own voice, sure ${thought.decision.sure}`) : Effect.void,
-            Effect.map(opening(checked.open, thought.utterance), (outcome) => listing(outcome, checked.open)),
+          return Effect.tap(Effect.map(opening(checked.open, thought.utterance), (outcome) => listing(outcome, checked.open)), (outcome) =>
+            echoed && outcome.kind === "question"
+              ? Effect.logInfo(`Asking rather than acting on it, since ${quoted(thought.utterance.heard)} may have been my own voice, sure ${thought.decision.sure}`)
+              : Effect.void,
           )
         case "Do":
-          if (echoed && checked.plan.decision.act === "resume") {
-            return Effect.as(Effect.logInfo(`Not acting on it, since ${quoted(thought.utterance.heard)} may have been my own voice`), quiet(thought.subject))
-          }
+          if (echoed && checked.plan.decision.act === "resume") return Effect.as(notActing(thought.utterance), quiet(thought.subject))
           // Taking back the step a "done" line said, said back to it, is that step alone, whatever's written before it's done, and the change
           // it said, that change alone.
           return perform(checked.plan, thought, said, {

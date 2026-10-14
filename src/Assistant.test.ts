@@ -5071,6 +5071,55 @@ describe("Assistant", () => {
     expect(result.said).toBe("Stopped, sir. I left the rest: tell the Mina one to wait.")
   })
 
+  test("code's own question of what may all be yapd's own words said back to a done line, with another asked since they were said, is let go with nothing said, and logged as that", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const logged: Array<string> = []
+    const logger = Logger.make(({ message }) => {
+      logged.push((Array.isArray(message) ? message : [message]).join(" "))
+    })
+    const result = await run(
+      Effect.gen(function* () {
+        let slow: Effect.Effect<void> = Effect.void
+        const made = yield* assistant(
+          (situation) => {
+            const { heard } = situation.utterance
+            if (heard.startsWith("Start")) return Brain.decision({ act: "start", text: heard })
+            // Its own "On it, sir." heard ahead of a no, which the model takes for a no to the work.
+            return Brain.decision({ act: "undo", sure: "high" })
+          },
+          () => written({ spoken: "In yapd, on Opus, without a worktree." }),
+          { others: [cloud], items: card("q1", [colour]), deciding: Effect.suspend(() => slow) },
+        )
+        yield* made.dictate("Start a thread in yapd to fix the fees.")
+        const started = Option.getOrThrow(yield* made.ledger.latest("1 hour", { kinds: ["start"] })).thread
+        yield* made.becomes(thread(started, "Fix the fees", "yapd", { ...begun, updatedAt: new Date(now).toISOString() }))
+        const done = made.notices().findLast(({ kind }) => kind === "done")
+        // The model takes a while over it, and a thread's question is asked meanwhile.
+        slow = Effect.sleep("5 seconds")
+        const following = yield* Effect.fork(made.followUp("On it, sir. No.", 2, done, done?.spoken, undefined, undefined, true))
+        yield* made.flush
+        slow = Effect.void
+        yield* made.wait(1)
+        yield* asked(made, cloud)
+        const asking = Option.map(yield* made.open, ({ asked }) => asked)
+        const before = made.spoken().length
+        yield* made.wait(5)
+        yield* Fiber.join(following)
+        return {
+          over: made.spoken().slice(before),
+          kept: Option.map(yield* made.open, ({ asked }) => asked),
+          asking,
+          dispatched: made.dispatched.filter(({ type }) => type === "run.interrupt").length,
+        }
+      }).pipe(Effect.provide(Logger.replace(Logger.defaultLogger, logger))),
+    )
+    expect(result.over).toEqual([])
+    expect(result.kept).toEqual(result.asking)
+    expect(result.dispatched).toBe(0)
+    expect(logged).toContain(`Not acting on it, since "On it, sir. No." may have been my own voice`)
+    expect(logged.some((line) => line.startsWith("Asking rather than acting on it"))).toBe(false)
+  })
+
   /** Takes each message in behind the turn under way, in a run of its own, as T3 Code queues it, so any can be withdrawn. */
   const queues: Answer = (payload, bounded) =>
     Effect.sync(() => {
