@@ -133,8 +133,13 @@ export const pondering: Duration.DurationInput = "8 seconds"
 const grace = 2_000
 /** How long working out what he said can take, in milliseconds, before a tick tells him he was heard. */
 const ticking = 300
-/** How soon after the tick, in milliseconds, what the microphone hears may be the tick itself. */
-const ringing = 300
+/**
+ * How soon after the tick is sent, in milliseconds, what the microphone hears
+ * may be the tick itself: its 60 ms, played as late as an output that lags
+ * like Bluetooth's, about 300 ms, can play it, a room's tail after it, and
+ * the frames the endpointer takes to call that speech.
+ */
+const ringing = 800
 /** Longer than the longest utterance, so only a microphone that went quiet trips it. */
 const patience = "40 seconds"
 /**
