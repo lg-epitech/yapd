@@ -83,15 +83,6 @@ const surelyHis = (utterance: Pick<Assistant.Utterance, "echo" | "afterPause">) 
 export const mayBeOwn = (utterance: Pick<Assistant.Utterance, "echo" | "afterPause" | "afterDone" | "echoedBack">) =>
   utterance.echoedBack === true || (utterance.afterDone !== undefined && !surelyHis(utterance))
 
-/**
- * Whether it's something only done on his word, or a catch-up, which marks
- * what it reads heard, in what may all be yapd's own words said back to a
- * "done" line: never done, however sure the model is. A stop or a take-back
- * is asked about in yapd's own question, and anything else is let go.
- */
-export const echoedBack = (decided: Pick<Decision, "act" | "how">, utterance: Pick<Assistant.Utterance, "echo" | "afterPause" | "afterDone" | "echoedBack">) =>
-  mayBeOwn(utterance) && (ownWord(decided) || decided.act === "catchup")
-
 /** How sure the model is of the thread it picked. */
 export const Sure = Schema.Literal("high", "medium", "low")
 export type Sure = typeof Sure.Type
@@ -1840,8 +1831,11 @@ const asksHim = (situation: Pick<Situation, "subject" | "desk">) => {
  */
 export const fast = (situation: Situation, lines: Lines): Decision | undefined => {
   const decided = glimpsed(situation, lines)
+  if (decided === undefined) return undefined
   // Begun while yapd's own voice could still get into the microphone, a yes or a name to act on may be its own words: the model weighs that.
-  return decided !== undefined && situation.utterance.echo !== undefined && ownWord(decided) ? undefined : decided
+  if (situation.utterance.echo !== undefined && ownWord(decided)) return undefined
+  // In what may all be yapd's own words said back to a "done" line, nothing else is said, shown, said again or let go of: they're let go.
+  return mayBeOwn(situation.utterance) && !ownWord(decided) ? decision({ act: "resume" }) : decided
 }
 
 /** Whisper repeats itself on noise, but "no, no, no" is still no. */
@@ -2889,28 +2883,33 @@ export const check = (given: Decision, situation: Situation, lines: Lines): Chec
 }
 
 /**
- * Nothing he'd only do on his word, `given`, is done on what may all be
- * yapd's own words said back to a "done" line: it's let go. All but what he'd
- * keep in mind that may give a secret away, which goes on to be refused as
- * one, since only that keeps his words out of the journal. Nor is anything
- * said back to them that turns one down, like which thread it couldn't tell,
- * which would answer yapd's own voice and read the rest of them out as left:
- * that's let go too. Nor is he asked anything of them but code's own question
- * whether to stop a thread or take back a change, which his yes does alone,
- * never the rest of the request the model split off, which a yes would bring
- * back as his: any other question, like which thread or whether to tidy one,
- * is let go too.
+ * Of what may all be yapd's own words said back to a "done" line, nothing is
+ * done, said, looked up, said again or shown, however sure the model is,
+ * `given` or as it was checked: it's let go, with nothing said and nothing
+ * let go of. Nor is anything said back to them that turns it down, like which
+ * thread it couldn't tell, which would answer yapd's own voice. All but code's
+ * own question whether to stop a thread or take back a change, which his yes
+ * does alone, never the rest of the request the model split off, which a yes
+ * would bring back as his; and what he'd keep in mind that may give a secret
+ * away, which is refused as one, and that alone, since only that keeps his
+ * words out of the journal. Any other question, like which thread or whether
+ * to tidy one, is let go too.
  */
 const unechoed = (checked: Checked, given: Decision, utterance: Assistant.Utterance): Checked => {
+  if (!mayBeOwn(utterance)) return checked
   const letGo = (decided: Decision): Checked => ({ _tag: "Do", plan: { decision: { ...decided, act: "resume" }, target: Option.none() } })
-  if (checked._tag === "Ask" && mayBeOwn(utterance)) {
-    const { open } = checked
-    return ownQuestion(open) ? { _tag: "Ask", open: { ...open, decision: { ...open.decision, rest: "" }, alone: true } } : letGo(open.decision)
+  switch (checked._tag) {
+    case "Ask": {
+      const { open } = checked
+      return ownQuestion(open) ? { _tag: "Ask", open: { ...open, decision: { ...open.decision, rest: "" }, alone: true } } : letGo(open.decision)
+    }
+    case "Do": {
+      const { decision } = checked.plan
+      return decision.act === "remember" && secretive(decision, utterance) ? { _tag: "Do", plan: { ...checked.plan, decision: { ...decision, rest: "" } } } : letGo(decision)
+    }
+    case "Say":
+      return letGo(given)
   }
-  if (checked._tag === "Ask") return checked
-  // What it does, or, turned down, what it would have done.
-  const done = checked._tag === "Do" ? checked.plan.decision : given
-  return echoedBack(done, utterance) && !(done.act === "remember" && secretive(done, utterance)) ? letGo(done) : checked
 }
 
 /**

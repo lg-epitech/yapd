@@ -2525,7 +2525,41 @@ describe("Assistant", () => {
     expect(result).toEqual({ over: [], stale: false, open: Option.some(`${choices}, sir?`), sent: 1 })
   })
 
-  test("a failed model call on what may all be yapd's own words said back to a done line leaves a question he's heard open as it was, with only the failure said", async () => {
+  test("an answer the model makes of what may all be yapd's own words said back to a done line is never said, and a question waiting its turn stays as it was, but words surely his get it", async () => {
+    const choices = "Migrate Tezos Integration or Open Mina SSV2 Bug Tickets"
+    const status = "The Tezos migration is still on the fee table, sir."
+    const said = (afterPause?: string) =>
+      run(
+        Effect.gen(function* () {
+          const made = yield* assistant(
+            (situation) => {
+              const { heard } = situation.utterance
+              if (heard.startsWith("Tell the Tesla")) return tezosMessage("high")(situation)
+              if (heard.startsWith("Which")) return Brain.decision({ act: "clarify", target: handle(situation, tezos), others: handle(situation, mina), sure: "low" })
+              // Its own "On it." heard ahead of the thread it named, which the model takes for asking how that's going.
+              return Brain.decision({ act: "answer", target: handle(situation, tezos), spoken: status })
+            },
+            undefined,
+            { waiting: true },
+          )
+          yield* made.dictate("Tell the Tesla's migration to use the fee table from the Mina work.")
+          const sent = made.notices().findLast(({ kind }) => kind === "done")
+          // Which one he meant is asked behind the done line, which he hears first.
+          yield* made.dictate("Which migration was that?")
+          yield* made.play(sent)
+          const before = made.spoken().length
+          yield* made.followUp("On it. The teaser migration.", 2, sent, sent?.spoken, afterPause, undefined, true)
+          const stale = yield* made.questions().at(-1)!.stale
+          return { over: made.spoken().slice(before), stale, open: Option.map(yield* made.open, ({ asked }) => asked) }
+        }),
+      )
+    expect(await said()).toEqual({ over: [], stale: false, open: Option.some(`${choices}, sir?`) })
+    const his = await said("The teaser migration.")
+    expect(his.over.at(-1)).toBe(status)
+    expect(his.open).toEqual(Option.none())
+  })
+
+  test("a failed model call on what may all be yapd's own words said back to a done line says nothing, and leaves a question he's heard open as it was", async () => {
     const choices = "Migrate Tezos Integration or Open Mina SSV2 Bug Tickets"
     const result = await run(
       Effect.gen(function* () {
@@ -2547,10 +2581,10 @@ describe("Assistant", () => {
         return { over: made.spoken().slice(before), open: Option.map(yield* made.open, ({ asked }) => asked) }
       }),
     )
-    expect(result).toEqual({ over: ["I couldn't work that out just now, sir. What you said is in my log."], open: Option.some(`${choices}, sir?`) })
+    expect(result).toEqual({ over: [], open: Option.some(`${choices}, sir?`) })
   })
 
-  test("code's own question from the rest of what may all be yapd's own words said back to a done line, in place of a question, tells him what was left of it, whether he was yet to hear it or had", async () => {
+  test("what may all be yapd's own words said back to a done line, let go with more the model split off them, do none of it, not even code's own question, and leave a question as it was, whether he was yet to hear it or had", async () => {
     const choices = "Migrate Tezos Integration or Open Mina SSV2 Bug Tickets"
     const taking = (hearing: boolean) =>
       run(
@@ -2581,12 +2615,8 @@ describe("Assistant", () => {
           return { over: made.spoken().slice(before), open: Option.map(yield* made.open, ({ asked }) => asked) }
         }),
       )
-    const asked = "Stop Migrate Tezos Integration, sir?"
-    expect(await taking(false)).toEqual({
-      over: [`I didn't ask whether you meant ${choices}, since you'd moved on, sir. I left the rest: Tell the Mina one to rebase.`, asked],
-      open: Option.some(asked),
-    })
-    expect(await taking(true)).toEqual({ over: ["I left the rest, sir: Tell the Mina one to rebase.", asked], open: Option.some(asked) })
+    expect(await taking(false)).toEqual({ over: [], open: Option.some(`${choices}, sir?`) })
+    expect(await taking(true)).toEqual({ over: [], open: Option.some(`${choices}, sir?`) })
   })
 
   test("a message said over a question that can't go as its answer, to a form that takes only its options or as T3 Code takes a message, goes in the queue behind it, and the question is asked again after", async () => {
@@ -4918,7 +4948,7 @@ describe("Assistant", () => {
     expect(result.muted).toEqual([`t3:Rosie:${tezos.id}`])
   })
 
-  test("the rest of a request said back to a done line in what may all be yapd's own words is never done, and is logged, but goes on what's surely his", async () => {
+  test("the rest of a request said back to a done line in what may all be yapd's own words is never done, nor what came before it, and is logged, but goes on what's surely his", async () => {
     const said = (afterPause?: string) => {
       const logged: Array<string> = []
       const logger = Logger.make(({ message }) => {
@@ -4942,7 +4972,7 @@ describe("Assistant", () => {
     }
     const echoed = await said()
     expect(echoed.sent).toEqual(["Use the fee table from the Mina work."])
-    expect(echoed.logged).toContain(`Not acting on it, since "tell the Mina one to add tests" may have been my own voice`)
+    expect(echoed.logged).toContain(`Not acting on it, since "On it. Tell the Mina one to add tests." may have been my own voice`)
     // What he said after a pause is surely his: the rest goes.
     expect((await said("Tell the Mina one to add tests.")).sent).toEqual(["Use the fee table from the Mina work.", "Add tests."])
   })

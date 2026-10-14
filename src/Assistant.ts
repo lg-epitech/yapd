@@ -2424,7 +2424,8 @@ export const make = (options: {
     /** What comes of the rest of a request, worked out, said with what was said of the step before. `quietly` when that was said already. */
     const then = (next: Thought, first: Outcome, step: number, said: Lines, quietly: boolean): Effect.Effect<Outcome> =>
       Effect.gen(function* () {
-        if (next.source === "failed") return retold(first, (say) => joined(say, `I couldn't work out the rest${addressed(said)}.`, said))
+        // Nothing is said of what may all be yapd's own words, even that it couldn't be worked out.
+        if (next.source === "failed") return Brain.mayBeOwn(next.utterance) ? first : retold(first, (say) => joined(say, `I couldn't work out the rest${addressed(said)}.`, said))
         if ((next.decision.act === "dismiss" && next.decision.rest.trim() === "") || next.decision.act === "resume") return first
         // A line for going ahead the step before says is kept from being said again in the same breath.
         const after = yield* follow(Brain.check(next.decision, next.situation, said), next, said, {
@@ -4065,9 +4066,9 @@ export const make = (options: {
       said: Lines,
       at: Stepping = { step: 0, twice: false },
     ): Effect.Effect<Outcome> => {
-      // Anything he'd only do on his word, said back to a "done" line in what may all be yapd's own words, or in the rest of what was, is
-      // only ever asked about, or let go, which is logged so how often that happens can be counted.
-      const echoed = Brain.echoedBack(thought.decision, thought.utterance)
+      // Anything said back to a "done" line in what may all be yapd's own words, or in the rest of what was, is only ever asked about in
+      // code's own question, or let go, which is logged so how often that happens can be counted.
+      const echoed = Brain.mayBeOwn(thought.utterance) && thought.decision.act !== "resume"
       switch (checked._tag) {
         case "Say":
           return Effect.succeed(unfinished(reply(checked.spoken, thought.subject), thought.decision.rest, said, thought.situation.desk))
@@ -4120,14 +4121,20 @@ export const make = (options: {
         const { decision } = decided
         // Nothing was really said, like words Whisper hears in silence: a question stays open.
         if (decided.source === "fast" && decision.act === "resume") return quiet(decided.subject)
-        // Told to stop the update he was hearing, it isn't read again once the dictation that cut it off is dealt with.
-        if (decision.act === "dismiss" && decided.subject._tag === "Session" && hushed(utterance.heard)) yield* options.skip(decided.subject.update)
+        // Told to stop the update he was hearing, it isn't read again once the dictation that cut it off is dealt with: never in what may
+        // all be yapd's own words.
+        if (decision.act === "dismiss" && decided.subject._tag === "Session" && hushed(utterance.heard) && !Brain.mayBeOwn(utterance)) {
+          yield* options.skip(decided.subject.update)
+        }
         const said = yield* persona.lines
-        // Nothing was made of it, so that's all that's said, and what he missed isn't marked heard. Still, he said something after the question he heard, which closes it,
-        // unless all he said may be yapd's own words, which leave it open as it was, with nothing said of it.
+        // Nothing was made of it, so that's all that's said, and what he missed isn't marked heard. Still, he said something after the question he heard, which closes it.
+        // All he said may be yapd's own words, nothing is said of them, not even that, and a question is left as it was.
         if (decided.source === "failed") {
+          if (Brain.mayBeOwn(utterance)) {
+            return yield* Effect.as(Effect.logInfo(`Saying nothing of it, since ${quoted(utterance.heard)} may have been my own voice`), quiet(decided.subject))
+          }
           const heard = before(utterance)
-          if (heard?.said === undefined || Brain.mayBeOwn(utterance)) return reply(decision.spoken, decided.subject)
+          if (heard?.said === undefined) return reply(decision.spoken, decided.subject)
           const { open } = heard
           yield* close(open, utterance.via === "reply" ? "dropped: unclear" : "replaced", utterance.id)
           return ahead(reply(decision.spoken, decided.subject), open.decision.rest, said)
@@ -4137,18 +4144,27 @@ export const make = (options: {
         // One asked since he said this stays open, to be asked as usual, as if it weren't there.
         const opened = before(utterance)
         if (opened === undefined) return yield* follow(Brain.check(decision, decided.situation, said), decided, said)
+        // What may all be yapd's own words said back to a "done" line take its place only for code's own question about them, and he's told
+        // what was left of it, as for anything new: anything else, all let go, like an answer to it, hearing it again or something new, leaves
+        // it as it was, heard or waiting its turn, and nothing is said of it, so it's never lost to them, nor asked again, nor told as left.
+        if (Brain.mayBeOwn(utterance)) {
+          const checked = Brain.check(decision, decided.situation, said)
+          if (checked._tag !== "Ask") return yield* follow(checked, decided, said)
+          yield* close(opened.open, "replaced", utterance.id)
+          if (opened.said !== undefined) return ahead(yield* follow(checked, decided, said), opened.open.decision.rest, said)
+          yield* deliver(unheardLeft(opened.open, said), decided)
+          return yield* follow(checked, decided, said)
+        }
         // Taking back what he just did, of the question's thread or none named, a message he dictated, taken as the answer to a part of the
         // question, is taken back out of it. That was all he took back, since it never went: he's told so, and the question's asked again
         // after, from the part it answered. Let go with "scratch that", it's let go without it. Never when the model took him to mean a reminder,
-        // a memory, the catch-up he cleared or what was done to tidy a thread, nor in what may all be yapd's own words said back to a "done"
-        // line, which take back only what that line said, or ask, as any take-back of them does.
+        // a memory, the catch-up he cleared or what was done to tidy a thread.
         const undone = decided.situation.desk.threads.find(({ handle }) => handle === decision.target)
         // One yapd archived, by its handle in ARCHIVED, is never the question's.
         const ours =
           undone === undefined ? Option.isNone(Brain.archivedBy(decision.target, decided.situation)) : opened.open.candidates.some((ref) => Threads.same(ref, undone.ref))
         const takenBack =
           ours &&
-          !Brain.mayBeOwn(utterance) &&
           ((decision.act === "undo" && decision.how !== "reminder" && decision.how !== "memory" && decision.how !== "catchup" && decision.how !== "tidy") ||
             (decision.act === "dismiss" && Brain.takesBack(utterance.heard)))
         const open = takenBack ? withdrawing(opened.open) : opened.open
@@ -4174,9 +4190,6 @@ export const make = (options: {
         if (opened.said === undefined) {
           if (decision.act === "resume") return quiet(decided.subject)
           const checked = Brain.check(decision, decided.situation, said)
-          // What may all be yapd's own words take its place only for code's own question about them: let go, or anything else, it's left
-          // waiting its turn as it was, and nothing is said of it, so it's never lost to them, nor told as left since he'd moved on.
-          if (checked._tag !== "Ask" && Brain.mayBeOwn(utterance)) return yield* follow(checked, decided, said)
           yield* close(open, "replaced", utterance.id)
           yield* deliver(unheardLeft(open, said), decided)
           return yield* follow(checked, decided, said)
@@ -4289,14 +4302,6 @@ export const make = (options: {
         // A thread's question is settled here only by letting it go: anything else, like a message to its thread that can't go as its
         // answer, leaves it waiting in T3 Code, so it's asked again after, unless that dealt with it.
         const settles = answers && (open.kind !== "question" || decision.act === "dismiss")
-        // What may all be yapd's own words, not its answer, close it only for code's own question about them, which takes its place: let
-        // go, or anything else, it's left open as it was, so a thread's is never asked again for them, nor let go with what he dictated.
-        if (!answers && Brain.mayBeOwn(utterance)) {
-          const checked = Brain.check(decision, decided.situation, said)
-          if (checked._tag !== "Ask") return yield* follow(checked, decided, said)
-          yield* close(open, "replaced", utterance.id)
-          return ahead(yield* follow(checked, decided, said), open.decision.rest, said)
-        }
         yield* close(open, decision.act === "resume" ? "dropped: unclear" : settles ? "answered" : "replaced", utterance.id)
         if (!answers) return ahead(yield* follow(Brain.check(decision, decided.situation, said), decided, said), open.decision.rest, said)
         if (decision.act === "dismiss") {

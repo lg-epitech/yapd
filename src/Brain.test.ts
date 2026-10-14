@@ -654,7 +654,7 @@ describe("Brain", () => {
     expect(Brain.check(undo, over({ afterPause: "No." }), lines)).toMatchObject({ _tag: "Do", plan: { decision: { act: "undo" }, pinned: "yapd:u0:0" } })
   })
 
-  test("nothing he'd only do on his word, said back to a done line in what may be yapd's own words or in the rest of it, is done however sure the model is: a stop is asked about, anything else let go", () => {
+  test("nothing said back to a done line in what may be yapd's own words or in the rest of it is done or answered however sure the model is: a stop is asked about, anything else let go", () => {
     const handle = desk().threads.find(({ thread }) => thread.id === tezos.id)!.handle
     const over = (given: Brain.Situation, change: Brain.Change, echo: string, more: Partial<Assistant.Utterance> = {}): Brain.Situation => ({
       ...given,
@@ -693,6 +693,10 @@ describe("Brain", () => {
     const asked = { _tag: "Ask", open: { kind: "confirm", asked: "Stop Migrate Tezos Integration, sir?", decision: { act: "stop", target: handle } } }
     expect(Brain.check(stop, afterSent, lines)).toMatchObject(asked)
     expect(Brain.check(send, afterSent, lines)).toMatchObject(resumed)
+    // Nor is anything else of them answered, as the model or code would: nothing is said.
+    const answer = Brain.decision({ act: "answer", target: handle, spoken: "The Tezos migration is still on the fee table, sir." })
+    expect(Brain.check(answer, afterSent, lines)).toMatchObject(resumed)
+    expect(Brain.fast({ ...afterSent, utterance: { ...afterSent.utterance, heard: "Who needs me?" } }, lines)).toMatchObject({ act: "resume" })
     // What may give a secret away is still refused as one, which alone keeps his words out of the journal.
     const secret = Brain.decision({ act: "remember", how: "fact", text: "The staging key is sk-live-4f9a8b7c6d5e." })
     const told = { ...afterSent, utterance: { ...afterSent.utterance, heard: "Remember the staging key is sk-live-4f9a8b7c6d5e." } }
@@ -708,6 +712,7 @@ describe("Brain", () => {
     const { echo: _, carried: __, ...begunAfter } = afterMode.utterance
     expect(Brain.check(normal, { ...afterMode, utterance: begunAfter }, lines)).toMatchObject({ _tag: "Do", plan: { decision: { act: "mode", how: "normal" } } })
     expect(Brain.check(send, { ...afterSent, utterance: { ...afterSent.utterance, afterPause: "Tell it to open a PR." } }, lines)).toMatchObject({ _tag: "Do", plan: { decision: { act: "send" } } })
+    expect(Brain.check(answer, { ...afterSent, utterance: { ...afterSent.utterance, afterPause: "How's it doing?" } }, lines)).toMatchObject({ _tag: "Do", plan: { decision: { act: "answer" } } })
     expect(Brain.check(stop, rest, lines)).toMatchObject({ _tag: "Do", plan: { decision: { act: "stop" } } })
   })
 
