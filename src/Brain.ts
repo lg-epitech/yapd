@@ -2879,14 +2879,19 @@ export const check = (given: Decision, situation: Situation, lines: Lines): Chec
  * Nothing he'd only do on his word is done on what may all be yapd's own
  * words said back to a "done" line: it's let go. All but what he'd keep in
  * mind that may give a secret away, which goes on to be refused as one,
- * since only that keeps his words out of the journal.
+ * since only that keeps his words out of the journal. A question asked of
+ * them, whether to stop a thread or take back a change, is to that alone,
+ * never the rest of the request the model split off, which a yes would bring
+ * back as his.
  */
-const unechoed = (checked: Checked, utterance: Assistant.Utterance): Checked =>
-  checked._tag === "Do" &&
-  echoedBack(checked.plan.decision, utterance) &&
-  !(checked.plan.decision.act === "remember" && secretive(checked.plan.decision, utterance))
+const unechoed = (checked: Checked, utterance: Assistant.Utterance): Checked => {
+  if (checked._tag === "Ask" && mayBeOwn(utterance)) return { _tag: "Ask", open: { ...checked.open, decision: { ...checked.open.decision, rest: "" } } }
+  return checked._tag === "Do" &&
+    echoedBack(checked.plan.decision, utterance) &&
+    !(checked.plan.decision.act === "remember" && secretive(checked.plan.decision, utterance))
     ? { _tag: "Do", plan: { decision: { ...checked.plan.decision, act: "resume" }, target: Option.none() } }
     : checked
+}
 
 /** Checks a decision, as `check` does, once a routine's name is its steps. */
 const checking = (choice: Decision, situation: Situation, lines: Lines): Checked => {

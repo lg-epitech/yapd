@@ -4769,6 +4769,34 @@ describe("Assistant", () => {
     expect((await said("Tell the Mina one to add tests.")).sent).toEqual(["Use the fee table from the Mina work.", "Add tests."])
   })
 
+  test("a yes to stopping what yapd started, asked of what may all be its own words said back to that line, stops it alone, never doing the rest the model split off", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, followUp, answer, notices, questions, dispatched, ledger, becomes } = yield* assistant(
+          (situation) => {
+            const { heard } = situation.utterance
+            if (heard.startsWith("Start")) return Brain.decision({ act: "start", text: heard })
+            // Its own "On it, sir." heard ahead of more, which the model takes for a no to the work, with the rest split off.
+            if (heard.startsWith("On it")) return Brain.decision({ act: "undo", sure: "high", rest: "tell the Mina one to wait" })
+            return Brain.decision({ act: "send", target: handle(situation, mina), text: "Wait.", how: "now" })
+          },
+          () => written({ spoken: "In yapd, on Opus, without a worktree." }),
+        )
+        yield* dictate("Start a thread in yapd to fix the fees.")
+        // The thread T3 Code made for it, at work.
+        const started = Option.getOrThrow(yield* ledger.latest("1 hour", { kinds: ["start"] })).thread
+        yield* becomes(thread(started, "Fix the fees", "yapd", { ...begun, updatedAt: new Date(now).toISOString() }))
+        const done = notices().findLast(({ kind }) => kind === "done")
+        yield* followUp("On it, sir. No, tell the Mina one to wait.", 2, done, done?.spoken, undefined, undefined, true)
+        const asked = questions().map(({ spoken }) => spoken)
+        yield* answer("Yes.")
+        return { asked, started, dispatched: dispatched.map(({ type, threadId }) => [type, threadId]) }
+      }),
+    )
+    expect(result.asked).toEqual(["Stop Fix the fees, sir?"])
+    expect(result.dispatched).toEqual([["run.interrupt", result.started]])
+  })
+
   /** Takes each message in behind the turn under way, in a run of its own, as T3 Code queues it, so any can be withdrawn. */
   const queues: Answer = (payload, bounded) =>
     Effect.sync(() => {
