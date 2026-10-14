@@ -2653,12 +2653,11 @@ describe("A line listened to from its end", () => {
     })
   })
 
-  test("'Mute.' run into by yapd's own last words turns yapd off with nothing worked out, however early its own voice began", async () => {
-    const spoken = "On it, sir: the Tezos migration."
-    const muted = (from: number) =>
+  test("'Mute.' run into by yapd's own last words turns yapd off with nothing worked out, however early its own voice began, even after a line about muting", async () => {
+    const muted = (from: number, spoken = "On it, sir: the Tezos migration.", last = "the Tezos migration.") =>
       overHelperScoped(
         Effect.gen(function* () {
-          const helper = yield* overHelper([[0.9, "the Tezos migration."], [0.95, "Mute."]], { answer: true, after: true, off: true, wait: Conversation.linger, spoken, duration: 2.5 })
+          const helper = yield* overHelper([[0.9, last], [0.95, "Mute."]], { answer: true, after: true, off: true, wait: Conversation.linger, spoken, duration: 2.5 })
           // Its own voice gets into the microphone from `from` into the line until it ends, and he says it right after.
           yield* helper.wait(from)
           yield* helper.talk(0.9, 10)
@@ -2671,10 +2670,13 @@ describe("A line listened to from its end", () => {
           return { offs: helper.offs(), transcribed: helper.transcribed, offered: helper.offered, done: Option.isSome(yield* Fiber.poll(helper.fiber)) }
         }),
       )
-    const off = { offs: 1, transcribed: ["the Tezos migration. Mute."], offered: [], done: true }
-    expect(await muted(0.3)).toEqual(off)
+    const off = (last = "the Tezos migration.") => ({ offs: 1, transcribed: [`${last} Mute.`], offered: [], done: true })
+    expect(await muted(0.3)).toEqual(off())
     // Begun over its last moment, it's acted on as soon as it's made out, as over any line.
-    expect(await muted(2.1)).toEqual(off)
+    expect(await muted(2.1)).toEqual(off())
+    // Said after its last words, it's never the line's own "mute", whatever the line was about.
+    expect(await muted(0.3, "Muted, sir: the Tezos importer.", "the Tezos importer.")).toEqual(off("the Tezos importer."))
+    expect(await muted(2.1, "Muted, sir: the Tezos importer.", "the Tezos importer.")).toEqual(off("the Tezos importer."))
   })
 
   test("'Mute.' begun over its last second, before its last moment, and still going as it ends, turns yapd off with nothing worked out", async () => {

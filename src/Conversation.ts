@@ -458,10 +458,11 @@ export const make = (options: {
      * microphone, was about muting, as that "mute" may be its own. With
      * `own`, a line said to the end that its own voice may have run on from
      * into what he said, it's also what he said after its last words alone,
-     * like the "Mute." of "the Tezos migration. Mute.".
+     * like the "Mute." of "the Tezos migration. Mute.", which came once its
+     * voice had ended, so is never its own, even after a line about muting.
      */
     const halted = (heard: string, echo: string | undefined, own?: string) =>
-      options.off !== undefined && !/mute/i.test(echo ?? "") && (halts(heard) || (own !== undefined && halts(beyond(heard, own) ?? "")))
+      options.off !== undefined && ((!/mute/i.test(echo ?? "") && halts(heard)) || (own !== undefined && halts(beyond(heard, own) ?? "")))
 
     /** Once something waits to be said next, if that's ever known. */
     const queued = options.queued ?? Effect.never
