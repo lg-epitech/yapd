@@ -3273,11 +3273,18 @@ const reaching = (choice: Decision, situation: Situation): Reach | undefined => 
         const own = Option.getOrUndefined(Ledger.latestOf(rows, situation.now, within, filter))
         if (own !== undefined && dropped(own) && newer(own)) return stepped(own)
       }
-      const acted = Option.getOrUndefined(situation.acted)
-      if (acted?.kind === "tidy" && newer(acted) && rows.some((row) => row.utterance === acted.utterance && row.step === acted.step && dropped(row))) {
-        return whose !== undefined && Option.isNone(whose) ? stepped(acted) : undefined
-      }
-      return whose === undefined ? undefined : ofNoted("reminder", Option.getOrUndefined(whose))
+      const dropping = Option.getOrUndefined(
+        Option.filter(
+          situation.acted,
+          (acted) => acted.kind === "tidy" && newer(acted) && rows.some((row) => row.utterance === acted.utterance && row.step === acted.step && dropped(row)),
+        ),
+      )
+      if (dropping !== undefined && whose !== undefined && Option.isNone(whose)) return stepped(dropping)
+      if (whose === undefined) return undefined
+      // A reminder of no thread with a thread on the desk filled in, it's the one he was hearing about, left out as `writing` leaves it: never
+      // one in ARCHIVED, nor while an archive that dropped reminders is newer, when it's the thread's own reminder or nothing.
+      const filled = dropping === undefined && noted !== undefined && Option.isNone(noted.about) && Option.isNone(archivedBy(choice.target, situation))
+      return ofNoted("reminder", filled ? undefined : Option.getOrUndefined(whose))
     }
     case "thread": {
       const to = namedBack(choice.target, situation)
@@ -3453,7 +3460,12 @@ const takingBack = (
         cleared: "bring back the catch-up you just cleared",
         restored: "clear the catch-up again",
       }[last.kind]
-      return { doing, decision: decision({ act: "undo", how: changeOf(last) }), candidates: [] }
+      // A reminder of a thread on the desk, of that thread, as it's listed when he says yes: never an archive since that dropped others.
+      const of =
+        changeOf(last) !== "reminder"
+          ? undefined
+          : Option.getOrUndefined(Option.flatMap(last.about, (about) => Option.fromNullable(desk.threads.find((one) => Threads.same(one.ref, about)))))
+      return { doing, decision: decision({ act: "undo", how: changeOf(last), target: of?.handle ?? "" }), candidates: of === undefined ? [] : [of.ref] }
     }
     case "acted": {
       const row = reach.row ?? Option.getOrUndefined(situation.acted)

@@ -14034,6 +14034,40 @@ describe("Assistant tidying", () => {
     expect({ pending: since.pending, sent: since.sent }).toEqual({ pending: 0, sent: ["thread.archive"] })
   })
 
+  test("cancelling another thread's reminder after a line saying an archive dropped one is asked about first, and a yes cancels that reminder alone, never unarchiving", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(
+          (situation) => {
+            const { heard } = situation.utterance
+            if (heard.startsWith("Tell me")) return Brain.decision({ act: "remind", how: "finished", target: handle(situation, tezos) })
+            if (heard.startsWith("Archive")) return Brain.decision({ act: "tidy", how: "archive", target: handle(situation, mina), sure: "high" })
+            if (heard.startsWith("No")) return Brain.decision({ act: "undo", how: "reminder", target: handle(situation, tezos), sure: "high" })
+            return undefined
+          },
+          undefined,
+          { reminders: true },
+        )
+        yield* made.reminders!.add({ at: now, heard: "Tell me when the Mina one finishes.", text: "", event: "finished", machine: "Rosie", thread: mina.id, called: "the Mina tickets" })
+        yield* made.dictate("Tell me when the Tezos one finishes.")
+        yield* made.wait(30)
+        yield* made.dictate("Archive the Mina tickets thread.")
+        const archived = made.notices().findLast(({ kind }) => kind === "done")
+        // T3 Code archived it, which the shell then shows it as.
+        yield* made.becomes({ ...mina, archivedAt: "2026-10-01T02:18:31.000Z" })
+        yield* made.followUp("No, cancel the Tezos reminder.", 2, archived)
+        const asked = made.questions().map(({ spoken }) => spoken)
+        const before = (yield* made.reminders!.pending).length
+        yield* made.answer("Yes.")
+        return { said: archived?.spoken, asked, before, pending: (yield* made.reminders!.pending).length, sent: tidied(made.dispatched).map(({ type }) => type) }
+      }),
+    )
+    expect(result.said).toBe("Archived, sir: Open Mina SSV2 Bug Tickets. I dropped its reminder; scratch that to bring both back.")
+    expect(result.asked).toEqual(["Cancel the reminder you just set, sir?"])
+    expect([result.before, result.pending]).toEqual([1, 0])
+    expect(result.sent).toEqual(["thread.archive"])
+  })
+
   test("taking back the reminder an archive of several dropped, of the one he names by its handle in ARCHIVED, unarchives that one alone, and only when the model's sure which", async () => {
     /** The Tezos importer and fees, each with a reminder on it, archived together, then the fees' reminder asked back, the model `sure` it's that one. */
     const undoing = (sure: Brain.Sure) =>

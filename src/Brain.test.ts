@@ -603,6 +603,52 @@ describe("Brain", () => {
     expect(dictated._tag === "Do" ? dictated.plan.pinned : dictated).toBeUndefined()
   })
 
+  test("a reminder taken back after a done line that said something else is asked about, of another thread named or one filled in, never cancelled on its own", () => {
+    const handleOf = (of: T3Live.Thread) => desk().threads.find(({ thread }) => thread.id === of.id)!.handle
+    const replied = (given: Brain.Situation, change: Brain.Change) => ({ ...given, utterance: { ...given.utterance, via: "reply" as const, afterDone: { change } } })
+    // A reminder for when the Tezos one finishes, then "Archived, sir: Open Mina SSV2 Bug Tickets. I dropped its reminder…".
+    const archive: Ledger.Row = {
+      commandId: "yapd:u0:0",
+      messageId: null,
+      utterance: "u0",
+      step: 0,
+      kind: "tidy",
+      machine: "Rosie",
+      thread: mina.id,
+      body: { _tag: "Archive", called: "Open Mina SSV2 Bug Tickets" },
+      digest: null,
+      state: "sent",
+      how: null,
+      reason: null,
+      at: now - 10_000,
+    }
+    const tezosReminder: Brain.Noted = { at: now - 60_000, kind: "reminder", id: 1, about: Option.some(ref(tezos)) }
+    const archived = situation("No, cancel the Tezos reminder.", { acted: Option.some(archive), recent: [archive], dropping: [archive.commandId], noted: Option.some(tezosReminder) })
+    // His yes cancels that reminder by its thread, never the archive, which bringing back a reminder with no thread named would undo.
+    expect(Brain.check(Brain.decision({ act: "undo", how: "reminder", target: handleOf(tezos), sure: "high" }), replied(archived, { what: "acted", utterance: "u0" }), lines)).toMatchObject({
+      _tag: "Ask",
+      open: { kind: "confirm", asked: "Cancel the reminder you just set, sir?", decision: { act: "undo", how: "reminder", target: handleOf(tezos) }, candidates: [ref(tezos)] },
+    })
+    // A reminder to call the bank, then "On it, sir: Open Mina SSV2 Bug Tickets.", with the thread he was hearing about filled in.
+    const message: Ledger.Row = {
+      ...archive,
+      messageId: "yapd:u0:0:m",
+      kind: "message",
+      body: { _tag: "Send", text: "Add tests.", messageId: "yapd:u0:0:m", how: "now" },
+      digest: "add tests",
+      how: "queued",
+    }
+    const bank: Brain.Noted = { at: now - 60_000, kind: "reminder", id: 2, about: Option.none() }
+    const sent = situation("No, cancel the reminder.", { acted: Option.some(message), recent: [message], noted: Option.some(bank) })
+    const filled = Brain.decision({ act: "undo", how: "reminder", target: handleOf(mina), sure: "high" })
+    expect(Brain.check(filled, replied(sent, { what: "acted", utterance: "u0" }), lines)).toMatchObject({
+      _tag: "Ask",
+      open: { kind: "confirm", asked: "Cancel the reminder you just set, sir?", decision: { act: "undo", how: "reminder", target: "" }, candidates: [] },
+    })
+    // After the line that set it, it's what the line said, taken back as ever.
+    expect(Brain.check(filled, replied(sent, { what: "noted", at: bank.at }), lines)).toMatchObject({ _tag: "Do" })
+  })
+
   test("over yapd's first seconds, what he said after a pause isn't taken for nothing on the strength of yapd's own word before it", () => {
     const echo = "For the loader fix, is that yapd or std?"
     const over = (heard: string, afterPause?: string, voiced = 2) => {
