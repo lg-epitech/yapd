@@ -151,7 +151,12 @@ const asked = ({ needsYou, turn, lines }: Interruption) => {
  */
 const promptly = 3
 
-/** Less speech than this, a plain yes is left to the model, as it may be the room's. The offline measurement of a plain yes sets it. */
+/**
+ * Less speech than this, a plain yes is left to the model, as it may be the
+ * room's. "Yes.", "Yeah.", "Sure.", "Yep.", "Do it." and "Go ahead." in two of
+ * Kokoro's voices, through Silero and the endpointer, measured 0.35 to 0.74 s,
+ * 0.48 s at the median, so it's the floor a faint write is held to.
+ */
 const yesFloor = faintest
 
 /** What they said, as they'd have typed it. */
