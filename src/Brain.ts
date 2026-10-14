@@ -4619,6 +4619,12 @@ const focus = (situation: Situation) => {
                 ? `He's speaking over this update, so "it" is that subagent, ${subagentHandle}, not the thread it's part of: a message for it is "send" with "target" "", and tidying it is "tidy" with "target" "".`
                 : `He's speaking over this update, so "it" is that work's own session, not a thread in THREADS: a message for it is "send" with "target" "", and tidying it is "tidy" with "target" "".`,
             ]),
+        // What he asks of the work he's hearing about is for the agent doing it, which knows it, never a new thread that would have to guess.
+        ...(subject.own === undefined
+          ? []
+          : [
+              `What he asks of the work this update is about, or of what it just told him, even a new task like deleting something it made or spoke of, is for its agent: "send" to ${own ?? `it, with "target" ""`}, never "start". Only asking to start or kick off something of its own, like a new thread, a review or another agent, is "start".`,
+            ]),
       ].join("\n")
     }
     case "Answer": {
