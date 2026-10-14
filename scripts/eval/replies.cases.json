@@ -835,12 +835,12 @@
     },
     {
       "id": "S66",
-      "note": "a mixed request over a rig update tied only by its owner, its thread on the desk, the other thread's part first: sent to it, the rebase left for its own session",
+      "note": "a mixed request over a rig update tied only by its owner, its thread on the desk, the other thread's part first, then 'it', which after 'the Mina one' is the Mina one (his reading): both parts to it, the rebase carried, nothing left",
       "update": "rig",
       "how": "owner",
       "machine": "rig",
       "heard": "Tell the Mina one to wait and tell it to rebase.",
-      "expect": { "act": ["send"], "target": "Mina", "rest": "rebase", "restLeft": true, "neverSpoken": ["couldn't tell"] }
+      "expect": { "act": ["send"], "target": "Mina", "carries": "rebase", "restLeft": false, "neverSpoken": ["couldn't tell"] }
     },
     {
       "id": "S65h",
@@ -852,11 +852,11 @@
     },
     {
       "id": "S66h",
-      "note": "a mixed request over a hooked update, the other thread's part first: sent to it, the rebase left for its own session",
+      "note": "a mixed request over a hooked update, the other thread's part first, then 'it', which after 'the Mina one' is the Mina one (his reading): both parts to it, the rebase carried, nothing left",
       "update": "tezos",
       "how": "hooked",
       "heard": "Tell the Mina one to wait and tell it to rebase.",
-      "expect": { "act": ["send"], "target": "Mina", "rest": "rebase", "restLeft": true, "neverSpoken": ["couldn't tell"] }
+      "expect": { "act": ["send"], "target": "Mina", "carries": "rebase", "restLeft": false, "neverSpoken": ["couldn't tell"] }
     },
     {
       "id": "S67",
@@ -882,7 +882,7 @@
     },
     {
       "id": "S69",
-      "note": "over its first seconds, a stop that may be its own words: let go, or at most code's own question naming it, never stopped",
+      "note": "over its first seconds, a stop that may be its own words, nothing after a pause: the Responder's message of it handed over, then let go, or at most code's own question naming it, never sent or stopped",
       "update": "tezos-mina",
       "how": "tied",
       "said": "The Tezos migration finished, sir, and the Mina tickets are…",
@@ -1019,14 +1019,6 @@
       "echo": "so you can settle it",
       "heard": "Settle it.",
       "expect": { "intents": ["resume"], "neverDone": ["tidy", "send"] }
-    },
-    {
-      "id": "S83",
-      "note": "S66h's words, with 'it' read either way, as the plan's 2.2 and 6 leave it to the model: Mina's sent, and the rebase reaches the Mina one too or is left for the update's own session, never dropped; S66h holds the plan's own reading, pending his verdict",
-      "update": "tezos",
-      "how": "hooked",
-      "heard": "Tell the Mina one to wait and tell it to rebase.",
-      "expect": { "act": ["send"], "target": "Mina", "carries": "rebase", "neverSpoken": ["couldn't tell"] }
     },
     {
       "id": "S84",

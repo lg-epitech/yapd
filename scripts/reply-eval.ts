@@ -119,6 +119,7 @@ const Expect = Schema.Struct({
   /** "again" or "mute" for how it was worked out, or "fast" or "model" for the Brain, handed over. */
   source: Schema.optional(Schema.String),
   left: Schema.optional(Schema.String),
+  /** Whether its rest step is left for the update's own session: false when nothing is, with a rest or none. */
   restLeft: Schema.optional(Schema.Boolean),
   /** A piece of what he said that's never dropped: in the first step's message, or in its rest, sent, asked about or left. */
   carries: Schema.optional(Schema.String),
@@ -1574,7 +1575,7 @@ const meetsHandoff = (case_: Case, expect: Expect, result: Result): boolean => {
   if (expect.neverRoute !== undefined) checks.push(!expect.neverRoute.includes(result.route as typeof Route.Type))
   if (expect.source !== undefined) checks.push(result.source === expect.source || result.brainSource === expect.source)
   if (expect.left !== undefined) checks.push(lower(result.left).includes(lower(expect.left)))
-  if (expect.restLeft !== undefined) checks.push(result.restLeft === expect.restLeft)
+  if (expect.restLeft !== undefined) checks.push((result.restLeft === true) === expect.restLeft)
   if (expect.carries !== undefined) {
     const piece = lower(expect.carries)
     const restKept = result.restLeft === true || ["send", "reply", "clarify"].includes(result.restAct ?? "")
