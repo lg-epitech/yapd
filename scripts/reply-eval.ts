@@ -89,7 +89,8 @@ const seeded = {
 const Intent = Schema.Literal("dismiss", "answer", "send", "resume")
 type Intent = typeof Intent.Type
 
-const Label = Schema.Struct({ intent: Intent, status: Schema.Literal("confirmed", "unconfirmed"), why: Schema.optional(Schema.String) })
+/** His verdict: the Responder's intent, or what the Brain should have done, as batch 3's path has it, like "tidy" for settling the thread. */
+const Label = Schema.Struct({ intent: Schema.Union(Intent, Brain.Act), status: Schema.Literal("confirmed", "unconfirmed"), why: Schema.optional(Schema.String) })
 const Labels = Schema.Record({ key: Schema.String, value: Label })
 
 /** How batch 3's path worked out what he said: said again, by the mute hook, by the Responder alone, or handed over and routed so. */
@@ -100,9 +101,9 @@ const Route = Schema.Literal("Again", "Hook", "Responder", "Resume", "Dismiss", 
  * Brain's act and thread, and what neither may come to; and for batch 3's
  * path, what it may come to, how it's routed, how it was worked out, what
  * a Pass says was left, whether its rest step was left for the update's own
- * session, what of what he said is never dropped, what's never done, what a
- * question it asks names, what handed it over, what's never said, what is,
- * and the Brain's "how".
+ * session and which thread it reaches, what of what he said is never
+ * dropped, what's never done, what a question it asks names, what handed it
+ * over, what's never said, what is, and the Brain's "how".
  */
 const Expect = Schema.Struct({
   intent: Schema.optional(Intent),
@@ -111,6 +112,8 @@ const Expect = Schema.Struct({
   target: Schema.optional(Schema.String),
   /** A piece of what's left for after its first step, like the other thread's name. */
   rest: Schema.optional(Schema.String),
+  /** A piece of the title of the thread its rest step must reach, when it has one: a message to it, never another, nor a question. */
+  restTarget: Schema.optional(Schema.String),
   never: Schema.optional(Schema.Array(Brain.Act)),
   neverIntent: Schema.optional(Schema.Array(Intent)),
   intents: Schema.optional(Schema.Array(Schema.String)),
@@ -127,7 +130,7 @@ const Expect = Schema.Struct({
   asking: Schema.optional(Schema.String),
   handedBy: Schema.optional(Schema.Literal("hook", "responder")),
   neverSpoken: Schema.optional(Schema.Array(Schema.String)),
-  /** A piece of what's said back, like the thread a line turning it down names. */
+  /** A piece of what's said back, like the thread a line turning it down names; when it asks instead, `asking` is what it names. */
   says: Schema.optional(Schema.String),
   /** Handed over, the Brain's "how", like which tidy it is: "archive", "settle" or "pin". */
   how: Schema.optional(Schema.String),
@@ -148,6 +151,8 @@ const Synthetic = Schema.Struct({
       needsYou: Schema.Boolean,
       session: Schema.String,
       thread: Schema.String,
+      /** Its thread's title, for one the view doesn't have, as T3 Code titles it: its project's name, unless it says. */
+      title: Schema.optional(Schema.String),
     }),
   }),
   cases: Schema.Array(
@@ -936,6 +941,7 @@ const synthetic = Effect.gen(function* () {
         needsYou: update.needsYou,
         session: written.how === "untied" ? `${update.session}-untied` : update.session,
         ...(ref === undefined ? {} : { ref }),
+        ...(update.title === undefined ? {} : { title: update.title }),
         ...(written.how === "owner" ? { owner: true } : {}),
         steered: written.how === "tied",
       },
@@ -1297,7 +1303,8 @@ const run = Effect.gen(function* () {
    * routed as the assistant routes it. An Act's first step is checked and
    * guarded, and turned down as what only his word does while he isn't at
    * hand, as the assistant turns it down, and its rest worked out as the
-   * next step is, with the update still "it", and checked and guarded too,
+   * next step is, with the update still "this one", and "it" too unless the
+   * step before went to another thread, and checked and guarded too,
    * nothing of either done.
    */
   const handoff = (case_: Case) =>
@@ -1353,7 +1360,8 @@ const run = Effect.gen(function* () {
               handed: { present, ...(muting || Mutes.mentionsMuting(heard) ? { muting: true as const } : {}) },
               own,
             }
-            const handedOver: Brain.Situation = { ...situated, utterance, subject: { ...session, own: ref === undefined ? {} : { ref } } }
+            const subject = { ...session, own: ref === undefined ? {} : { ref } }
+            const handedOver: Brain.Situation = { ...situated, utterance, subject }
             const quick = Brain.fast(handedOver, lines)
             const taken = quick !== undefined && Brain.atOnce(quick, utterance, handedOver.subject) ? quick : undefined
             const decided = taken === undefined ? yield* Effect.either(brain.decide(handedOver)) : Either.right(taken)
@@ -1380,7 +1388,10 @@ const run = Effect.gen(function* () {
             }
             let ownByHands = routed._tag === "Act" && !leftFirst && checked._tag === "Do" && ownWrite(checked.plan) ? 1 : 0
             let leftOver = routed._tag === "Act" && leftFirst ? 1 : 0
-            // Its rest, as the next step works it out, with the update still "it", from what he said, never what may be yapd's own voice.
+            const plan = checked._tag === "Do" ? checked.plan : undefined
+            // Its rest, as the next step works it out, from what he said, never what may be yapd's own voice: the update still "this one",
+            // and "it" too, unless the step before went to another thread, which "it" is then.
+            const on = leftFirst || turnedDown || plan === undefined ? Option.none<Threads.Ref>() : Option.map(plan.target, ({ ref }) => ref)
             let rest: Partial<Result> = {}
             if (routed._tag === "Act" && decision.rest.trim() !== "") {
               const { echo: _, afterPause: __, echoRoutines: ___, carried: ____, afterDone: _____, ...before } = utterance
@@ -1390,7 +1401,12 @@ const run = Effect.gen(function* () {
                 whole: utterance.whole ?? (utterance.echo === undefined ? utterance.heard : ""),
                 ...(Brain.mayBeOwn(utterance) ? { echoedBack: true as const } : {}),
               }
-              const then: Brain.Situation = { ...handedOver, utterance: next, lines: [{ speaker: "user", text: heard, ...Brain.overheard(utterance) }] }
+              const then: Brain.Situation = {
+                ...handedOver,
+                subject: Brain.itAfter(subject, on),
+                utterance: next,
+                lines: [{ speaker: "user", text: heard, ...Brain.overheard(utterance) }],
+              }
               const restQuick = Brain.fast(then, lines)
               const restTaken = restQuick !== undefined && Brain.atOnce(restQuick, next, then.subject) ? restQuick : undefined
               const restDecided = restTaken === undefined ? yield* Effect.either(brain.decide(then)) : Either.right(restTaken)
@@ -1403,7 +1419,6 @@ const run = Effect.gen(function* () {
                 rest = { restAct: restChecked._tag === "Do" ? restChecked.plan.decision.act : restChecked._tag === "Ask" ? "clarify" : "answer", ...(listed === undefined ? {} : { restTitle: listed.thread.title }), restLeft }
               }
             }
-            const plan = checked._tag === "Do" ? checked.plan : undefined
             const listed = plan === undefined ? undefined : (Option.getOrUndefined(plan.target) ?? handedOver.desk.threads.find(({ handle }) => handle === plan.decision.target))
             handed = {
               handedBy: muting ? "hook" : "responder",
@@ -1566,11 +1581,12 @@ const meets = (case_: Case, result: Result): boolean | undefined => {
  * Whether batch 3's path meets a written case: the Responder's intent when it
  * kept it, the Brain's act, thread and rest when it was handed over, what
  * it may come to, how it's routed and worked out, what a Pass left, whether
- * the rest was left, what of what he said is never dropped, what's never
- * done, what a question names, what handed it over, what's never said and
- * what is, and the Brain's "how" for it; and always, nothing written by
- * yapd's own hand to an unsteered update's own thread, nor a Pass that loses
- * a negation he said or puts in words nothing said.
+ * the rest was left and which thread it reached, what of what he said is
+ * never dropped, what's never done, what a question names, what handed it
+ * over, what's never said and what is, and the Brain's "how" for it; and
+ * always, nothing written by yapd's own hand to an unsteered update's own
+ * thread, nor a Pass that loses a negation he said or puts in words nothing
+ * said.
  */
 const meetsHandoff = (case_: Case, expect: Expect, result: Result): boolean => {
   const handed = result.route !== undefined && !["Again", "Hook", "Responder"].includes(result.route)
@@ -1588,6 +1604,7 @@ const meetsHandoff = (case_: Case, expect: Expect, result: Result): boolean => {
   if (expect.source !== undefined) checks.push(result.source === expect.source || result.brainSource === expect.source)
   if (expect.left !== undefined) checks.push(lower(result.left).includes(lower(expect.left)))
   if (expect.restLeft !== undefined) checks.push((result.restLeft === true) === expect.restLeft)
+  if (expect.restTarget !== undefined) checks.push(result.restAct === undefined || (["send", "reply"].includes(result.restAct) && lower(result.restTitle).includes(lower(expect.restTarget))))
   if (expect.carries !== undefined) {
     const piece = lower(expect.carries)
     const restKept = result.restLeft === true || ["send", "reply", "clarify"].includes(result.restAct ?? "")
@@ -1597,7 +1614,7 @@ const meetsHandoff = (case_: Case, expect: Expect, result: Result): boolean => {
   if (expect.asking !== undefined) checks.push(result.checked !== "Ask" || lower(result.spoken).includes(lower(expect.asking)))
   if (expect.handedBy !== undefined) checks.push(result.handedBy === expect.handedBy)
   if (expect.neverSpoken !== undefined) checks.push(!expect.neverSpoken.some((words) => lower(result.spoken).includes(lower(words))))
-  if (expect.says !== undefined) checks.push(lower(result.spoken).includes(lower(expect.says)))
+  if (expect.says !== undefined) checks.push((expect.asking !== undefined && result.checked === "Ask") || lower(result.spoken).includes(lower(expect.says)))
   if (expect.how !== undefined) checks.push(handed && result.how === expect.how)
   if (result.route === "Pass") checks.push(!lostNegation(case_, result) && unfounded(case_, result.message ?? "") <= 2)
   return checks.every(Boolean)

@@ -247,6 +247,33 @@
       "needsYou": true,
       "session": "s-tezos",
       "thread": "t-tezos"
+    },
+    "jarvis": {
+      "project": "scratch",
+      "spoken": "I meant the separate Jarvis project, sir, not yapd's companion work.",
+      "message": "I meant the separate jarvis project in ~/projects/jarvis, the voice assistant that runs on rig, not the Jarvis companion work inside yapd. Both could use bilingual speech, but jarvis runs its speech models on rig's GPU.",
+      "needsYou": false,
+      "session": "s-jarvis",
+      "thread": "t-jarvis",
+      "title": "Find a speech project to build"
+    },
+    "rima": {
+      "project": "integration",
+      "spoken": "The reconciliation explaining Rima's roughly 460,000 figure is now in the ticket and the manifest, sir.",
+      "message": "The reconciliation for Rima's ~460,000 is now in FIR-644 and in the republished manifest. It traces the gap to the transactions flagged while cost basis was paused, with 25 September highlighted.",
+      "needsYou": false,
+      "session": "s-ramp",
+      "thread": "t-ramp",
+      "title": "Investigate Ramp missing volumes"
+    },
+    "animoca": {
+      "project": "integration",
+      "spoken": "Both copies of each Animoca address came from the webhook bug, sir, so both should go. No deletion has run. May I update the ticket's cleanup steps?",
+      "message": "Both copies of each Animoca ETH address were added wrongly: they're public contracts, attached by the webhook bug that custody!102 fixes. So both copies should be deleted, not just the orphan. I haven't run any deletion. FIR-648's cleanup step is now wrong: can I update it with this plan?",
+      "needsYou": true,
+      "session": "s-animoca",
+      "thread": "t-animoca",
+      "title": "Investigate Fireblocks duplicate sources"
     }
   },
   "cases": [
@@ -842,7 +869,7 @@
       "how": "owner",
       "machine": "rig",
       "heard": "Tell the Mina one to wait and tell it to rebase.",
-      "expect": { "act": ["send"], "target": "Mina", "carries": "rebase", "restLeft": false, "neverSpoken": ["couldn't tell"] }
+      "expect": { "act": ["send"], "target": "Mina", "carries": "rebase", "restLeft": false, "restTarget": "Mina", "neverSpoken": ["couldn't tell"] }
     },
     {
       "id": "S65h",
@@ -858,7 +885,7 @@
       "update": "tezos",
       "how": "hooked",
       "heard": "Tell the Mina one to wait and tell it to rebase.",
-      "expect": { "act": ["send"], "target": "Mina", "carries": "rebase", "restLeft": false, "neverSpoken": ["couldn't tell"] }
+      "expect": { "act": ["send"], "target": "Mina", "carries": "rebase", "restLeft": false, "restTarget": "Mina", "neverSpoken": ["couldn't tell"] }
     },
     {
       "id": "S67",
@@ -1005,11 +1032,11 @@
     },
     {
       "id": "S81",
-      "note": "settling a terminal session tied to no thread: there's no T3 Code thread to settle, said plainly; nothing tidied, never another thread",
+      "note": "settling a terminal session tied to no thread: there's no T3 Code thread to settle, said plainly; a thread the model names for 'it' is only asked about, by name; nothing tidied, never another thread",
       "update": "tezos",
       "how": "untied",
       "heard": "Settle it.",
-      "expect": { "act": ["tidy"], "how": "settle", "says": "no T3 Code thread", "neverDone": ["tidy", "send"], "neverRoute": ["Pass"] }
+      "expect": { "act": ["tidy"], "how": "settle", "says": "no T3 Code thread", "asking": "Tezos", "neverDone": ["tidy", "send"], "neverRoute": ["Pass"] }
     },
     {
       "id": "S82",
@@ -1078,6 +1105,31 @@
       "how": "tied",
       "heard": "Mute the debug logs in the tests.",
       "expect": { "intent": "send", "neverRoute": ["Act"] }
+    },
+    {
+      "id": "S90",
+      "note": "J469: a new task about what the agent he's hearing just told him of, over a rig update tied by its owner: for that agent, sent to its own thread or passed through its hook, never new work a fresh agent would start",
+      "update": "jarvis",
+      "how": "owner",
+      "machine": "rig",
+      "heard": "Yeah, well Jarvis this project didn't work. I think I'm just going to scrap it entirely. Can you please remove it from computer and just delete the repository for me if you can.",
+      "expect": { "intent": "send", "act": ["send"], "target": "own", "never": ["start"] }
+    },
+    {
+      "id": "S91",
+      "note": "L561: what the agent drafted, asked of yapd with the agent in the third person: the agent's, sent to it, never yapd's search",
+      "update": "rima",
+      "how": "tied",
+      "heard": "Now I mean the agent drafted an answer to re-mut that I can send in Slack. I want you to recover that.",
+      "expect": { "intent": "send", "act": ["send"], "target": "own", "never": ["find", "start"] }
+    },
+    {
+      "id": "S92",
+      "note": "L2765: asking the agent what it meant: sent to it, never answered by yapd from its message",
+      "update": "animoca",
+      "how": "tied",
+      "heard": "Do you mean that this is fixed by the other ticket I referenced? Not the one you created.",
+      "expect": { "intent": "send", "act": ["send"], "target": "own" }
     }
   ]
 }
