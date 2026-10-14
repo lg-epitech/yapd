@@ -2,7 +2,7 @@ import { Clock, Deferred, Duration, Effect, Exit, Fiber, Option, Queue, Scope, S
 import { rm } from "node:fs/promises"
 import { join } from "node:path"
 import { Audio, AudioError, type Playback } from "./Audio.ts"
-import { handoffLines, worded } from "./Brain.ts"
+import { handoffLines, surelyHis, worded } from "./Brain.ts"
 import type { Turn } from "./Condenser.ts"
 import * as Endpointer from "./Endpointer.ts"
 import { plain, RelayError, type Thread } from "./Relay.ts"
@@ -419,7 +419,11 @@ export interface Worked {
  * line again, with no model, only in words that can't answer it when the
  * update needs him, and only while it `may` be said again; then the
  * Responder, whose "assistant" goes to yapd's assistant, or, with none,
- * is told to ask with the shortcut.
+ * is told to ask with the shortcut. Its message of what may all be yapd's
+ * own words, with nothing surely his after a pause, goes to yapd's
+ * assistant too, never sent as it is: there it's let go, or at most asked
+ * about in code's own question, as what's said back to a "done" line is.
+ * With no assistant, it's sent as ever.
  */
 export const reading = (parts: {
   readonly heard: string
@@ -449,7 +453,10 @@ export const reading = (parts: {
     const asking = parts.needsYou ? pardon : sayAgain
     if (parts.echo === undefined && parts.may && asking.has(gist(heard))) return { reply: { intent: "answer", spoken: "", message: "" }, source: "again" }
     const [took, worked] = yield* Effect.timed(parts.respond(heard, voiced, afterPause))
-    if (worked.reply.intent !== "assistant") return worked
+    // A message the Responder made of what may all be yapd's own words is never sent as it is: yapd's assistant lets it go, or asks first.
+    const echoed = !surelyHis({ ...(parts.echo === undefined ? {} : { echo: parts.echo }), afterPause })
+    const handing = worked.reply.intent === "assistant" || (worked.reply.intent === "send" && echoed && over !== undefined)
+    if (!handing) return worked
     if (over === undefined) return { ...worked, reply: { intent: "answer", spoken: yield* parts.shortcut, message: "" } }
     const replied = { ms: Duration.toMillis(took), ...(worked.modelMs === undefined ? {} : { modelMs: worked.modelMs }) }
     return handedOver(yield* over(false)(heard, voiced, afterPause), replied)

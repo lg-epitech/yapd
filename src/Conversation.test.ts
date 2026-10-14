@@ -937,6 +937,8 @@ const overHelper = (
     readonly through?: Effect.Effect<void>
     /** Whether an answer he asked for always waits to be said next. */
     readonly asked?: boolean
+    /** What's yapd's to do, handed to its assistant: with none, what the Responder answers is all. */
+    readonly handing?: NonNullable<Parameters<typeof Conversation.make>[0]["over"]>
   } = {},
 ) =>
   Effect.gen(function* () {
@@ -1080,6 +1082,7 @@ const overHelper = (
         : {}),
       ...(options.queued === true ? { queued: Effect.void } : {}),
       ...(options.asked === true ? { asked: Effect.void } : {}),
+      ...(options.handing === undefined ? {} : { over: options.handing }),
     }).pipe(Effect.provide(context))
     // Lets the helper, the microphone and the fibers catch up on what the test did, since the clock only moves when told to.
     const flush = Effect.promise(async () => {
@@ -1389,6 +1392,48 @@ describe("Over its first seconds, while yapd's own voice can still get into the 
       sent: ["Tell it to revert it."],
       replies: ["Tell it to revert it."],
     })
+  })
+
+  test("a message the Responder makes of what may all be yapd's own words, with nothing after a pause, reaches no thread: it's handed to yapd's assistant, while one surely his is sent as before", async () => {
+    // "Stop the Mina tickets." over its "the Mina tickets are", which the Responder would send: handed over, let go there, nothing sent.
+    const handed: Array<string> = []
+    const letGo = await overHelperScoped(
+      Effect.gen(function* () {
+        const helper = yield* overHelper([[0.9, "Stop the Mina tickets."]], {
+          handing: () => (heard) =>
+            Effect.sync(() => void handed.push(heard)).pipe(Effect.as<Conversation.Handed>({ _tag: "Resume", source: "model", ms: 0, routed: "resume, stop" })),
+        })
+        yield* helper.wait(1)
+        yield* helper.talk(0.9, 15)
+        yield* helper.quiet
+        yield* helper.wait(1)
+        return { responded: helper.responded.map(({ heard, echo }) => ({ heard, echo })), sent: helper.sent, rendered: helper.rendered, replies: yield* helper.replies }
+      }),
+    )
+    expect(letGo).toEqual({ responded: [{ heard: "Stop the Mina tickets.", echo: first }], sent: [], rendered: [], replies: [] })
+    expect(handed).toEqual(["Stop the Mina tickets."])
+    // Surely his, with words after a pause or begun with none of yapd's voice in the microphone, it's the Responder's send, never handed over;
+    // so is any, with no assistant to hand it to.
+    const sending = { intent: "send", spoken: "Okay.", message: "Stop the Mina tickets." } as const
+    const read = (echo: string | undefined, afterPause: string, over: boolean) =>
+      Effect.runPromise(
+        Conversation.reading({
+          heard: "Stop the Mina tickets.",
+          voiced: 1,
+          afterPause,
+          halt: false,
+          echo,
+          needsYou: false,
+          hooked: Option.none(),
+          may: true,
+          respond: () => Effect.succeed({ reply: sending, source: "model" }),
+          ...(over ? { over: () => () => Effect.die("handed over") } : {}),
+          shortcut: Effect.succeed("Ask me that with the shortcut, sir."),
+        }),
+      )
+    for (const [echo, afterPause, over] of [["the Mina tickets are", "Stop the Mina tickets.", true], [undefined, "", true], ["the Mina tickets are", "", false]] as const) {
+      expect([echo, afterPause, over, (await read(echo, afterPause, over)).reply]).toEqual([echo, afterPause, over, sending])
+    }
   })
 
   test("says the model's line asking him to say it again, and takes his reply to it as after an answer", async () => {

@@ -72,7 +72,7 @@ export const murmured = (decided: Pick<Decision, "act" | "how">, utterance: Pick
  * voice in the microphone, or with words after a pause, or after the last
  * words of the line it ran on from, which yapd had stopped saying by then.
  */
-const surelyHis = (utterance: Pick<Assistant.Utterance, "echo" | "afterPause">) =>
+export const surelyHis = (utterance: Pick<Assistant.Utterance, "echo" | "afterPause">) =>
   utterance.echo === undefined || (utterance.afterPause !== undefined && utterance.afterPause.trim() !== "")
 
 /**
