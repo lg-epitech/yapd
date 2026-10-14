@@ -1779,8 +1779,9 @@ export const make = (options: {
               lingered = false
               continue
             }
-            // Over an update that needs him, before all of it was said, what he changed is said, then it carries on from where it stopped.
-            if (reply.intent === "mute" && update.needsYou && !after && path === update.audio) resume = Math.max(from, outcome.at - rewind)
+            // Over an update that needs him, before all of it was said, what he changed is said, then it carries on from where it stopped. So
+            // is yapd's own answer to what he handed it, like "Ask me that with the shortcut.", which answers nothing the update asked.
+            if ((reply.intent === "mute" || handed?._tag === "Answer") && update.needsYou && !after && path === update.audio) resume = Math.max(from, outcome.at - rewind)
             const passing = yield* Clock.currentTimeMillis
             text = reply.intent === "send" ? yield* pass(update, reply) : answer
             const passed = yield* Clock.currentTimeMillis

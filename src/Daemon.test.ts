@@ -7405,10 +7405,10 @@ describe("Daemon handing over what's yapd's to do", () => {
     expect(putBack.sent).toEqual([])
   })
 
-  test("a handoff over an update that needs him, cut off before its end, reads it again from where it stopped once the handoff's answer is said, for a look, 'show me its PR' and 'mute the Tezos one' alike, even with a dictation starting just as it's put back; a message to its agent or a dismissal ends it; if yapd restarts first, a catch-up still has it", async () => {
+  test("a handoff over an update that needs him, cut off before its end, reads it again from where it stopped once the handoff's answer is said, for a look, 'show me its PR', 'mute the Tezos one' and new work turned down while he isn't at hand alike, even with a dictation starting just as it's put back; a message to its agent or a dismissal ends it; if yapd restarts first, a catch-up still has it", async () => {
     const asks = "Should I drop the old fee table, or keep both?"
-    /** He hands `said` over, as the model takes it, over the Tezos update that asks him that, after a dictation, so he's at hand. */
-    const over = (said: string, model: (situation: Brain.Situation) => Brain.Decision, given: { readonly dictating?: boolean } = {}) =>
+    /** He hands `said` over, as the model takes it, over the Tezos update that asks him that, after a dictation, so he's at hand, unless he's `away`. */
+    const over = (said: string, model: (situation: Brain.Situation) => Brain.Decision, given: { readonly dictating?: boolean; readonly away?: boolean } = {}) =>
       run(
         Effect.gen(function* () {
           const t3 = yield* handing
@@ -7427,8 +7427,10 @@ describe("Daemon handing over what's yapd's to do", () => {
             },
             [tezos(), minaThread()],
           )
-          yield* dictating("Does anything need me?")
-          for (let second = 0; second < 20; second++) yield* wait(1)
+          if (given.away !== true) {
+            yield* dictating("Does anything need me?")
+            for (let second = 0; second < 20; second++) yield* wait(1)
+          }
           yield* tezosStop(handle, false, asks)
           yield* nextEvent("Ready: yapd.")
           yield* wait(1)
@@ -7467,6 +7469,10 @@ describe("Daemon handing over what's yapd's to do", () => {
     expect(muted.mutes).toEqual(["t3:Rosie:t-tezos"])
     expect(muted.again).toBe(true)
     expect(muted.from).toEqual([0, 0.5])
+    // New work turned down while he isn't at hand, which answers nothing it asked.
+    const refused = await over("Let's start a new project to fix the flaky test.", () => Brain.decision({ act: "start", text: "Fix the flaky test." }), { away: true })
+    expect(refused.played.slice(0, 2)).toEqual(["Ask me that with the shortcut.", `yapd. ${asks}`])
+    expect(refused.from).toEqual([0, 0.5])
     // Even with a dictation starting just as it's put back.
     const dictated = await over("What's the Mina one doing?", (situation) => Brain.decision({ act: "answer", target: minaHandle(situation), spoken: "The Mina tickets are filed." }), { dictating: true })
     expect(dictated.again).toBe(true)
