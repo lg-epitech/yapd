@@ -42,7 +42,7 @@ import * as Baseline from "./eval/baseline-responder.ts"
 //     meant for yapd since, which the journal never kept. Writes
 //     reply-labels.json if there's none: his verdicts, which only change
 //     what's expected once he's confirmed them.
-//   nice -n 15 bun scripts/reply-eval.ts run [--path baseline,brain,m4] [--era log|journal|synthetic|all] [--only ids] [--limit N] [--repeat N] [--rerun ids] [--out folder]
+//   nice -n 15 bun scripts/reply-eval.ts run [--path baseline,brain,m4] [--era log,journal,synthetic|all] [--only ids] [--limit N] [--repeat N] [--rerun ids] [--out folder]
 //     Works each one out on each path, one model call at a time, never two
 //     at once, each path going first on every other case: "baseline" is the
 //     Responder as it was at M4's batch 1, frozen in scripts/eval;
@@ -1142,7 +1142,11 @@ const run = Effect.gen(function* () {
   const paths = option("path", "baseline").split(",").filter((path) => path !== "")
   const unknown = paths.filter((path) => path !== "baseline" && path !== "brain" && path !== "m4")
   if (unknown.length > 0 || paths.length === 0) return yield* Effect.dieMessage(`Unknown path: ${unknown.join(", ")}`)
-  const era = option("era", "all")
+  // One era or several, as "log,journal" for the gate.
+  const eras = option("era", "all").split(",").filter((era) => era !== "")
+  const unknownEras = eras.filter((era) => era !== "all" && era !== "log" && era !== "journal" && era !== "synthetic")
+  if (unknownEras.length > 0 || eras.length === 0) return yield* Effect.dieMessage(`Unknown era: ${unknownEras.join(", ")}`)
+  const inEra = (era: Case["era"]) => eras.includes("all") || eras.includes(era)
   // Run again, only those, three times more: a disagreement or a hard fail counts once it holds in two of the three.
   const rerun = new Set(option("rerun", "").split(",").filter((id) => id !== ""))
   const only = rerun.size > 0 ? rerun : new Set(option("only", "").split(",").filter((id) => id !== ""))
@@ -1164,10 +1168,10 @@ const run = Effect.gen(function* () {
 
   const every = [...saved.cases, ...written.cases]
   const chosen = every
-    .filter((case_) => era === "all" || case_.era === era)
+    .filter((case_) => inEra(case_.era))
     .filter((case_) => only.size === 0 || only.has(case_.id))
     .slice(0, limit > 0 ? limit : undefined)
-  const whole = only.size === 0 && limit === 0 && era === "all"
+  const whole = only.size === 0 && limit === 0 && (["log", "journal", "synthetic"] as const).every(inEra)
 
   const out = option("out", folder)
   yield* Effect.promise(() => mkdir(out, { recursive: true }))
@@ -1719,8 +1723,14 @@ const report = (cases: ReadonlyArray<Case>, done: ReadonlyArray<Result>, paths: 
     const same = both.filter(([one, other]) => one.intent === other.intent)
     const modelled = both.filter(([one, other]) => one.source === "model" && (other.source === "model" || other.modelMs !== undefined))
     const differ = both.filter(([one, other]) => one.intent !== other.intent)
+    // By era too, since the gate counts the log era's on its own.
+    const byEra = (["log", "journal"] as const).flatMap((era) => {
+      const those = same.filter(([one]) => one.era === era).length
+      const of = both.filter(([one]) => one.era === era).length
+      return of === 0 ? [] : [`${era} ${those}/${of}`]
+    })
     lines.push(
-      `baseline and ${name}: the same on ${same.length}/${both.length}; p50 ${seconds(percentile(both.map(([one]) => one.ms), 0.5))} against ${seconds(percentile(both.map(([, other]) => other.ms), 0.5))}, both with the model ${seconds(percentile(modelled.map(([one]) => one.ms), 0.5))} against ${seconds(percentile(modelled.map(([, other]) => other.ms), 0.5))} (${modelled.length}).`,
+      `baseline and ${name}: the same on ${same.length}/${both.length}${byEra.length === 0 ? "" : ` (${byEra.join(", ")})`}; p50 ${seconds(percentile(both.map(([one]) => one.ms), 0.5))} against ${seconds(percentile(both.map(([, other]) => other.ms), 0.5))}, both with the model ${seconds(percentile(modelled.map(([one]) => one.ms), 0.5))} against ${seconds(percentile(modelled.map(([, other]) => other.ms), 0.5))} (${modelled.length}).`,
     )
     if (name !== "batch 1's baseline" && differ.length > 0) lines.push(`  Not the same: ${differ.map(([one, other]) => `${other.id} (${one.intent}, ${other.intent})`).join(" ")}.`)
   }
@@ -1734,7 +1744,7 @@ const report = (cases: ReadonlyArray<Case>, done: ReadonlyArray<Result>, paths: 
 const command = process.argv[2]
 const chosen: Effect.Effect<void, unknown> | undefined = command === "fixture" ? fixture : command === "run" ? run : undefined
 if (chosen === undefined) {
-  console.error("usage: bun scripts/reply-eval.ts fixture | run [--path baseline,brain,m4] [--era log|journal|synthetic|all] [--only ids] [--limit N] [--repeat N] [--rerun ids] [--out folder]")
+  console.error("usage: bun scripts/reply-eval.ts fixture | run [--path baseline,brain,m4] [--era log,journal,synthetic|all] [--only ids] [--limit N] [--repeat N] [--rerun ids] [--out folder]")
   process.exit(1)
 }
 // yapd's logs, like the translation of a line the model said that wasn't in English, are his: kept with the rest, never printed.
