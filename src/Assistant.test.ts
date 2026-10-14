@@ -4815,7 +4815,8 @@ describe("Assistant", () => {
     for (const since of [mina, tezos]) {
       for (const heard of ["No.", "Scratch that."]) {
         const result = await said(heard, since)
-        expect(result.asked).toEqual(["Take back the message to Migrate Tezos Integration, sir?"])
+        // Named apart from what went to the same thread since.
+        expect(result.asked).toEqual([`Take back the ${since === tezos ? "earlier " : ""}message to Migrate Tezos Integration, sir?`])
         expect(result.withdrawn).toEqual([result.reply])
         expect(result.after).toEqual(Option.some("sent"))
       }
@@ -4860,7 +4861,7 @@ describe("Assistant", () => {
       )
     for (const since of [false, true]) {
       const result = await said(since)
-      expect(result.asked).toEqual(["Take back the message to Migrate Tezos Integration, sir?"])
+      expect(result.asked).toEqual([`Take back the ${since ? "earlier " : ""}message to Migrate Tezos Integration, sir?`])
       expect(result.unasked).toBe(0)
       expect(result.withdrawn).toEqual([result.steer])
       if (since) expect(result.after).toEqual(Option.some("sent"))

@@ -3472,7 +3472,8 @@ const askingBack = (reach: Reach, situation: Situation, lines: Lines, said: Pick
  * all it reaches. A step of what yapd did to threads only as he `said` what
  * he meant: a message, a stop, a tidy, which taking a reminder back reaches
  * when it dropped some, or whatever it was; of a tidy, only the thread he
- * named of it, if he named one.
+ * named of it, if he named one; of a message, "the earlier message" when
+ * another went to the same thread since.
  */
 const takingBack = (
   reach: Reach,
@@ -3543,7 +3544,17 @@ const takingBack = (
       const listed = desk.threads.find((one) => Threads.same(one.ref, ref))
       const of = listed === undefined ? { target: "", candidates: [] } : { target: listed.handle, candidates: [ref] }
       if (row.kind === "message" && (row.state === "sent" || row.state === "unknown") && (how === "" || how === "message")) {
-        return { doing: `take back the message to ${calling(ref) ?? "that thread"}`, decision: decision({ act: "undo", how: "message", target: of.target }), candidates: of.candidates }
+        // Named apart from a message to the same thread sent since, which his yes never takes back.
+        const rows = recently(situation)
+        const index = rows.findIndex(({ commandId }) => commandId === row.commandId)
+        const since = (index === -1 ? rows.filter((one) => one.at > row.at) : rows.slice(index + 1)).some(
+          (one) => one.kind === "message" && (one.state === "sent" || one.state === "unknown") && one.machine === row.machine && one.thread === row.thread,
+        )
+        return {
+          doing: `take back the ${since ? "earlier " : ""}message to ${calling(ref) ?? "that thread"}`,
+          decision: decision({ act: "undo", how: "message", target: of.target }),
+          candidates: of.candidates,
+        }
       }
       if (row.kind === "stop" && row.state === "sent" && (how === "" || how === "carry")) {
         return { doing: `let ${calling(ref) ?? "the thread I stopped"} carry on`, decision: decision({ act: "undo", how: "carry", target: of.target }), candidates: of.candidates }
