@@ -143,6 +143,27 @@ export const memorial = (noted: Pick<Noted, "kind">) => noted.kind === "memory" 
 export const changeOf = (noted: Pick<Noted, "kind">): "reminder" | "memory" | "catchup" =>
   noted.kind === "cleared" || noted.kind === "restored" ? "catchup" : memorial(noted) ? "memory" : "reminder"
 
+/**
+ * A change he made that "scratch that" takes back, told apart from any
+ * other: what yapd did to threads, by the request it was a step of, every
+ * step of which is said in one line, or a reminder, memory or catch-up
+ * change or a mute, by when it was made.
+ */
+export type Change = { readonly what: "acted"; readonly utterance: string } | { readonly what: "noted" | "mute"; readonly at: number }
+
+/** Whether two changes are the same one. */
+const same = (one: Change, other: Change) =>
+  one.what === "acted" ? other.what === "acted" && other.utterance === one.utterance : other.what !== "acted" && other.what === one.what && other.at === one.at
+
+/**
+ * A "done" line he's replying to, in the moment it listened after it: the
+ * change it said yapd just made for him that "scratch that" reaches, if it
+ * said one, which is all a no to it takes back without the model.
+ */
+export interface Done {
+  readonly change?: Change
+}
+
 /** A thread yapd archived for him, which unarchiving brings back: as it was called then, and when. */
 export interface Archived {
   readonly ref: Threads.Ref
@@ -1817,13 +1838,15 @@ const glimpsed = (situation: Situation, lines: Lines): Decision | undefined => {
     return decision({ act: "stop", target: on.value.handle, pending: replacing })
   }
   // With a question open, "cancel that" is a no to it. Otherwise it takes back the newest change he made: a mute, a reminder he set or
-  // cancelled, a memory he had kept or forgotten, the catch-up he cleared, or whatever else yapd last did.
-  const latest = newest(situation)
-  if (scratching.has(said) && Option.isNone(open) && latest === "mute") return decision({ act: "mute", how: "undo" })
-  if (scratching.has(said) && Option.isNone(open) && latest === "noted") {
+  // cancelled, a memory he had kept or forgotten, the catch-up he cleared, or whatever else yapd last did. Said back to a "done" line,
+  // only what that line said it changed: anything else, changed before it or since, is the model's.
+  const latest = reached(situation)
+  const scratched = scratching.has(said) && Option.isNone(open) && owned(situation, latest)
+  if (scratched && latest?.what === "mute") return decision({ act: "mute", how: "undo" })
+  if (scratched && latest?.what === "noted") {
     return decision({ act: "undo", how: Option.match(situation.noted ?? Option.none(), { onNone: () => "reminder", onSome: changeOf }) })
   }
-  if (scratching.has(said) && Option.isNone(open) && latest === "acted" && Option.isSome(situation.acted)) {
+  if (scratched && latest?.what === "acted" && Option.isSome(situation.acted)) {
     const acted = situation.acted.value
     const listed = desk.threads.find(({ ref }) => ref.machine === acted.machine && ref.id === acted.thread)
     return decision({ act: "undo", target: listed?.handle ?? "", how: acted.kind === "stop" ? "carry" : "" })
@@ -1920,23 +1943,41 @@ const glimpsed = (situation: Situation, lines: Lines): Decision | undefined => {
 
 /**
  * The newest change he made that "scratch that" or "undo that" can take
- * back, of those in the last two minutes: a mute, a reminder he set or
- * cancelled, or whatever else yapd did for him, as the ledger has it. Made
- * at the same time, a mute or a reminder is taken for the later, as it's
- * noted once what it went with is done. With the thread the model took him
- * to name, `on`, only what was changed of that thread, so what he names is
- * never left for a change made since of another.
+ * back, of those in the last two minutes, told apart from any other: a
+ * mute, a reminder he set or cancelled, or whatever else yapd did for him,
+ * as the ledger has it. Made at the same time, a mute or a reminder is
+ * taken for the later, as it's noted once what it went with is done. With
+ * the thread the model took him to name, `on`, only what was changed of
+ * that thread, so what he names is never left for a change made since of
+ * another.
  */
-export const newest = (situation: Pick<Situation, "acted" | "muteChange" | "noted">, on?: Threads.Ref): "mute" | "noted" | "acted" | undefined => {
+export const reached = (situation: Pick<Situation, "acted" | "muteChange" | "noted">, on?: Threads.Ref): Change | undefined => {
   const of = (ref: Threads.Ref | undefined) => on === undefined || (ref !== undefined && Threads.same(ref, on))
   const muted = (change: Mutes.Change) =>
     on === undefined || [...change.added, ...change.removed, ...(change.read ?? []), ...(change.unread ?? [])].some(({ key }) => key === Mutes.key.thread(on))
-  const changes = [
-    ...Option.toArray(Option.map(Option.filter(situation.noted ?? Option.none(), ({ about }) => of(Option.getOrUndefined(about))), ({ at }) => ({ what: "noted" as const, at }))),
-    ...Option.toArray(Option.map(Option.filter(situation.muteChange, muted), ({ at }) => ({ what: "mute" as const, at }))),
-    ...Option.toArray(Option.map(Option.filter(situation.acted, ({ machine, thread }) => of({ machine, id: thread })), ({ at }) => ({ what: "acted" as const, at }))),
+  const changes: ReadonlyArray<{ readonly change: Change; readonly at: number }> = [
+    ...Option.toArray(Option.map(Option.filter(situation.noted ?? Option.none(), ({ about }) => of(Option.getOrUndefined(about))), ({ at }) => ({ change: { what: "noted" as const, at }, at }))),
+    ...Option.toArray(Option.map(Option.filter(situation.muteChange, muted), ({ at }) => ({ change: { what: "mute" as const, at }, at }))),
+    ...Option.toArray(
+      Option.map(Option.filter(situation.acted, ({ machine, thread }) => of({ machine, id: thread })), ({ utterance, at }) => ({ change: { what: "acted" as const, utterance }, at })),
+    ),
   ]
-  return changes.reduce<(typeof changes)[number] | undefined>((latest, change) => (latest === undefined || change.at > latest.at ? change : latest), undefined)?.what
+  return changes.reduce<(typeof changes)[number] | undefined>((latest, change) => (latest === undefined || change.at > latest.at ? change : latest), undefined)?.change
+}
+
+/** What the newest change he made that "scratch that" or "undo that" can take back is, as `reached` finds it. */
+export const newest = (situation: Pick<Situation, "acted" | "muteChange" | "noted">, on?: Threads.Ref) => reached(situation, on)?.what
+
+/**
+ * Whether taking back `change` takes back what the "done" line he's
+ * replying to said yapd just changed for him, when he's replying to one:
+ * never a change made before it, or since, nor anything after a line that
+ * changed nothing "scratch that" reaches, like "It's already muted.", which
+ * code never takes back on its own.
+ */
+const owned = (situation: Pick<Situation, "utterance">, change: Change | undefined) => {
+  const done = situation.utterance.afterDone
+  return done === undefined || (change !== undefined && done.change !== undefined && same(change, done.change))
 }
 
 /**
@@ -2873,10 +2914,19 @@ const checking = (choice: Decision, situation: Situation, lines: Lines): Checked
       }
       if (choice.sure === "low" && candidates.length >= 2) return ask(candidates)
       return doing({ decision: choice, target })
-    case "undo":
+    case "undo": {
       // Words for his screen, like "take that down" once its card has faded, never take back a message: at most, they take a card down.
       if (hiding.has(gist(situation.utterance.heard))) return doing({ decision: { ...choice, act: "show", how: "hide", target: "" }, target: Option.none() })
+      // Said back to a "done" line, taking back whatever was done last, or a message, a stop or a tidy of no thread he names, is taking
+      // back what the line said it changed: anything else it would take back, changed before it or since, he's asked about, by what it is.
+      const taking = undoes(choice.how)
+      if (situation.utterance.afterDone !== undefined && (taking === "last" || (taking === "thread" && choice.target.trim() === ""))) {
+        const change = taking === "last" ? reached(situation) : Option.getOrUndefined(Option.map(situation.acted, ({ utterance }): Change => ({ what: "acted", utterance })))
+        const asked = owned(situation, change) || change === undefined ? undefined : askingBack(change, situation, lines)
+        if (asked !== undefined) return asked
+      }
       return writing(choice, target, candidates, situation, lines, ask)
+    }
     case "send": {
       // Nothing he says goes to a thread waiting on a secret, which it could be in other words: only T3 Code takes that.
       const request = Option.getOrUndefined(target)?.thread.pendingRuntimeRequest
@@ -3117,6 +3167,96 @@ const writing = (
   if (choice.sure === "high") return { _tag: "Do", plan: { decision: choice, target } }
   if (choice.sure === "medium" && on) return choice.act === "stop" ? confirm() : { _tag: "Do", plan: { decision: choice, target } }
   return ask(candidates)
+}
+
+/**
+ * Asks him whether to take back `change`, which isn't what the line he's
+ * replying to said yapd changed, naming it: his yes takes back that, and
+ * nothing else. None for what taking back would only say can't be, like
+ * new work, or a message withdrawn already.
+ */
+const askingBack = (change: Change, situation: Situation, lines: Lines): Checked | undefined => {
+  const back = takingBack(change, situation)
+  if (back === undefined) return undefined
+  const { utterance } = situation
+  const asked = confirming(back.doing, lines, situation.asked)
+  if (asked === undefined) return { _tag: "Say", spoken: lines.cantTell }
+  return {
+    _tag: "Ask",
+    open: {
+      kind: "confirm",
+      utterance: utterance.id,
+      heard: utterance.heard,
+      ...overheard(utterance),
+      decision: back.decision,
+      candidates: back.candidates,
+      asked,
+      about: back.doing,
+      material: Option.none(),
+      resend: Option.none(),
+    },
+  }
+}
+
+/**
+ * What taking back a change he made does, in a few words to ask him, like
+ * "take back the message to the Tezos importer", with what doing it is and
+ * the thread it's of, if one: none for what can't be taken back.
+ */
+const takingBack = (
+  change: Change,
+  situation: Situation,
+): { readonly doing: string; readonly decision: Decision; readonly candidates: ReadonlyArray<Threads.Ref> } | undefined => {
+  const { desk } = situation
+  const calling = (ref: Threads.Ref) => {
+    const listed = desk.threads.find((one) => Threads.same(one.ref, ref))
+    return listed === undefined ? (situation.archived ?? []).find((one) => Threads.same(one.ref, ref))?.called : named(listed, desk.threads)
+  }
+  switch (change.what) {
+    case "mute": {
+      const muted = Option.getOrUndefined(situation.muteChange)
+      if (muted === undefined) return undefined
+      const { added, removed, read = [], unread = [] } = muted
+      const mutes = (all: ReadonlyArray<Mutes.Mute>) => both(all.map((mute) => mutedName(mute, desk)))
+      const readings = (all: ReadonlyArray<Mutes.Reading>) => both(all.map((reading) => readingName(reading, desk)))
+      const doing = both([
+        ...(added.length === 0 ? [] : [`unmute ${mutes(added)}`]),
+        ...(removed.length === 0 ? [] : [`mute ${mutes(removed)} again`]),
+        ...(read.length === 0 ? [] : [`stop reading you the subagents of ${readings(read)}`]),
+        ...(unread.length === 0 ? [] : [`read you the subagents of ${readings(unread)} again`]),
+      ])
+      return doing === "" ? undefined : { doing, decision: decision({ act: "mute", how: "undo" }), candidates: [] }
+    }
+    case "noted": {
+      const last = Option.getOrUndefined(situation.noted ?? Option.none())
+      if (last === undefined) return undefined
+      const doing = {
+        reminder: "cancel the reminder you just set",
+        forgot: "bring back the reminder you just cancelled",
+        memory: "forget what you just had me remember",
+        forgotten: "bring back what you just had me forget",
+        cleared: "bring back the catch-up you just cleared",
+        restored: "clear the catch-up again",
+      }[last.kind]
+      return { doing, decision: decision({ act: "undo", how: changeOf(last) }), candidates: [] }
+    }
+    case "acted": {
+      const row = Option.getOrUndefined(situation.acted)
+      if (row === undefined || row.utterance !== change.utterance) return undefined
+      const ref = { machine: row.machine, id: row.thread }
+      const listed = desk.threads.find((one) => Threads.same(one.ref, ref))
+      const of = listed === undefined ? { target: "", candidates: [] } : { target: listed.handle, candidates: [ref] }
+      if (row.kind === "message" && (row.state === "sent" || row.state === "unknown")) {
+        return { doing: `take back the message to ${calling(ref) ?? "that thread"}`, decision: decision({ act: "undo", how: "message", target: of.target }), candidates: of.candidates }
+      }
+      if (row.kind === "stop" && row.state === "sent") {
+        return { doing: `let ${calling(ref) ?? "the thread I stopped"} carry on`, decision: decision({ act: "undo", how: "carry", target: of.target }), candidates: of.candidates }
+      }
+      if (row.kind !== "tidy") return undefined
+      const tidied = (situation.untidies ?? [ref]).map((one) => calling(one) ?? "a thread")
+      return { doing: `take back what I just did to ${both(tidied)}`, decision: decision({ act: "undo", how: "tidy" }), candidates: [] }
+    }
+  }
 }
 
 /**
@@ -4135,15 +4275,17 @@ export const prompt = (situation: Situation, style: Option.Option<string>) => {
               ? `\nWhat a yes does: "${open.decision.act}"${open.decision.act !== "send" ? "" : open.routine === undefined ? ` with the message ${fenced(open.decision.text, 400)}` : ` with ${byName([open.routine])}`}${
                   open.decision.act === "mode"
                     ? ` with "how" "${open.decision.how}", which gives him the catch-up`
-                    : open.decision.act === "catchup"
-                      ? ", which catches him up on what he hasn't heard"
-                      : open.decision.act === "tidy"
-                        ? ` with "how" "${open.decision.how}"${
-                            open.candidates.length < 2
-                              ? ""
-                              : `, to every one of its choices. A yes to only some of them, like "yes, but not" one, is "tidy" with "target" every handle he keeps, comma-separated, and "pending" "answers"`
-                          }`
-                        : ""
+                    : open.decision.act === "undo" || open.decision.act === "mute"
+                      ? ` with "how" "${open.decision.how}"`
+                      : open.decision.act === "catchup"
+                        ? ", which catches him up on what he hasn't heard"
+                        : open.decision.act === "tidy"
+                          ? ` with "how" "${open.decision.how}"${
+                              open.candidates.length < 2
+                                ? ""
+                                : `, to every one of its choices. A yes to only some of them, like "yes, but not" one, is "tidy" with "target" every handle he keeps, comma-separated, and "pending" "answers"`
+                            }`
+                          : ""
                 }`
               : ""
         }`,
@@ -4167,7 +4309,7 @@ export const prompt = (situation: Situation, style: Option.Option<string>) => {
           }`,
         ]),
     // Said back to what it did, a no only ever of his: with its own voice in what was heard, never one that may be yapd's own words.
-    ...(situation.utterance.afterDone !== true
+    ...(situation.utterance.afterDone?.change === undefined
       ? []
       : [
           `He spoke right after your last line, which told him what you just did for him. When it says you did something for him, like sending a message, nothing but a no of his to that, like "No.", "No, don't." or "Scratch that.", is never a dismissal: it's "undo" when it plainly takes that back, or else "answer", asking him in a few words whether to take it back; never "dismiss" or "resume". When it says you started work for him, which can't be taken back, nothing but a no of his to that is "answer", asking him in a few words whether to stop it; never "undo", "dismiss" or "resume". Otherwise, as when it says something didn't go, a no goes as usual.${

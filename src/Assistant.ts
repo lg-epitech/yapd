@@ -55,14 +55,16 @@ export interface Utterance {
    */
   readonly carried?: true
   /**
-   * Whether it was said back to a line saying what yapd just changed for
-   * him that "scratch that" reaches, like "On it, sir: the Tezos
-   * migration.", in the moment that line listened after it, run on into it
-   * from its last words or not: a bare no to it is most likely to what it
-   * did. Never after one that changed nothing "scratch that" reaches, like a
-   * mode, something that didn't go, or what went by a hook.
+   * Whether it was said back to a "done" line, in the moment that line
+   * listened after it, run on into it from its last words or not, and the
+   * change that line said yapd just made for him that "scratch that"
+   * reaches, if any, like the message of "On it, sir: the Tezos
+   * migration.": a bare no to it is most likely to that. Nothing else, made
+   * before it or since, nor anything after a line that changed nothing
+   * "scratch that" reaches, like a mode, something that didn't go, or what
+   * went by a hook, is taken back without the model.
    */
-  readonly afterDone?: true
+  readonly afterDone?: Brain.Done
   /**
    * With `echo`, the routines whose steps what yapd was saying holds, as code
    * put them in, like an offer of one read as it comes due: a model is only
@@ -349,16 +351,16 @@ export interface Outcome {
   /** Run once what's said is known to be playing, like noting the line for going ahead it starts with as the one he heard last. */
   readonly confirmed?: Effect.Effect<void>
   /**
-   * Whether it says what yapd just changed for him that "scratch that"
-   * reaches, as `Brain.newest` has it: a step done to a thread that taking
-   * back acts on, like a message sent or queued, a stop, the word to carry
-   * on or a tidy, new work started, a reminder set or cancelled, a memory
-   * kept or forgotten, the catch-up cleared, or a mute. Never a mode,
+   * What it says yapd just changed for him that "scratch that" reaches, as
+   * `Brain.reached` tells it, when it says one: a step done to a thread that
+   * taking back acts on, like a message sent or queued, a stop, the word to
+   * carry on or a tidy, new work started, a reminder set or cancelled, a
+   * memory kept or forgotten, the catch-up cleared or a mute. Never a mode,
    * nothing changed, like a mute there already, something that didn't go,
    * nor what taking back does nothing to, like a message withdrawn or an
-   * answer to a thread's question.
+   * answer to a thread's question. Said in one line, the newest of them.
    */
-  readonly changed?: true
+  readonly changed?: Brain.Change
   /**
    * Whether it says a message of his may not have gone, or speaks of sending
    * one again, without saying its words, like what a restart couldn't
@@ -413,11 +415,11 @@ export class Assistant extends Context.Tag("yapd/Assistant")<
     /**
      * What makes of what he says right after `line`, said of a thread or an
      * update, a follow-up about it, with "it" that thread or update, as he
-     * follows up an answer. `done` when the line says what yapd just
-     * changed for him that "scratch that" reaches, like a late "On it" for
-     * what went by its own hand.
+     * follows up an answer. `done` when the line says what came of what he
+     * said, with the change it says yapd made that "scratch that" reaches,
+     * if any, like a late "On it" for what went by its own hand.
      */
-    readonly following: (about: Threads.Ref | Conversation.Update, line: string, done?: boolean) => Conversation.Answer["followUp"]
+    readonly following: (about: Threads.Ref | Conversation.Update, line: string, done?: Brain.Done) => Conversation.Answer["followUp"]
     /**
      * What a thread waits on him for, to ask once nothing else is asked and
      * he isn't dictating, while it still waits on it: once, ever, and once
@@ -991,6 +993,8 @@ export const make = (options: {
     const proposed: Array<{ readonly reminder: Reminders.Reminder; readonly kept: Option.Option<number> }> = []
     /** The reminder he last set or cancelled, or memory he had kept or forgotten, which "scratch that" takes back while it's the newest change he made. */
     let noted: Brain.Noted | undefined
+    /** What a line says he just changed of reminders, memories or the catch-up, once it's noted, as "scratch that" tells it from any other change. */
+    const notedChange = (): Pick<Outcome, "changed"> => (noted === undefined ? {} : { changed: { what: "noted", at: noted.at } })
 
     /** Whether a thread still waits on him for this request, as T3 Code last said, even behind a newer one. */
     const still = (ref: Threads.Ref, requestId: string) => threads.waiting(ref, requestId)
@@ -1793,7 +1797,7 @@ export const make = (options: {
               say: spoken,
               subject: { _tag: "Answer", said: spoken, about: Option.some({ machine: machine.name, id: started.thread }) },
               kind: "done",
-              changed: true,
+              changed: { what: "acted", utterance: utterance.id },
               // Only once it's known to play, so a line for going ahead that's dropped as yapd is turned off, or can't be played, never counts as the last one he heard.
               confirmed: persona.said(spoken),
             } satisfies Outcome
@@ -2165,14 +2169,15 @@ export const make = (options: {
               ...(outcome.waiting === undefined ? {} : { waiting: outcome.waiting }),
               ...(outcome.stopped === undefined ? {} : { stopped: outcome.stopped }),
             })
-            // Only what taking it back acts on, a message, a stop or the word to carry on, never a message withdrawn or an answer to a thread's
-            // question, which it only refuses.
+            // What taking it back acts on, by the request its step is under, as a word to send again keeps the ids it first went under: a
+            // message, a stop or the word to carry on, never a message withdrawn or an answer to a thread's question, which it only refuses.
             const undoable = act._tag === "Message" || act._tag === "Stop" || (act._tag === "Undo" && act.carry)
+            const by = undoable ? Option.match(yield* ledger.get(at.commandId), { onNone: () => utterance.id, onSome: (row) => row.utterance }) : undefined
             const first: Outcome = {
               say: line,
               subject: { ...subject, said: line },
               kind: "done",
-              ...(undoable ? { changed: true } : {}),
+              ...(by === undefined ? {} : { changed: { what: "acted", utterance: by } }),
               // Only once it's known to play, so a line for going ahead dropped as yapd was turned off, or that couldn't be played, never counts as the last one he heard.
               // With none of its own, like a stop, the one said before it in the same breath is still the one the next is kept from being.
               ...(onIt === undefined ? (at.besides === undefined ? {} : { onIt: at.besides }) : { onIt, confirmed: persona.said(onIt) }),
@@ -2235,7 +2240,7 @@ export const make = (options: {
               ...(outcome.undone ? { undone: true } : {}),
             })
             // Only what went is a change "scratch that" takes back.
-            const first: Outcome = { say: line, subject: { ...subject, said: line }, kind: "done", ...(went ? { changed: true } : {}) }
+            const first: Outcome = { say: line, subject: { ...subject, said: line }, kind: "done", ...(went ? { changed: { what: "acted", utterance: utterance.id } } : {}) }
             // None of it went, the rest of the request doesn't either.
             return went ? yield* free(onward(thought, first, Option.fromNullable(ref), at.step + 1, said)) : unfinished(first, decision.rest, said, situation.desk)
           }
@@ -2381,6 +2386,8 @@ export const make = (options: {
         const { unseen: _, ...rest } = after
         // Of two lines for going ahead, the one said last is the one a step after both is kept from, and the last he heard: each is noted in turn, once it's known to play.
         const onIt = after.onIt ?? before.onIt
+        // Said in one line, what either step changed is what "scratch that" may take back: the newer, the rest's when it changed one.
+        const changed = after.changed ?? before.changed
         const confirmed =
           before.confirmed === undefined || after.confirmed === undefined
             ? (after.confirmed ?? before.confirmed)
@@ -2397,8 +2404,7 @@ export const make = (options: {
           ...(unseen === undefined ? {} : { unseen }),
           ...(onIt === undefined ? {} : { onIt }),
           ...(confirmed === undefined ? {} : { confirmed }),
-          // Said in one line, what either step changed is what "scratch that" may take back.
-          ...(before.changed === true || after.changed === true ? { changed: true } : {}),
+          ...(changed === undefined ? {} : { changed }),
         }
       })
 
@@ -3034,21 +3040,21 @@ export const make = (options: {
         const { decision } = plan
         const { controls } = options
         const sir = addressed(said)
-        const stays = (line: string, changed: boolean): Outcome => ({
+        const stays = (line: string, changed: Brain.Change | undefined): Outcome => ({
           say: line,
           subject: thought.subject._tag === "Session" ? { ...thought.subject, said: line } : { _tag: "Answer", said: line, about: Brain.about(thought.subject) },
           kind: "done",
-          ...(changed ? { changed } : {}),
+          ...(changed === undefined ? {} : { changed }),
         })
         if (controls === undefined) return reply(Brain.notYet(said), thought.subject)
         const now = yield* Clock.currentTimeMillis
         if (decision.how === "clear") {
           const cleared = (yield* controls.clear).length > 0
-          return stays(Brain.muteLines(said, "it", now).cleared(cleared), cleared)
+          return stays(Brain.muteLines(said, "it", now).cleared(cleared), yield* muteChanged(cleared))
         }
         if (decision.how === "undo") {
           const undone = yield* controls.undo
-          return stays(Brain.takenBack(said, undone, now), Option.isSome(undone))
+          return stays(Brain.takenBack(said, undone, now), yield* muteChanged(Option.isSome(undone)))
         }
         if (decision.how === "subagents" || decision.how === "nosubagents") return yield* reading(plan, thought, said, stays)
         const target = muted(plan, thought)
@@ -3057,17 +3063,23 @@ export const make = (options: {
         const told = Brain.muteLines(said, it || called === undefined ? "it" : called, now)
         // Named, "it" is that thread from now on.
         const about = Option.flatten(Option.map(Mutes.parse(key), (about) => (about._tag === "Thread" ? Option.some(about.ref) : Option.none<Threads.Ref>())))
-        const answered = (line: string, changed: boolean): Outcome =>
-          it ? stays(line, changed) : { say: line, subject: { _tag: "Answer", said: line, about }, kind: "done", ...(changed ? { changed } : {}) }
+        const answered = (line: string, changed: Brain.Change | undefined): Outcome =>
+          it ? stays(line, changed) : { say: line, subject: { _tag: "Answer", said: line, about }, kind: "done", ...(changed === undefined ? {} : { changed }) }
         if (decision.how === "unmute") {
           const unmuted = yield* controls.unmute(key)
-          return answered(unmuted ? told.unmuted : told.notMuted, unmuted)
+          return answered(unmuted ? told.unmuted : told.notMuted, yield* muteChanged(unmuted))
         }
         // A time that's gone or can't be read leaves it muted until he unmutes it, which is the safer way to take it, and said so.
         const lasts = Mutes.ending(decision.when, now)
         const done = yield* controls.mute({ key, ...(called === undefined ? {} : { called }), ...(project === undefined ? {} : { project }) }, lasts)
-        return answered(done ? told.muted(lasts) : told.already, done)
+        return answered(done ? told.muted(lasts) : told.already, yield* muteChanged(done))
       })
+
+    /** What "scratch that" takes back once what's muted, or whose subagents are read, `did` change: that change, as it was kept. */
+    const muteChanged = (did: boolean) =>
+      did && options.mutes !== undefined
+        ? Effect.map(options.mutes.last, (last) => Option.getOrUndefined(Option.map(last, ({ at }): Brain.Change => ({ what: "mute", at }))))
+        : Effect.succeed(undefined)
 
     /**
      * The thread whose subagents he means: the one picked, or, said in so many
@@ -3102,7 +3114,7 @@ export const make = (options: {
      * reads nothing now, so turned on, he's told he can ask what they said so
      * far, when they said anything. Never anything sent to a thread.
      */
-    const reading = (plan: Brain.Plan, thought: Thought, said: Lines, stays: (line: string, changed: boolean) => Outcome) =>
+    const reading = (plan: Brain.Plan, thought: Thought, said: Lines, stays: (line: string, changed: Brain.Change | undefined) => Outcome) =>
       Effect.gen(function* () {
         const { controls } = options
         if (controls === undefined) return reply(Brain.notYet(said), thought.subject)
@@ -3113,9 +3125,10 @@ export const make = (options: {
         const told = Brain.subagentLines(said, it || called === undefined ? "it" : called)
         const on = plan.decision.how === "subagents"
         const changed = yield* controls.subagents({ key: Mutes.key.thread(ref), ...(called === undefined ? {} : { called }), ...(project === undefined ? {} : { project }) }, on)
+        const change = yield* muteChanged(changed)
         // Named, "it" is that thread from now on.
         const answered = (line: string): Outcome =>
-          it ? stays(line, changed) : { say: line, subject: { _tag: "Answer", said: line, about: Option.some(ref) }, kind: "done", ...(changed ? { changed } : {}) }
+          it ? stays(line, change) : { say: line, subject: { _tag: "Answer", said: line, about: Option.some(ref) }, kind: "done", ...(change === undefined ? {} : { changed: change }) }
         if (!on) return answered(changed ? told.off : told.notOn)
         if (!changed) return answered(told.already)
         return answered((yield* Missed.keptBy(journal, ref, yield* Clock.currentTimeMillis)) ? `${told.on} ${told.kept}` : told.on)
@@ -3425,7 +3438,7 @@ export const make = (options: {
         const { subject } = thought
         const over = subject._tag === "Answer" ? (subject.missed ?? []) : []
         const cleared = yield* clearing(yield* Clock.currentTimeMillis, { line: lines.cleared, utterance: thought.utterance.id, over })
-        return cleared === 0 ? reply(lines.nothingToClear, thought.subject) : ({ ...reply(lines.cleared(cleared), thought.subject), kind: "done", changed: true } satisfies Outcome)
+        return cleared === 0 ? reply(lines.nothingToClear, thought.subject) : ({ ...reply(lines.cleared(cleared), thought.subject), kind: "done", ...notedChange() } satisfies Outcome)
       })
 
     /**
@@ -3450,7 +3463,7 @@ export const make = (options: {
           detail: last.kind === "cleared" ? { undo: { cleared: changed.length, ids: changed } } : { cleared: changed.length, ids: changed },
         })
         noted = { at: now, kind: last.kind === "cleared" ? "restored" : "cleared", id: Option.getOrElse(entry, () => 0), about: Option.none(), ids: changed }
-        return { ...reply(line, thought.subject), kind: "done", changed: true } satisfies Outcome
+        return { ...reply(line, thought.subject), kind: "done", ...notedChange() } satisfies Outcome
       })
 
     /** What the model decided he wants to catch up on, more of the catch-up he just heard when that's what it said, or else what it named, or to clear it. */
@@ -3479,15 +3492,16 @@ export const make = (options: {
       Option.match(Reminders.ref(reminder), { onNone: () => ({}), onSome: ({ machine, id }) => ({ machine, thread: id }) })
 
     /**
-     * What's said of a reminder he set, cancelled or took back, which "it"
-     * goes on meaning what it was about, if anything: of an offer of one of
-     * his routines, its name, which is all a model is told of the line.
+     * What's said of a reminder he set, cancelled or took back, once it's
+     * noted, which "it" goes on meaning what it was about, if anything: of an
+     * offer of one of his routines, its name, which is all a model is told of
+     * the line.
      */
     const remindedOf = (line: string, reminder: Pick<Reminders.Reminder, "machine" | "thread" | "routine">): Outcome => ({
       say: line,
       subject: { _tag: "Answer", said: line, about: Reminders.ref(reminder), ...ofRoutine(reminder) },
       kind: "done",
-      changed: true,
+      ...notedChange(),
     })
 
     /** Where what's said of an offer came from, noted with it: one of his routines, by its name, which is all a model is told of it. */
@@ -3575,14 +3589,15 @@ export const make = (options: {
 
     /**
      * What's said of what he had kept in mind, forgotten or brought back,
-     * which is about no thread, `changed` unless it was so already: of a
-     * routine read back, its name, which is all a model is told of the line.
+     * which is about no thread, `changed`, once it's noted, unless it was so
+     * already: of a routine read back, its name, which is all a model is told
+     * of the line.
      */
     const memorized = (line: string, changed: boolean, kept?: Pick<Memory.Memory, "kind" | "name">): Outcome => ({
       say: line,
       subject: { _tag: "Answer", said: line, about: Option.none(), ...(kept === undefined ? {} : readBack(kept)) },
       kind: "done",
-      ...(changed ? { changed } : {}),
+      ...(changed ? notedChange() : {}),
     })
 
     /** Where what's said of a memory came from, noted with it: a routine read back, by its name, which is all a model is told of it. */
@@ -4244,13 +4259,14 @@ export const make = (options: {
      * about, it's most likely a late reply to the line before: then no
      * thread is "it". Run on past its end from over its last words,
      * `carried`, the model is told it's his reply to all of it. Said back to
-     * a line saying what yapd just changed for him that "scratch that"
-     * reaches, `done`, which only listens from its end, the model is told
+     * a "done" line, `done`, which only listens from its end, nothing but
+     * the change it says yapd made for him is taken back without the model,
+     * and when it says one that "scratch that" reaches, the model is told
      * so, run on into it or not, and what's too faint to take is logged as
      * said after what it did, so how often that's let go can be counted.
      */
     const followUp =
-      (about: Subject, line: Effect.Effect<string>, done = false) =>
+      (about: Subject, line: Effect.Effect<string>, done?: Brain.Done) =>
       (heard: string, voiced: number, echo?: string, afterPause?: string, unsaid?: string, carried?: boolean): Effect.Effect<Option.Option<Effect.Effect<void>>> =>
         Effect.gen(function* () {
           const at = yield* Clock.currentTimeMillis
@@ -4269,13 +4285,13 @@ export const make = (options: {
             turns,
             ...overItself({ echo, afterPause, echoRoutines: routinesOf(about).routines }),
             ...(echo === undefined || carried !== true ? {} : { carried }),
-            ...(done ? { afterDone: true } : {}),
+            ...(done === undefined ? {} : { afterDone: done }),
             ...(left === undefined ? {} : { unsaid: left }),
           }
           const thought = yield* think(utterance, it, [{ speaker: "yapd", text: heardOf(said, left), ...routinesOf(about) }])
           if (thought.decision.act === "resume") return Option.none()
           if (Brain.murmured(thought.decision, utterance)) {
-            yield* Effect.logInfo(`Not taking ${quoted(heard)} as a follow-up${done ? " after what it did" : ""}, with only ${voiced.toFixed(2)} s of speech`)
+            yield* Effect.logInfo(`Not taking ${quoted(heard)} as a follow-up${done?.change === undefined ? "" : " after what it did"}, with only ${voiced.toFixed(2)} s of speech`)
             return Option.none()
           }
           // Taken, it holds a question asked since the answer that he's yet to hear, like one an agent asked meanwhile, so it isn't said
@@ -4453,15 +4469,20 @@ export const make = (options: {
             ...(outcome.confirmed === undefined ? {} : { confirmed: outcome.confirmed }),
             // An answer can be followed up about what it was about, in the words he heard it in, and what came of something he asked to be
             // done, like "scratch that" right after "On it", from its end only: never one saying a message of his may not have gone, whose
-            // "send it again" the model could only send as it is. Only a line saying what "scratch that" reaches has a bare no to it told as
-            // said back to what it did, never a mode, nothing changed or something that didn't go, which may follow what does by a minute.
+            // "send it again" the model could only send as it is. A no to it takes back only what the line says it changed, and only a line
+            // saying what "scratch that" reaches has a bare no to it told as said back to what it did, never one where nothing changed or
+            // something didn't go, which may follow what does by a minute.
             ...(outcome.unsent === true
               ? {}
               : kind === "answer"
               ? { followUp: followUp(subject, Effect.sync(() => (reworded && instead !== undefined ? instead : outcome.say))) }
               : kind === "done"
                 ? {
-                    followUp: followUp(subject, Effect.sync(() => (reworded && instead !== undefined ? instead : outcome.say)), outcome.changed === true),
+                    followUp: followUp(
+                      subject,
+                      Effect.sync(() => (reworded && instead !== undefined ? instead : outcome.say)),
+                      outcome.changed === undefined ? {} : { change: outcome.changed },
+                    ),
                     window: Conversation.linger,
                     after: true as const,
                   }
@@ -5126,7 +5147,7 @@ export const make = (options: {
             answered = { subject: { _tag: "Answer", said, about: Option.some(ref) }, at, turns }
           }),
         ),
-      following: (about, line, done = false) =>
+      following: (about, line, done?: Brain.Done) =>
         followUp(
           "session" in about ? { _tag: "Session", update: about, said: line } : { _tag: "Answer", said: line, about: Option.some(about) },
           Effect.succeed(line),

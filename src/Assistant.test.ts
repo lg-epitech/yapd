@@ -4631,7 +4631,7 @@ describe("Assistant", () => {
           const { heard, afterDone } = situation.utterance
           if (heard.startsWith("Tell")) return tezosMessage("high")(situation)
           if (heard.startsWith("Who")) return Brain.decision({ act: "answer", spoken: "Two threads need you, sir." })
-          told.push(`${heard}${afterDone === true ? ", after what it did" : ""}`)
+          told.push(`${heard}${afterDone?.change === undefined ? "" : ", after what it did"}`)
           return Brain.decision({ act: "resume" })
         })
         yield* dictate("Tell the Tesla's migration to use the fee table from the Mina work.")
@@ -4655,7 +4655,7 @@ describe("Assistant", () => {
             const { heard, afterDone } = situation.utterance
             if (heard.startsWith("Tell")) return tezosMessage("high")(situation)
             if (heard.startsWith("Stop")) return Brain.decision({ act: "stop", target: handle(situation, tezos) })
-            told.push(`${heard}${afterDone === true ? ", after what it did" : ""}`)
+            told.push(`${heard}${afterDone?.change === undefined ? "" : ", after what it did"}`)
             return Brain.decision({ act: "resume" })
           },
           undefined,
@@ -4681,6 +4681,59 @@ describe("Assistant", () => {
     )
     expect(result.spoken.slice(1, 3)).toEqual([Brain.modeLines(lines, now + 40_000).focus(now + 40_000 + 2 * 60 * 60_000), expect.stringContaining("provider is offline")])
     expect(result.told).toEqual(["No.", "No.", "No., after what it did"])
+  })
+
+  test("scratch that after a line where nothing changed, like a mute there already, asks what it would take back, never withdrawing a message sent before", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, followUp, notices, wait, spoken, questions, dispatched, mutes } = yield* assistant(
+          (situation) =>
+            situation.utterance.heard.startsWith("When")
+              ? Brain.decision({ act: "send", target: handle(situation, tezos), text: "Open a PR.", how: "after" })
+              : Brain.decision({ act: "undo", sure: "high" }),
+          undefined,
+          { muting: true },
+        )
+        yield* mutes!.mute({ key: `t3:Rosie:${tezos.id}`, called: "the Tezos migration" })
+        yield* wait(10)
+        yield* dictate("When it's done, tell the Tesla's migration to open a PR.")
+        yield* wait(30)
+        yield* dictate("Mute it.")
+        const already = spoken().at(-1)
+        yield* followUp("Scratch that.", 1, notices().findLast(({ kind }) => kind === "done"))
+        return { already, asked: questions().map(({ spoken }) => spoken), dispatched: dispatched.map(({ type }) => type), muted: (yield* mutes!.list).map(({ key }) => key) }
+      }),
+    )
+    expect(result.already).toBe("It's already muted, sir.")
+    expect(result.asked).toEqual(["Take back the message to Migrate Tezos Integration, sir?"])
+    expect(result.dispatched).toEqual(["message.dispatch"])
+    expect(result.muted).toEqual([`t3:Rosie:${tezos.id}`])
+  })
+
+  test("a no after a late word that a reply went never takes back what the dictation that cut it off changed since: he's asked about that", async () => {
+    const said = (heard: string) =>
+      run(
+        Effect.gen(function* () {
+          const { dictate, following, wait, flush, questions, dispatched, ledger } = yield* assistant((situation) => {
+            const asked = situation.utterance.heard
+            if (asked.startsWith("Tell the Tesla")) return Brain.decision({ act: "send", target: handle(situation, tezos), text: "Open a PR.", how: "after" })
+            if (asked.startsWith("Tell the Mina")) return Brain.decision({ act: "send", target: handle(situation, mina), text: "Add tests.", how: "after" })
+            return Brain.decision({ act: "undo", sure: "high" })
+          })
+          // The reply that went by yapd's own hand, then what the dictation that cut off word of it changed.
+          yield* dictate("Tell the Tesla's migration to open a PR when it's done.")
+          const reply = Option.getOrThrow(yield* ledger.latest("1 minute"))
+          yield* wait(5)
+          yield* dictate("Tell the Mina one to add tests when it's done.")
+          const taken = yield* following({ machine: "Rosie", id: tezos.id }, "On it, sir.", { change: { what: "acted", utterance: reply.utterance } })(heard, 1)
+          if (Option.isSome(taken)) yield* taken.value
+          yield* flush
+          return { asked: questions().map(({ spoken }) => spoken), dispatched: dispatched.map(({ type }) => type) }
+        }),
+      )
+    for (const heard of ["No.", "Scratch that."]) {
+      expect(await said(heard)).toEqual({ asked: ["Take back the message to Open Mina SSV2 Bug Tickets, sir?"], dispatched: ["message.dispatch", "message.dispatch"] })
+    }
   })
 
   test("asked which thread a request said over yapd's first seconds is for, the model deciding his answer is told what of it may have been yapd's own voice, in OPEN and in LATELY, even once he's had it said again", async () => {

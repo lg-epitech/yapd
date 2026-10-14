@@ -109,7 +109,7 @@ const make = (says?: string, options: {
   readonly finishing?: (about: Threads.Ref, before: number, ended: Effect.Effect<Reminders.Ending>) => Effect.Effect<ReadonlyArray<Reminders.Leading>>
   /** How the turn a Stop told of ended, as its thread's run has it. */
   readonly ending?: (about: Threads.Ref, stop: Notices.Stop) => Effect.Effect<Reminders.Ending>
-  /** Where what's said right after a line said of an update, that can be followed up, goes, with that line, and whether it's said back to what it did. */
+  /** Where what's said right after a line said of an update, that can be followed up, goes, with that line, and whether it's said back to what it did, under which request. */
   readonly following?: Array<string>
 } = {}) => Effect.gen(function* () {
   /** What each rendered file says, and what was played, in order. */
@@ -296,8 +296,15 @@ const make = (says?: string, options: {
     ...(options.following === undefined
       ? {}
       : {
-          following: (_: unknown, line: string, done?: boolean) => (heard: string) =>
-            Effect.succeed(Option.some(Effect.sync(() => void options.following?.push(`${line} ${heard}${done === true ? ", after what it did" : ""}`)))),
+          following: (_: unknown, line: string, done?: Brain.Done) => (heard: string) =>
+            Effect.succeed(
+              Option.some(
+                Effect.sync(() => {
+                  const change = done?.change
+                  options.following?.push(`${line} ${heard}${change === undefined ? "" : `, after what it did${change.what === "acted" ? ` under ${change.utterance}` : ""}`}`)
+                }),
+              ),
+            ),
         }),
     // This machine is Rosie, as yapd serves it.
     naming,
@@ -530,6 +537,7 @@ const handing = Effect.gen(function* () {
   })
   return {
     hands,
+    ledger,
     /** The messages T3 Code was sent, by thread. */
     sent: () => dispatched.filter(({ type }) => type === "message.dispatch").map(({ threadId, text }) => `${threadId}: ${text}`),
     /** How many commands were sent to T3 Code, whether they got there or not. */
@@ -5429,7 +5437,7 @@ describe("Lines listened to from their end", () => {
     expect(result.following).toEqual(fails ? [] : ["yapd. Okay, passed on. Send it again."])
   })
 
-  test("a reply cut off by a dictation that went by yapd's own hand is followed up from its end as said back to what it did", async () => {
+  test("a reply cut off by a dictation that went by yapd's own hand is followed up from its end as said back to what it did, that reply and nothing since", async () => {
     const result = await run(
       Effect.gen(function* () {
         const t3 = yield* handing
@@ -5452,12 +5460,14 @@ describe("Lines listened to from their end", () => {
         yield* wait(10)
         yield* speak
         yield* wait(4)
-        return { following, sent: t3.sent(), played: [...played] }
+        const steered = Option.map(yield* t3.ledger.latest("1 hour"), ({ utterance }) => utterance)
+        return { following, sent: t3.sent(), played: [...played], steered }
       }),
     )
     expect(result.sent).toEqual(["t-tezos: Use the fee table."])
     expect(result.played).toEqual(["yapd. The migration compiles.", "yapd. Okay, passed on."])
-    expect(result.following).toEqual(["yapd. Okay, passed on. No., after what it did"])
+    // A no to it takes back the reply it says went, by the request it went under, never what the dictation that cut it off did.
+    expect(result.following).toEqual([`yapd. Okay, passed on. No., after what it did under ${Option.getOrThrow(result.steered)}`])
   })
 
   test("a late line that reads his message back never listens, so nothing said after it goes anywhere", async () => {

@@ -472,6 +472,8 @@ describe("Brain", () => {
 
   test("run on past the end of a line it said all of, what he said after its last words is told as his reply to it, and a bare no of his to what it did, run on or not, never as a dismissal, nor one that may be its own words", () => {
     const echo = "On it, sir: the Tezos migration."
+    // What the line said yapd changed: the message, by the request it went under.
+    const afterDone = { change: { what: "acted" as const, utterance: "u0" } }
     const told = (more: Partial<Assistant.Utterance>) => {
       const given = situation("migration. No.", { subject: { _tag: "Answer", said: echo, about: Option.some(ref(tezos)) } })
       return Brain.prompt({ ...given, utterance: { ...given.utterance, via: "reply", ...more } }, Option.none())
@@ -481,14 +483,16 @@ describe("Brain", () => {
     const done = `He spoke right after your last line, which told him what you just did for him. When it says you did something for him, like sending a message, nothing but a no of his to that, like "No.", "No, don't." or "Scratch that.", is never a dismissal: it's "undo" when it plainly takes that back, or else "answer", asking him in a few words whether to take it back; never "dismiss" or "resume". When it says you started work for him, which can't be taken back, nothing but a no of his to that is "answer", asking him in a few words whether to stop it; never "undo", "dismiss" or "resume". Otherwise, as when it says something didn't go, a no goes as usual.`
     // With its own voice in what was heard, a no that may be its own words, like its "Noted.", is never his, as the echo rule has it.
     const own = ` What was heard may hold your own words, as above: only what's surely his can be his no, never words that may be yours, like a "No." that may be your own "Noted.", and if nothing surely his is left, it's "resume".`
-    expect(told({ echo, carried: true, afterDone: true })).toContain(`A question or a dismissal of his goes as usual.${carried}\n\n${done}${own}\n\nWHAT HE SAID`)
-    expect(told({ echo, carried: true, afterDone: true, afterPause: "No." })).toContain(`A question or a dismissal of his goes as usual.${carried} What he said after a pause, «No.», is surely his`)
+    expect(told({ echo, carried: true, afterDone })).toContain(`A question or a dismissal of his goes as usual.${carried}\n\n${done}${own}\n\nWHAT HE SAID`)
+    expect(told({ echo, carried: true, afterDone, afterPause: "No." })).toContain(`A question or a dismissal of his goes as usual.${carried} What he said after a pause, «No.», is surely his`)
     // Begun once it had ended, with none of its own voice in what he said, the same of a no.
-    expect(told({ afterDone: true })).toContain(`${done}\n\nWHAT HE SAID`)
+    expect(told({ afterDone })).toContain(`${done}\n\nWHAT HE SAID`)
     // Over it, or without its own voice in what he said, as ever; run on past an answer, a no to it as ever.
     expect(told({ echo })).not.toContain("all of your line")
     expect(told({ carried: true })).not.toContain("all of your line")
     expect(told({ echo, carried: true })).not.toContain(done)
+    // After a line that changed nothing "scratch that" reaches, like "It's already muted.", a no goes as usual.
+    expect(told({ afterDone: {} })).not.toContain(done)
   })
 
   test("over yapd's first seconds, what he said after a pause isn't taken for nothing on the strength of yapd's own word before it", () => {

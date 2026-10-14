@@ -234,11 +234,11 @@ export const make = (
     /**
      * What makes of what he says right after a line said of an update, `line`,
      * a follow-up about it, as the assistant follows up an answer, `done` when
-     * the line says what came of what he said over it by yapd's own hand,
-     * which "scratch that" reaches. Without it, such a line listens only for
-     * "Mute.".
+     * the line says what came of what he said over it, with what went by
+     * yapd's own hand, which "scratch that" reaches. Without it, such a line
+     * listens only for "Mute.".
      */
-    readonly following?: (update: Conversation.Update, line: string, done?: boolean) => Conversation.Answer["followUp"]
+    readonly following?: (update: Conversation.Update, line: string, done?: Brain.Done) => Conversation.Answer["followUp"]
   } = {},
 ) => Effect.gen(function* () {
   const lifetime = yield* Effect.scope
@@ -275,6 +275,8 @@ export const make = (
   const rows = new WeakMap<Conversation.Update, number>()
   /** Updates whose Stop hook waits for a reply, like a terminal session resumed from a T3 Code thread, which go back through it. */
   const hooked = new WeakSet<Conversation.Update>()
+  /** The requests each update's replies went to its thread under by yapd's own hand, which "scratch that" after word of one takes back. */
+  const steeredAs = new WeakMap<Conversation.Update, ReadonlyArray<string>>()
   /** The Stop hooks waiting while their update is summed up, by session, which turning yapd off lets go of at once. */
   const summing = new Map<string, Ticket>()
   /** Hooks let go of already, so none is let go of twice. */
@@ -503,10 +505,12 @@ export const make = (
    * as what was said over the update; never a line that `quotes` his message
    * back, which taken up could send it twice, nor one that says it may not
    * have gone, which he'd answer with "send it again", words the model could
-   * only send the agent as they are. A bare no to it is told as said back to
-   * what it did only when it went by yapd's own hand, which "scratch that"
-   * reaches: never through a hook, which leaves nothing to take back, so the
-   * no would reach whatever yapd did before it.
+   * only send the agent as they are. A bare no to it takes back nothing but
+   * the reply it says went, and is told as said back to what it did, only
+   * when that went by yapd's own hand, which "scratch that" reaches: never
+   * through a hook, which leaves nothing to take back, nor what the
+   * dictation that cut it off changed since, so the no never reaches
+   * anything else without the model.
    */
   const late = (update: Conversation.Update, spoken: string, failed: boolean, quotes = false) =>
     Effect.flatMap(Clock.currentTimeMillis, (at) => {
@@ -522,7 +526,7 @@ export const make = (
           stale: Effect.succeed(false),
           // Only once it's known to play, so a line for going ahead dropped as yapd was turned off, or that afplay couldn't play, never counts as the last one he heard.
           confirmed: persona.said(spoken),
-          ...(following === undefined || quotes || failed ? {} : { followUp: following(update, line, steered(update)), window: Conversation.linger, after: true }),
+          ...(following === undefined || quotes || failed ? {} : { followUp: following(update, line, reported(update)), window: Conversation.linger, after: true }),
         },
         readSince.get(update),
       )
@@ -534,6 +538,17 @@ export const make = (
    * only when the update is tied to the thread, and its hook isn't waiting.
    */
   const steered = (update: Conversation.Update) => update.about !== undefined && options.hands !== undefined && !hooked.has(update)
+
+  /**
+   * What a line saying how a reply over an update went says yapd changed:
+   * the reply, by the request it went under, when it went by yapd's own
+   * hand. With more than one sent over it, which the line is about can't be
+   * told, so none is taken back without the model.
+   */
+  const reported = (update: Conversation.Update): Brain.Done => {
+    const [utterance, ...more] = steered(update) ? (steeredAs.get(update) ?? []) : []
+    return utterance === undefined || more.length > 0 ? {} : { change: { what: "acted", utterance } }
+  }
 
   /**
    * Whether the work an update is about moved on since, by its hooks. Not for
@@ -646,6 +661,7 @@ export const make = (
           detail: { commandId: Ledger.ids(utterance, 0, false).commandId, outcome: outcome._tag, ...detail },
         })
       if (outcome._tag === "Done") {
+        steeredAs.set(update, [...(steeredAs.get(update) ?? []), utterance])
         yield* noted({ how: outcome.how, ...(outcome.waiting === undefined ? {} : { waiting: outcome.waiting }) })
         yield* Effect.logInfo(`Delivered through T3 Code (${outcome.how}): ${withheld || T3Actions.revealing(message) ? "something that could give a secret away" : message}`)
         yield* answeredNow(update)
