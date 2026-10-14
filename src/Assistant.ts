@@ -3990,12 +3990,21 @@ export const make = (options: {
       said: Lines,
       at: Stepping = { step: 0, twice: false },
     ): Effect.Effect<Outcome> => {
+      // A take-back said back to a "done" line that may be yapd's own words is only ever asked about, or let go, which is logged so how
+      // often that happens can be counted.
+      const echoed = Brain.echoedBack(thought.decision, thought.utterance)
       switch (checked._tag) {
         case "Say":
           return Effect.succeed(unfinished(reply(checked.spoken, thought.subject), thought.decision.rest, said, thought.situation.desk))
         case "Ask":
-          return Effect.map(opening(checked.open, thought.utterance), (outcome) => listing(outcome, checked.open))
+          return Effect.zipRight(
+            echoed ? Effect.logInfo(`Asking rather than taking anything back, since ${quoted(thought.utterance.heard)} may have been my own voice, sure ${thought.decision.sure}`) : Effect.void,
+            Effect.map(opening(checked.open, thought.utterance), (outcome) => listing(outcome, checked.open)),
+          )
         case "Do":
+          if (echoed && checked.plan.decision.act === "resume") {
+            return Effect.as(Effect.logInfo(`Not taking anything back, since ${quoted(thought.utterance.heard)} may have been my own voice`), quiet(thought.subject))
+          }
           // Taking back the step a "done" line said, said back to it, is that step alone, whatever's written before it's done.
           return perform(checked.plan, thought, said, checked.plan.pinned === undefined ? at : { ...at, pinned: checked.plan.pinned })
       }

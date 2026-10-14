@@ -67,6 +67,22 @@ const ownWord = ({ act, how }: Pick<Decision, "act" | "how">) =>
 export const murmured = (decided: Pick<Decision, "act" | "how">, utterance: Pick<Assistant.Utterance, "via" | "voiced">) =>
   utterance.via === "reply" && utterance.voiced < faintest && ownWord(decided)
 
+/**
+ * Whether some of what he said is surely his: begun with none of yapd's own
+ * voice in the microphone, or with words after a pause, or after the last
+ * words of the line it ran on from, which yapd had stopped saying by then.
+ */
+const surelyHis = (utterance: Pick<Assistant.Utterance, "echo" | "afterPause">) =>
+  utterance.echo === undefined || (utterance.afterPause !== undefined && utterance.afterPause.trim() !== "")
+
+/**
+ * Whether it's a take-back said back to a "done" line with nothing surely his
+ * in it, like yapd's own "Noted." heard as "No.": only ever asked about, never
+ * done, however sure the model is.
+ */
+export const echoedBack = (decided: Pick<Decision, "act" | "how">, utterance: Pick<Assistant.Utterance, "echo" | "afterPause" | "afterDone">) =>
+  utterance.afterDone !== undefined && !surelyHis(utterance) && (decided.act === "undo" || ((decided.act === "mode" || decided.act === "mute") && decided.how === "undo"))
+
 /** How sure the model is of the thread it picked. */
 export const Sure = Schema.Literal("high", "medium", "low")
 export type Sure = typeof Sure.Type
@@ -3333,23 +3349,26 @@ const theirs = (choice: Decision, situation: Situation): Reach | undefined => {
  * takes back that alone: the line's own change, when he means that kind of
  * change, however much was done since, or else what it would reach. It goes
  * ahead, as `going` has it, when it reaches the line's own change and the
- * model's sure he means that, a step pinned to its command, so one written
- * before it's done is never what's taken back; or when there's nothing to
- * ask about, as ever, like a refusal of what can't be taken back. A no the
- * model isn't sure takes it back is asked about here, never in words of the
- * model's own, which nothing would hold his yes to.
+ * model's sure he means that, in words surely his, a step pinned to its
+ * command, so one written before it's done is never what's taken back; or
+ * when there's nothing to ask about, as ever, like a refusal of what can't be
+ * taken back. A no the model isn't sure takes it back, or that may be yapd's
+ * own words, like its "Noted." heard as "No.", is asked about here, never in
+ * words of the model's own, which nothing would hold his yes to; and with
+ * nothing to ask about, what may be yapd's own words is nothing of his.
  */
 const answeredBack = (choice: Decision, situation: Situation, lines: Lines, going: () => Checked): Checked => {
   if (situation.utterance.afterDone === undefined) return going()
   const reach = reaching(choice, situation)
   const ours = reach !== undefined && owned(situation, reach.change) ? reach : undefined
-  if (ours !== undefined && choice.sure === "high") return pinning(going(), ours)
+  const his = surelyHis(situation.utterance)
+  if (ours !== undefined && choice.sure === "high" && his) return pinning(going(), ours)
   const own = theirs(choice, situation)
   const said = choice.act === "undo" ? choice : { how: "", target: "" }
   return (
     (own === undefined ? undefined : askingBack(own, situation, lines, said)) ??
     (reach === undefined ? undefined : askingBack(reach, situation, lines, said)) ??
-    (ours === undefined ? going() : pinning(going(), ours))
+    (!his ? { _tag: "Do", plan: { decision: { ...choice, act: "resume" }, target: Option.none() } } : ours === undefined ? going() : pinning(going(), ours))
   )
 }
 

@@ -603,6 +603,44 @@ describe("Brain", () => {
     expect(dictated._tag === "Do" ? dictated.plan.pinned : dictated).toBeUndefined()
   })
 
+  test("a take-back said back to a done line that may be yapd's own words is asked about, pinned to the line's own step, however sure the model is, and goes ahead on what he said after its last words", () => {
+    const sent: Ledger.Row = {
+      commandId: "yapd:u0:0",
+      messageId: "yapd:u0:0:m",
+      utterance: "u0",
+      step: 0,
+      kind: "message",
+      machine: "Rosie",
+      thread: tezos.id,
+      body: { _tag: "Send", text: "Open a PR.", messageId: "yapd:u0:0:m", how: "after" },
+      digest: "open a pr",
+      state: "sent",
+      how: "queued",
+      reason: null,
+      at: now - 5_000,
+    }
+    // Its own "Noted, sir." heard as "No, sir.", run on from the line with nothing after its last words.
+    const given = situation("No, sir.", { acted: Option.some(sent), recent: [sent] })
+    const over = (more: Partial<Assistant.Utterance>) => ({
+      ...given,
+      utterance: {
+        ...given.utterance,
+        via: "reply" as const,
+        afterDone: { change: { what: "acted" as const, utterance: "u0" } },
+        echo: "Noted, sir. I'll get to it once the current task is done.",
+        carried: true as const,
+        ...more,
+      },
+    })
+    const undo = Brain.decision({ act: "undo", sure: "high" })
+    expect(Brain.check(undo, over({}), lines)).toMatchObject({
+      _tag: "Ask",
+      open: { kind: "confirm", asked: "Take back the message to Migrate Tezos Integration, sir?", decision: { act: "undo", how: "message" }, pinned: "yapd:u0:0" },
+    })
+    // His "No." after its last words is surely his: it goes ahead, that step alone.
+    expect(Brain.check(undo, over({ afterPause: "No." }), lines)).toMatchObject({ _tag: "Do", plan: { decision: { act: "undo" }, pinned: "yapd:u0:0" } })
+  })
+
   test("a reminder taken back after a done line that said something else is asked about, of another thread named or one filled in, never cancelled on its own", () => {
     const handleOf = (of: T3Live.Thread) => desk().threads.find(({ thread }) => thread.id === of.id)!.handle
     const replied = (given: Brain.Situation, change: Brain.Change) => ({ ...given, utterance: { ...given.utterance, via: "reply" as const, afterDone: { change } } })
