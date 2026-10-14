@@ -1994,6 +1994,8 @@ describe("Brain", () => {
       expect(prompt).not.toContain("you told him (integration")
       // "mode" is something yapd does now, not something it can't do yet.
       expect(prompt).toContain(`- "mode": he wants you to change how and when you talk.`)
+      // Taking a mode back puts back what it replaced, never "normal", which would give him the catch-up.
+      expect(prompt).toContain(`like "No, scratch that." right after you said focus is on, is "undo" with "how" "", which puts back what was on before it: never "mode" with "normal".`)
       expect(prompt).not.toContain(`"mode" to change when you talk`)
       const normal = Brain.prompt(situation("What's going on?", { mode: { mode: { mode: "normal" }, detail: "brief" } }), Option.none())
       expect(normal).not.toContain("MODE:")
