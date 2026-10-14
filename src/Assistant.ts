@@ -4082,15 +4082,15 @@ export const make = (options: {
         // Taking back what he just did, of the question's thread or none named, a message he dictated, taken as the answer to a part of the
         // question, is taken back out of it. That was all he took back, since it never went: he's told so, and the question's asked again
         // after, from the part it answered. Let go with "scratch that", it's let go without it. Never when the model took him to mean a reminder,
-        // a memory, the catch-up he cleared or what was done to tidy a thread, nor said back to a "done" line, which takes back only what that
-        // line said, or asks, as any take-back said back to it does.
+        // a memory, the catch-up he cleared or what was done to tidy a thread, nor in what may all be yapd's own words said back to a "done"
+        // line, which take back only what that line said, or ask, as any take-back of them does.
         const undone = decided.situation.desk.threads.find(({ handle }) => handle === decision.target)
         // One yapd archived, by its handle in ARCHIVED, is never the question's.
         const ours =
           undone === undefined ? Option.isNone(Brain.archivedBy(decision.target, decided.situation)) : opened.open.candidates.some((ref) => Threads.same(ref, undone.ref))
         const takenBack =
           ours &&
-          utterance.afterDone === undefined &&
+          !Brain.mayBeOwn(utterance) &&
           ((decision.act === "undo" && decision.how !== "reminder" && decision.how !== "memory" && decision.how !== "catchup" && decision.how !== "tidy") ||
             (decision.act === "dismiss" && Brain.takesBack(utterance.heard)))
         const open = takenBack ? withdrawing(opened.open) : opened.open

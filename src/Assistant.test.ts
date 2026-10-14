@@ -2411,7 +2411,7 @@ describe("Assistant", () => {
     }
   })
 
-  test("a take-back said back to a done line never withdraws a message he dictated as the answer to a part of a question: it reaches what that line said, or asks", async () => {
+  test("a take-back said back to a done line in what may all be yapd's own words never withdraws a message he dictated as the answer to a part of a question: it reaches what that line said, or asks", async () => {
     const cloud = waitingOn({ id: "q1", kind: "user_input" })
     const result = await run(
       Effect.gen(function* () {
@@ -2436,6 +2436,35 @@ describe("Assistant", () => {
       }),
     )
     expect(result).toEqual(["Noted, sir. And last: Which test extras should run? Any of Alpha, Beta and Gamma?", "Take back the message to Migrate Tezos Integration, sir?"])
+  })
+
+  test("his own take-back, after a pause, of a message he dictated as the answer to a part of a question, said back to a done line, withdraws it from the question", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(
+          (situation) => {
+            const { heard } = situation.utterance
+            if (heard.startsWith("Tell the Tesla")) return tezosMessage("high")(situation)
+            if (heard.endsWith("Take back what I told the cloud one.")) return Brain.decision({ act: "undo", target: handle(situation, cloud), sure: "high" })
+            return Brain.decision({ act: "send", target: handle(situation, cloud), text: "Hold off on the deploy until I've checked the fees.", how: "now" })
+          },
+          undefined,
+          { others: [cloud], items: card("q1", [colour, extras]) },
+        )
+        yield* made.dictate("Tell the Tesla's migration to use the fee table from the Mina work.")
+        const sent = made.notices().findLast(({ kind }) => kind === "done")
+        yield* asked(made, cloud)
+        yield* made.answer("Later.")
+        yield* made.dictate("Tell the cloud one: hold off on the deploy until I've checked the fees.")
+        yield* made.followUp("On it. Take back what I told the cloud one.", 2, sent, sent?.spoken, "Take back what I told the cloud one.", undefined, true)
+        return { sent: made.dispatched.filter(({ type }) => type === "message.dispatch").length, after: made.spoken().slice(4) }
+      }),
+    )
+    expect(result).toEqual({
+      sent: 1,
+      after: ["Withdrawn, sir.", "Here are the two questions on Cloud deployment discovery, sir. First: Which colour should the test use? Red or Blue? I'd go with Blue."],
+    })
   })
 
   test("a message said over a question that can't go as its answer, to a form that takes only its options or as T3 Code takes a message, goes in the queue behind it, and the question is asked again after", async () => {
