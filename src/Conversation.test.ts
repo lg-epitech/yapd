@@ -2642,6 +2642,30 @@ describe("A line listened to from its end", () => {
     expect(await after(true)).toEqual({ transcribed: ["the Tezos migration. No."], offered: [{ heard: "the Tezos migration. No.", echo: spoken }], done: true })
   })
 
+  test("'Mute.' run into by yapd's own last words turns yapd off with nothing worked out, however early its own voice began", async () => {
+    const spoken = "On it, sir: the Tezos migration."
+    const muted = (from: number) =>
+      overHelperScoped(
+        Effect.gen(function* () {
+          const helper = yield* overHelper([[0.9, "the Tezos migration."], [0.95, "Mute."]], { answer: true, after: true, off: true, wait: Conversation.linger, spoken, duration: 2.5 })
+          // Its own voice gets into the microphone from `from` into the line until it ends, and he says it right after.
+          yield* helper.wait(from)
+          yield* helper.talk(0.9, 10)
+          yield* helper.wait(2.5 - from)
+          yield* helper.finish
+          yield* helper.wait(0.2)
+          yield* helper.talk(0.95, 10)
+          yield* helper.quiet
+          yield* helper.wait(0.1)
+          return { offs: helper.offs(), transcribed: helper.transcribed, offered: helper.offered, done: Option.isSome(yield* Fiber.poll(helper.fiber)) }
+        }),
+      )
+    const off = { offs: 1, transcribed: ["the Tezos migration. Mute."], offered: [], done: true }
+    expect(await muted(0.3)).toEqual(off)
+    // Begun over its last moment, it's acted on as soon as it's made out, as over any line.
+    expect(await muted(2.1)).toEqual(off)
+  })
+
   test("'Mute.' begun over its last second, before its last moment, and still going as it ends, turns yapd off with nothing worked out", async () => {
     const result = await overHelperScoped(
       Effect.gen(function* () {

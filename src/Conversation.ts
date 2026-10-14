@@ -278,6 +278,26 @@ const trailing = (heard: string, line: string) => {
   return said.length > 0 && said.length <= own.length && said.every((word, at) => word === own[own.length - said.length + at])
 }
 
+/**
+ * What was heard after the last words of `line` it began with, as it's
+ * written: what came once yapd's own voice had ended, so none of it is
+ * yapd's, like the "Mute." of "the Tezos migration. Mute.". None when it
+ * didn't begin with them, as words compare, symbols and all, or when
+ * they're said earlier in the line too, so they may not have been its
+ * last, like the "on" of "On it, sir: … runs on.".
+ */
+const beyond = (heard: string, line: string) => {
+  const said = Array.from(heard.matchAll(/\S+/gu), (word) => ({ word: worded(word[0]), end: word.index + word[0].length })).filter(({ word }) => word !== "")
+  const own = worded(line).split(" ").filter((word) => word !== "")
+  for (let length = Math.min(said.length, own.length); length > 0; length--) {
+    const last = own.slice(own.length - length)
+    if (!said.slice(0, length).every(({ word }, at) => word === last[at])) continue
+    const earlier = own.some((_, at) => at < own.length - length && last.every((word, offset) => own[at + offset] === word))
+    return earlier ? undefined : heard.slice(said[length - 1]!.end).trim()
+  }
+  return undefined
+}
+
 /** Seconds either side of when the user began that what yapd was saying is given with what he said, since where each word falls in a line is only guessed. */
 const reach = 4
 
@@ -433,9 +453,13 @@ export const make = (options: {
      * Whether what he said is his emergency off, with nothing to work out of
      * it, wherever he said it: only not when what yapd was saying around
      * when he began, while its own voice could still get into the
-     * microphone, was about muting, as that "mute" may be its own.
+     * microphone, was about muting, as that "mute" may be its own. With
+     * `own`, a line said to the end that its own voice may have run on from
+     * into what he said, it's also what he said after its last words alone,
+     * like the "Mute." of "the Tezos migration. Mute.".
      */
-    const halted = (heard: string, echo: string | undefined) => options.off !== undefined && halts(heard) && !/mute/i.test(echo ?? "")
+    const halted = (heard: string, echo: string | undefined, own?: string) =>
+      options.off !== undefined && !/mute/i.test(echo ?? "") && (halts(heard) || (own !== undefined && halts(beyond(heard, own) ?? "")))
 
     /** Once something waits to be said next, if that's ever known. */
     const queued = options.queued ?? Effect.never
@@ -725,7 +749,8 @@ export const make = (options: {
                   Effect.timeout(over === undefined ? outburst : Math.max(0, over + outburst - ended)),
                   Effect.orElseSucceed(() => ""),
                 )
-                if (halted(heard, echo)) {
+                // With yapd's own voice maybe in it, "Mute." said after the line's last words is too.
+                if (halted(heard, echo, echo === undefined ? undefined : text)) {
                   // Its voice ends at once, never waiting on all turning off does first. Should yapd stay on, it's a stop.
                   yield* playback.stop
                   yield* options.off
@@ -1013,9 +1038,11 @@ export const make = (options: {
      * colleague walking in, doesn't hide it. Never after what trailed off
      * into it, like "Can you…" then "mute.", which mutes something, unless
      * what came before the pause was longer than "Mute." could be, like a
-     * TV's talk. Unless it trails off itself, it's given back at once, never
-     * waiting on whether he carries on. Once working it out takes more than
-     * a moment, a tick tells him he was heard.
+     * TV's talk. When yapd's own voice ran on into it from `own`, a line
+     * said to the end, "Mute." said after its last words is too. Unless it
+     * trails off itself, it's given back at once, never waiting on whether
+     * he carries on. Once working it out takes more than a moment, a tick
+     * tells him he was heard.
      */
     const settle = <R>(
       ear: Ear,
@@ -1025,6 +1052,7 @@ export const make = (options: {
       hesitates: boolean,
       echo: string | undefined,
       respond: (heard: string, voiced: number, afterPause: string, halt: boolean) => Effect.Effect<R>,
+      own?: string,
     ) =>
       Effect.gen(function* () {
         const until = (yield* Clock.currentTimeMillis) + rambling
@@ -1032,7 +1060,7 @@ export const make = (options: {
         let speech = voiced(audio)
         /** All he said once he carried on after `first`, kept apart so it can be told it's surely his. */
         let afterPause = ""
-        let halt = halted(first, echo)
+        let halt = halted(first, echo, own)
         /** Between an onset and the end of what he said, while a reply is worked out. */
         let speaking = false
         /** When the tick played, by the clock: once at most, and what's heard right after may be it. */
@@ -1126,7 +1154,7 @@ export const make = (options: {
           if (after !== "") {
             const lead = speech
             speech += voiced(more)
-            halt = halted(heard, echo) || ((!unfinished(before) || lead > curt) && halted(after, undefined))
+            halt = halted(heard, echo, own) || ((!unfinished(before) || lead > curt) && halted(after, undefined))
           }
         }
       })
@@ -1597,13 +1625,23 @@ export const make = (options: {
           // What it hadn't said yet when he began, a moment before, so what he could have heard of it is known, like a question's options:
           // never from where it stopped, which takes him for having heard what it said as he was already talking. Nothing once all of it was.
           const left = outcome.at < outcome.duration ? unsaid(said.spoken, Math.max(0, outcome.onset - reaction) / outcome.duration) : ""
+          /** Run on from its own voice as it ended, the line whose last words are all there may be of yapd's own in what he said. */
+          const own = outcome.carried === true ? said.spoken : undefined
           const settled =
             itself || first === ""
               ? undefined
-              : yield* settle(outcome.ear, first, outcome.audio, hear, !unsure, echo, (heard, voiced, afterPause, halt) =>
-                  halt
-                    ? Effect.succeed(Option.none<Effect.Effect<void>>())
-                    : respond(heard, voiced, echo, echo === undefined || afterPause === "" ? undefined : afterPause, left === "" ? undefined : left),
+              : yield* settle(
+                  outcome.ear,
+                  first,
+                  outcome.audio,
+                  hear,
+                  !unsure,
+                  echo,
+                  (heard, voiced, afterPause, halt) =>
+                    halt
+                      ? Effect.succeed(Option.none<Effect.Effect<void>>())
+                      : respond(heard, voiced, echo, echo === undefined || afterPause === "" ? undefined : afterPause, left === "" ? undefined : left),
+                  own,
                 )
           if (settled !== undefined) yield* Effect.logInfo(heardLine(settled.heard))
           // "Mute." turns yapd off at once, which cuts this off: it's no answer, nor anything to follow up. Should yapd stay on, nothing came of it.
