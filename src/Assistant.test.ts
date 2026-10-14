@@ -11220,6 +11220,65 @@ describe("Assistant muting", () => {
     expect(result.messages).toBe(1)
   })
 
+  test("a yes to taking back a mute, asked by what it did, takes back that mute alone: once another is made since, like from the menu, nothing is, and he's told it changed", async () => {
+    const said = (menu: boolean) =>
+      run(
+        Effect.gen(function* () {
+          const { dictate, followUp, answer, notices, questions, spoken, mutes, wait } = yield* assistant(
+            (situation) =>
+              situation.utterance.heard.startsWith("Mute")
+                ? Brain.decision({ act: "mute", how: "mute", target: handle(situation, tezos), sure: "high" })
+                : // Its own "Muted …" heard as "No.", which the model takes for taking it back.
+                  Brain.decision({ act: "mute", how: "undo", sure: "high" }),
+            undefined,
+            { muting: true },
+          )
+          yield* dictate("Mute the Tezos one.")
+          const done = notices().findLast(({ kind }) => kind === "done")
+          yield* followUp("No.", 1, done, done?.spoken, undefined, undefined, true)
+          const asked = questions().map(({ spoken }) => spoken)
+          yield* wait(10)
+          if (menu) yield* mutes!.mute({ key: `t3:Rosie:${mina.id}`, called: "the Mina tickets" })
+          yield* answer("Yes.")
+          return { asked, said: spoken().at(-1), muted: yield* keys(mutes) }
+        }),
+      )
+    expect(await said(false)).toEqual({ asked: ["Unmute Migrate Tezos Integration, sir?"], said: "Unmuted it again, sir.", muted: [] })
+    expect(await said(true)).toEqual({
+      asked: ["Unmute Migrate Tezos Integration, sir?"],
+      said: "That's changed since, sir.",
+      muted: [`t3:Rosie:${tezos.id}`, `t3:Rosie:${mina.id}`],
+    })
+  })
+
+  test("a yes to taking back a mode, asked by what it did, takes back that mode alone: once he's asked for another change since, like shorter updates over an update, nothing is", async () => {
+    const said = (since: boolean) =>
+      run(
+        Effect.gen(function* () {
+          const { dictate, followUp, answer, notices, questions, spoken, modes, wait } = yield* assistant(
+            (situation) =>
+              situation.utterance.heard.startsWith("Focus")
+                ? Brain.decision({ act: "mode", how: "focus", when: "for two hours" })
+                : // Its own "Only what needs you …" heard as "No.", which the model takes for taking it back.
+                  Brain.decision({ act: "mode", how: "undo", sure: "high" }),
+            undefined,
+            { modes: true },
+          )
+          yield* dictate("Focus for two hours.")
+          const done = notices().findLast(({ kind }) => kind === "done")
+          yield* followUp("No.", 1, done, done?.spoken, undefined, undefined, true)
+          const asked = questions().map(({ spoken }) => spoken)
+          yield* wait(10)
+          if (since) yield* modes!.setDetail("full", true)
+          yield* answer("Yes.")
+          const { mode, detail } = yield* modes!.current
+          return { asked, said: spoken().at(-1), mode: mode.mode, detail }
+        }),
+      )
+    expect(await said(false)).toEqual({ asked: ["Turn focus off, sir?"], said: "Back to normal, sir.", mode: "normal", detail: "brief" })
+    expect(await said(true)).toEqual({ asked: ["Turn focus off, sir?"], said: "That's changed since, sir.", mode: "focus", detail: "full" })
+  })
+
   test("what he missed of a muted thread is one line for the model, left out of a catch-up of everything and left unheard, and told when he asks about it by name", async () => {
     const result = await run(
       Effect.gen(function* () {
@@ -12096,6 +12155,33 @@ describe("Assistant catching up", () => {
       open: true,
     })
     expect(result.answers).toEqual([{ [colour.id]: message, [extras.id]: ["Alpha"] }])
+  })
+
+  test("a yes to bringing back the catch-up he cleared, asked by what it did, brings back that alone: once it's cleared from the menu since, nothing is", async () => {
+    const said = (menu: boolean) =>
+      run(
+        Effect.gen(function* () {
+          const made = yield* assistant((situation) =>
+            situation.utterance.heard.startsWith("Clear")
+              ? Brain.decision({ act: "catchup", how: "clear" })
+              : // Its own "Cleared …" heard as "No.", which the model takes for bringing it back.
+                Brain.decision({ act: "undo", how: "catchup", sure: "high" }),
+          )
+          yield* kept(made.journal, 90, tezos.id, "The Tezos migration is done.")
+          yield* made.dictate("Clear the catch-up.")
+          const done = made.notices().findLast(({ kind }) => kind === "done")
+          yield* made.followUp("No.", 1, done, done?.spoken, undefined, undefined, true)
+          const asked = made.questions().map(({ spoken }) => spoken)
+          yield* made.wait(10)
+          yield* kept(made.journal, 0, mina.id, "The Mina tickets are filed.")
+          if (menu) yield* made.clear
+          yield* made.answer("Yes.")
+          return { asked, said: made.spoken().at(-1), unheard: yield* unheard(made.journal) }
+        }),
+      )
+    const asked = ["Bring back the catch-up you just cleared, sir?"]
+    expect(await said(false)).toEqual({ asked, said: "Brought it back, sir.", unheard: ["The Tezos migration is done.", "The Mina tickets are filed."] })
+    expect(await said(true)).toEqual({ asked, said: "That's changed since, sir.", unheard: [] })
   })
 })
 

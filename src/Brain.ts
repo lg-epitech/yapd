@@ -309,7 +309,17 @@ export interface Plan {
    * between working out what he said and doing it.
    */
   readonly pinned?: string
+  /**
+   * For taking back a mute, a mode, a reminder, a memory or the catch-up
+   * the "done" line said he changed, said back to it: that change, by when
+   * it was made, which is all it takes back, and only while it's still the
+   * last of its kind, never one made since, like a mute from the menu.
+   */
+  readonly pinnedChange?: Made
 }
+
+/** A change he made to what's muted, how yapd talks, a reminder, a memory or the catch-up, by when it was made. */
+export type Made = Extract<Change, { readonly at: number }>
 
 /** What a decision comes to once checked: done, asked about, or answered with a reason. */
 export type Checked =
@@ -1284,6 +1294,9 @@ export const subagentLines = (lines: Lines, name: string) => {
     elsewhere: `Ask me that with the shortcut${sir}. Over an update, say read its subagents, or stop reading them.`,
   }
 }
+
+/** What's said when the change he said yes to taking back is no longer the last of its kind, like with a mute from the menu since: nothing is taken back. */
+export const changedSince = (lines: Lines) => `That's changed since${addressed(lines)}.`
 
 /** What's said once the last change to what's muted, or to whose subagents are read, is taken back, by what taking it back changed. */
 export const takenBack = (lines: Lines, undone: Option.Option<Mutes.Change>, now: number) => {
@@ -3421,9 +3434,16 @@ const answeredBack = (choice: Decision, situation: Situation, lines: Lines, goin
   )
 }
 
-/** Going ahead to take back a step, pinned to it by its command: that step alone, whatever's written since. */
-const pinning = (checked: Checked, reach: Reach): Checked =>
-  checked._tag !== "Do" || reach.row === undefined ? checked : { ...checked, plan: { ...checked.plan, pinned: reach.row.commandId } }
+/**
+ * Going ahead to take back a step, pinned to it by its command: that step
+ * alone, whatever's written since; or a change he made, pinned to it by
+ * when it was made: that change alone, while it's still the last of its kind.
+ */
+const pinning = (checked: Checked, reach: Reach): Checked => {
+  if (checked._tag !== "Do") return checked
+  if (reach.row !== undefined) return { ...checked, plan: { ...checked.plan, pinned: reach.row.commandId } }
+  return reach.change.what === "acted" ? checked : { ...checked, plan: { ...checked.plan, pinnedChange: reach.change } }
+}
 
 /** Whether he's replying to a "done" line saying yapd started work for him, which can't be taken back. */
 const startedBack = (situation: Situation) => startedBy(situation).length > 0
@@ -3457,9 +3477,10 @@ const startedHandles = (situation: Situation) => {
  * Asks him whether to take back what `reach` is, which isn't what the line
  * he's replying to said yapd changed, or is but more was done since, naming
  * it, as he `said` what he meant: his yes takes back that, and nothing else,
- * a step by its command. None for what taking back would only say can't be,
- * like new work, a message withdrawn already, or a stop when he means a
- * message.
+ * a step by its command, or a change by when it was made, which is nothing
+ * once another of its kind is made since. None for what taking back would
+ * only say can't be, like new work, a message withdrawn already, or a stop
+ * when he means a message.
  */
 const askingBack = (reach: Reach, situation: Situation, lines: Lines, said: Pick<Decision, "how" | "target">): Checked | undefined => {
   const back = takingBack(reach, situation, said)
@@ -3480,7 +3501,7 @@ const askingBack = (reach: Reach, situation: Situation, lines: Lines, said: Pick
       about: back.doing,
       material: Option.none(),
       resend: Option.none(),
-      ...(reach.row === undefined ? {} : { pinned: reach.row.commandId }),
+      ...(reach.row !== undefined ? { pinned: reach.row.commandId } : reach.change.what === "acted" ? {} : { pinnedChange: reach.change }),
     },
   }
 }

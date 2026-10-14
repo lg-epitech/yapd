@@ -318,6 +318,14 @@ export interface Open {
    */
   readonly pinned?: string
   /**
+   * For taking back a mute, a mode, a reminder, a memory or the catch-up he
+   * changed, asked about by what it did, like "Unmute the Tezos migration?":
+   * that change, by when it was made, which his yes takes back alone, and
+   * only while it's still the last of its kind, never one made since, like a
+   * mute from the menu.
+   */
+  readonly pinnedChange?: Brain.Made
+  /**
    * Asked of what may all be yapd's own words said back to a "done" line,
    * whether to stop a thread or take back a change: a yes does that alone,
    * never any rest the model gives his answer, which may be what it split off
@@ -537,6 +545,8 @@ interface Stepping {
   readonly working?: ReadonlyArray<Threads.Ref>
   /** For taking back the step he said yes to taking back, by its command: that step alone. */
   readonly pinned?: string
+  /** For taking back the change he said yes to taking back, or the one the "done" line said, by when it was made: that change alone. */
+  readonly pinnedChange?: Brain.Made
 }
 
 const quiet = (subject: Subject): Outcome => ({ say: "", subject, kind: "none" })
@@ -2606,11 +2616,12 @@ export const make = (options: {
             ),
           )
         }
-        // Taking back a step he was asked about by what it did is that step alone, whatever was done since.
+        // Taking back a step he was asked about by what it did is that step alone, whatever was done since, and a change, that change alone.
         return yield* follow(checked, { ...thought, decision }, said, {
           step: 0,
           twice: open.reminder === undefined,
           ...(agreed && open.pinned !== undefined ? { pinned: open.pinned } : {}),
+          ...(agreed && open.pinnedChange !== undefined ? { pinnedChange: open.pinnedChange } : {}),
         })
       }).pipe(Effect.map((outcome) => (open.alone === true ? unfinished(outcome, thought.decision.rest, said, thought.situation.desk) : outcome)))
 
@@ -3082,8 +3093,12 @@ export const make = (options: {
      * to what's muted, and says so, naming the thread only when it isn't
      * "it", which stays what "it" means. Never anything sent to a thread.
      * Only a line for what changed says what "scratch that" takes back.
+     * Taking back the change he said yes to taking back, or the one the
+     * "done" line said, `pinned`, is that change alone, while it's still the
+     * last: once another is made since, like from the menu, nothing is, and
+     * he's told it changed.
      */
-    const muting = (plan: Brain.Plan, thought: Thought, said: Lines) =>
+    const muting = (plan: Brain.Plan, thought: Thought, said: Lines, pinned?: Brain.Made) =>
       Effect.gen(function* () {
         const { decision } = plan
         const { controls } = options
@@ -3101,6 +3116,8 @@ export const make = (options: {
           return stays(Brain.muteLines(said, "it", now).cleared(cleared), yield* muteChanged(cleared))
         }
         if (decision.how === "undo") {
+          const last = options.mutes === undefined ? Option.none<Mutes.Change>() : yield* options.mutes.last
+          if (pinned !== undefined && (pinned.what !== "mute" || Option.exists(last, ({ at }) => at !== pinned.at))) return reply(Brain.changedSince(said), thought.subject)
           const undone = yield* controls.undo
           return stays(Brain.takenBack(said, undone, now), yield* muteChanged(Option.isSome(undone)))
         }
@@ -3187,9 +3204,12 @@ export const make = (options: {
      * full updates, or back to normal, which gives him what was held for
      * later at once, or takes back the last change he asked for, saying what's
      * on now. "It" stays what it was. Never anything sent to a thread. Each
-     * is what "scratch that" takes back next.
+     * is what "scratch that" takes back next. Taking back the change he said
+     * yes to taking back, or the one the "done" line said, `pinned`, is that
+     * change alone, while it's still the last he asked for: once another is
+     * made since, nothing is, and he's told it changed.
      */
-    const moding = (plan: Brain.Plan, thought: Thought, said: Lines) =>
+    const moding = (plan: Brain.Plan, thought: Thought, said: Lines, pinned?: Brain.Made) =>
       Effect.gen(function* () {
         const { modes } = options
         if (modes === undefined) return reply(Brain.notYet(said), thought.subject)
@@ -3219,6 +3239,8 @@ export const make = (options: {
             return yield* stays(how === "brief" ? told.brief : told.full, was !== how)
           }
           case "undo": {
+            const last = yield* modes.last
+            if (pinned !== undefined && (pinned.what !== "mode" || Option.exists(last, ({ at }) => at !== pinned.at))) return reply(Brain.changedSince(said), thought.subject)
             const undone = yield* modes.undo
             return yield* stays(Brain.modeTakenBack(said, undone, now), Option.isSome(undone))
           }
@@ -3815,7 +3837,11 @@ export const make = (options: {
      * a handle that's neither is nothing taken back, never one of another
      * thread. Every thread a tidy did is taken back, with none named, for
      * "scratch that" or when the model's sure he means that, never on a
-     * guess, which would tidy threads he didn't ask about.
+     * guess, which would tidy threads he didn't ask about. The change he said
+     * yes to taking back, or the one the "done" line said, is that change
+     * alone, while it's still the last of its kind: once another is made
+     * since, like the catch-up cleared from the menu, nothing is, and he's
+     * told it changed.
      */
     const undoing = (plan: Brain.Plan, thought: Thought, said: Lines, at: Stepping): Effect.Effect<Outcome> =>
       Effect.gen(function* () {
@@ -3824,6 +3850,11 @@ export const make = (options: {
         const handle = plan.decision.target.trim()
         const unsure = () => unfinished(reply(said.cantTell, thought.subject), plan.decision.rest, said, situation.desk)
         const unnamed = handle === "" && Option.isNone(plan.target)
+        const pinned = at.pinnedChange
+        if (pinned?.what === "noted" && noted !== undefined && noted.at !== pinned.at) {
+          const outcome = reply(Brain.changedSince(said), thought.subject)
+          return yield* onward(thought, outcome, Brain.about(outcome.subject), at.step + 1, said)
+        }
         if (taking === "thread") return plan.decision.how === "tidy" && unnamed && plan.decision.sure !== "high" ? unsure() : yield* write(plan, thought, said, at)
         const archived = taking === "reminder" ? Brain.archivedBy(handle, situation) : Option.none()
         // The thread he named, on the desk, even one taken for filled in for a reminder of none, or in ARCHIVED.
@@ -3863,11 +3894,11 @@ export const make = (options: {
         }
         if (latest === "mute" && options.controls !== undefined) {
           const mute = { ...plan, decision: { ...plan.decision, act: "mute" as const, how: "undo" } }
-          return yield* Effect.flatMap(muting(mute, thought, said), (outcome) => onward(thought, outcome, Brain.about(outcome.subject), at.step + 1, said))
+          return yield* Effect.flatMap(muting(mute, thought, said, pinned), (outcome) => onward(thought, outcome, Brain.about(outcome.subject), at.step + 1, said))
         }
         if (latest === "mode" && options.modes !== undefined) {
           const mode = { ...plan, decision: { ...plan.decision, act: "mode" as const, how: "undo" } }
-          return yield* Effect.flatMap(moding(mode, thought, said), (outcome) => onward(thought, outcome, Brain.about(outcome.subject), at.step + 1, said))
+          return yield* Effect.flatMap(moding(mode, thought, said, pinned), (outcome) => onward(thought, outcome, Brain.about(outcome.subject), at.step + 1, said))
         }
         // Every thread a tidy just did, only when the model's sure he means all of it, as for "scratch that": never on a guess.
         if (latest === "acted" && Option.exists(situation.acted, ({ kind }) => kind === "tidy") && plan.decision.sure !== "high") return unsure()
@@ -3969,9 +4000,9 @@ export const make = (options: {
         case "start":
           return start(thought, said, at.step)
         case "mute":
-          return Effect.flatMap(muting(plan, thought, said), (outcome) => onward(thought, outcome, Brain.about(outcome.subject), at.step + 1, said))
+          return Effect.flatMap(muting(plan, thought, said, at.pinnedChange), (outcome) => onward(thought, outcome, Brain.about(outcome.subject), at.step + 1, said))
         case "mode":
-          return Effect.flatMap(moding(plan, thought, said), (outcome) => onward(thought, outcome, Brain.about(outcome.subject), at.step + 1, said))
+          return Effect.flatMap(moding(plan, thought, said, at.pinnedChange), (outcome) => onward(thought, outcome, Brain.about(outcome.subject), at.step + 1, said))
         case "catchup":
           return Effect.flatMap(catchup(plan, thought, said), (outcome) => onward(thought, outcome, Brain.about(outcome.subject), at.step + 1, said))
         case "show": {
@@ -4028,8 +4059,13 @@ export const make = (options: {
           if (echoed && checked.plan.decision.act === "resume") {
             return Effect.as(Effect.logInfo(`Not acting on it, since ${quoted(thought.utterance.heard)} may have been my own voice`), quiet(thought.subject))
           }
-          // Taking back the step a "done" line said, said back to it, is that step alone, whatever's written before it's done.
-          return perform(checked.plan, thought, said, checked.plan.pinned === undefined ? at : { ...at, pinned: checked.plan.pinned })
+          // Taking back the step a "done" line said, said back to it, is that step alone, whatever's written before it's done, and the change
+          // it said, that change alone.
+          return perform(checked.plan, thought, said, {
+            ...at,
+            ...(checked.plan.pinned === undefined ? {} : { pinned: checked.plan.pinned }),
+            ...(checked.plan.pinnedChange === undefined ? {} : { pinnedChange: checked.plan.pinnedChange }),
+          })
       }
     }
 
