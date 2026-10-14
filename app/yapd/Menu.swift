@@ -63,6 +63,8 @@ struct Menu: Equatable {
     var hidden = false
     /// The line said under its title, as a reminder's time.
     var detail: String?
+    /// What shows as the pointer rests on it, as all of a reminder, which its title and the line under it may cut short.
+    var tip: String?
 
     fileprivate static func line(_ id: String, _ title: String) -> Item {
       Item(id: id, kind: .line, title: title, enabled: false)
@@ -135,12 +137,12 @@ struct Menu: Equatable {
     items.append(Item(id: "show last", kind: .action(.showLast), title: "Show Last Card", enabled: last))
     // His reminders, set by voice, each with Cancel beside it, as "cancel the bank reminder" does, with no asking first: "scratch
     // that" by voice keeps it again. It works while yapd is off too, and the list drops one as the state says so. There with none
-    // too, so the item never comes and goes. yapd's refusal of the last one he chose to cancel, as one that went off just before,
-    // is said under Reminders, in its words.
+    // too, so the item never comes and goes. Each is all there as the pointer rests on it, however long, and yapd's refusal of
+    // the last one he chose to cancel, as one that went off just before, is said under Reminders, in its words.
     if let reminders = state.reminders {
       let rows = reminders.map { reminder in
         let cancel = Item(id: "reminder \(reminder.id) cancel", kind: .action(.cancel(reminder)), title: "Cancel", enabled: true)
-        return Item(id: "reminder \(reminder.id)", kind: .submenu([cancel]), title: reminder.label, enabled: true, detail: reminder.detail)
+        return Item(id: "reminder \(reminder.id)", kind: .submenu([cancel]), title: reminder.label, enabled: true, detail: reminder.detail, tip: reminder.whole)
       }
       let list = rows.isEmpty ? [Item.line("no reminders", "No Reminders")] : rows
       items.append(Item(id: "reminders", kind: .submenu(list), title: "Reminders", enabled: true, detail: refused))

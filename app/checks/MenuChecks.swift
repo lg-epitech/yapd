@@ -31,9 +31,9 @@ import Foundation
 /// Clear Catch-Up under Catch Me Up, and the recent rows opening a panel each instead of the Mute menu, which offers hearing the
 /// thread again, muting it, for an hour too, or taking the mute off, a subagent's its own, or saying it's muted with the thread
 /// it's part of, having its subagents read, checked while they are, on a T3 Code thread's, a subagent's by the thread it's part
-/// of, and its pull request when it has an https one, and lists his reminders, each to cancel, while yapd is off too, one gone
-/// while it's open turned off where it is, and yapd's refusal of the last he chose to cancel under them; and it keeps each item
-/// by an id from one state to the next, so the open menu changes in place.
+/// of, and its pull request when it has an https one, and lists his reminders, each to cancel, while yapd is off too, all of each
+/// as the pointer rests on it, one gone while it's open turned off where it is, and yapd's refusal of the last he chose to cancel
+/// under them; and it keeps each item by an id from one state to the next, so the open menu changes in place.
 @MainActor func checkMenu() {
   let decoded = { (json: String) in try? JSONDecoder().decode(Status.self, from: Data(json.utf8)) }
   let utc = TimeZone(identifier: "UTC")!
@@ -214,6 +214,9 @@ import Foundation
   let nested = menu(reminding(true, set), true).all.map(\.id)
   check(Set(nested).count == nested.count, "names each item once, its reminders' and their Cancel too, not \(nested)")
   check(nested == menu(reminding(false, set), true).all.map(\.id), "keeps each reminder as one item, on or off, so the open menu changes it in place")
+  // All of each as the pointer rests on it, what's cut short of a long one too, over when; never its id.
+  let tips = menu(reminding(true, set), true).all.filter { $0.id.hasPrefix("reminder ") }.map(\.tip)
+  check(tips == ["Call the bank\nAt 3:00 PM", nil, "When the Mina tickets on rig asks you something", nil, "\(offer)\nTomorrow at 9:00 AM", nil], "shows all of each reminder as the pointer rests on it, not \(tips)")
   // Gone while the menu's open, as one that went off, a reminder and its Cancel are turned off where they are, and nothing else is,
   // nor anything that came.
   let opened = menu(reminding(true, set), true).all.map(\.id)

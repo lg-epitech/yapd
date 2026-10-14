@@ -214,7 +214,7 @@ describe.skipIf(swiftc === undefined)("App", () => {
   )
 
   test(
-    "the menu shows everything it did, in the same order and turned on and off by the same rules, with a panel beside each recent thread instead of the Mute menu, to hear it again, mute it, for an hour too, or take the mute off, and have its subagents read, lists his reminders to cancel each by its id, one gone while it's open turned off where it is and yapd's refusal said the next time it opens, and keeps each item by an id, so the open menu changes in place",
+    "the menu shows everything it did, in the same order and turned on and off by the same rules, with a panel beside each recent thread instead of the Mute menu, to hear it again, mute it, for an hour too, or take the mute off, and have its subagents read, lists his reminders to cancel each by its id, all of each on hover, one gone while it's open turned off where it is and yapd's refusal said the next time it opens, and keeps each item by an id, so the open menu changes in place",
     async () => {
       expect(await run("menu")).toEqual({ code: 0, out: "The app's checks pass.\n" })
       // What the checks cover is what the menu bar draws: the menu and each panel are only ever built from Menu, and what's chosen does what the
@@ -237,11 +237,12 @@ describe.skipIf(swiftc === undefined)("App", () => {
       expect(yapd).toMatch(/func cancel\(_ reminder: Status\.Reminder\) \{\s*guard let request = request\(Cancelling\(reminder\)\) else \{ return \}/)
       expect(yapd).not.toMatch(/reminders\//)
       // yapd's refusal is read as the checks read it, and said under Reminders as the menu next opens, from then until it closes, never as it
-      // comes while it's open, so nothing moves under his pointer, then let go.
+      // comes while it's open, so nothing moves under his pointer, then let go. All of a reminder shows as the pointer rests on it.
       expect(yapd).toMatch(/guard let \(body, response\) = try\? await URLSession\.shared\.data\(for: request\) else \{ return \}\s*refused = Cancelling\.refusal\(body, response\)/)
       expect(bar.match(/yapd\.refused/g)).toEqual(["yapd.refused"])
       expect(bar).toMatch(/private func build\(\) \{\s*refused = yapd\.refused\s/)
       expect(bar).toMatch(/if let refused \{ yapd\.shown\(refused\) \}\s*refused = nil\s*\}/)
+      expect(bar).toMatch(/made\.toolTip = item\.tip/)
       // A reminder gone while the menu is open, and its Cancel, are turned off where they are, as the checks check, and nothing else is.
       expect(bar.match(/isEnabled = false[^\n]*/g)).toEqual(["isEnabled = false }"])
       expect(bar).toMatch(/for id in model\.gone\(made\.keys\) \{ made\[id\]\?\.isEnabled = false \}/)

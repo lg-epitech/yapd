@@ -176,6 +176,12 @@ struct Status: Decodable {
       text.isEmpty ? nil : Reminder.cut(when)
     }
 
+    /// All of it, uncut, shown as he hovers over it, so he can read the whole of a long one before cancelling it: what it's to
+    /// tell him, if anything, over when.
+    var whole: String {
+      text.isEmpty ? when : "\(text)\n\(when)"
+    }
+
     /// Cut short when it's long, as a recent row's label is.
     private static func cut(_ line: String) -> String {
       line.count > 60 ? "\(line.prefix(59))…" : line

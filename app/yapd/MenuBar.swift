@@ -211,6 +211,7 @@ final class MenuBar: NSObject, NSMenuDelegate {
     } else if let detail = item.detail {
       made.title = "\(item.title) · \(detail)"
     }
+    made.toolTip = item.tip
     made.isEnabled = item.enabled
     made.isHidden = item.hidden
     made.state = item.checked ? .on : .off
