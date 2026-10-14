@@ -7263,6 +7263,54 @@ describe("Daemon handing over what's yapd's to do", () => {
     expect(late.played).toEqual(["yapd. Okay, passed on.", "I left that: And tell it to rebase."])
   })
 
+  test("over a hooked Tezos update, a follow-up to what a handoff answered, and something new said back to what it asked, never reach its thread through T3 Code", async () => {
+    /** He hands `said` over a hooked Tezos update, as the model takes it, then says `then` back to what came of it. */
+    const followed = (said: string, then: string, model: (situation: Brain.Situation) => Brain.Decision) =>
+      run(
+        Effect.gen(function* () {
+          const t3 = yield* handing
+          const { handle, talk, wait, nextEvent, nextPlayback, played, followUps } = yield* assisted(
+            model,
+            {
+              says: said,
+              transcripts: [said, then],
+              hands: t3.hands,
+              t3,
+              link: () => Effect.succeedSome({ machine: "Rosie", id: "t-tezos" }),
+              handsOver: () => true,
+              handing: {},
+            },
+            [tezos(), minaThread()],
+          )
+          yield* tezosStop(handle, true)
+          yield* nextEvent("Ready:")
+          yield* nextPlayback
+          yield* talk
+          for (let second = 0; second < 3; second++) yield* wait(1)
+          yield* talk
+          for (let second = 0; second < 30; second++) yield* wait(1)
+          return { sent: t3.sent(), relayed: [...followUps].filter((line) => line.includes("sent:")), played: [...played].slice(1) }
+        }),
+      )
+    const rebase = (situation: Brain.Situation) => Brain.decision({ act: "send", target: handleOf(situation, "t-tezos"), text: "Rebase onto master." })
+    // Told how it's doing, "tell it to rebase" over the answer is left, its hook still waiting.
+    const answered = await followed("How's it doing?", "Tell it to rebase.", (situation) =>
+      situation.utterance.heard === "How's it doing?" ? Brain.decision({ act: "answer", target: handleOf(situation, "t-tezos"), spoken: "It compiles." }) : rebase(situation),
+    )
+    expect(answered.played).toEqual(["It compiles.", "I left that: Tell it to rebase."])
+    expect(answered.sent).toEqual([])
+    expect(answered.relayed).toEqual([])
+    // Asked which, a message to it instead is something new, left too.
+    const asked = await followed("Tell the migration one to wait.", "No, tell it to rebase.", (situation) =>
+      situation.utterance.heard === "No, tell it to rebase."
+        ? rebase(situation)
+        : Brain.decision({ act: "send", target: handleOf(situation, "t-mina"), others: handleOf(situation, "t-tezos"), sure: "low", text: "Wait." }),
+    )
+    expect(asked.played).toEqual(["Open the Mina SSV2 bug tickets or Migrate Tezos Integration?", "I left that: No, tell it to rebase."])
+    expect(asked.sent).toEqual([])
+    expect(asked.relayed).toEqual([])
+  })
+
   test("'scratch that' handed over after the 'On it' of a message passed through a hook, with a dictation's message to Mina sent a minute before, takes nothing back without asking, and asks about Mina's by name; after one yapd sent itself, it takes back that message alone", async () => {
     const scratched = (hooked: boolean) =>
       run(

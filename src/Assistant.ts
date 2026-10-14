@@ -4513,6 +4513,9 @@ export const make = (options: {
           turns,
           ...over,
           ...(unsaid === undefined || unsaid === "" ? {} : { unsaid }),
+          // Asked of what was said over an update, anything said back to it, an answer or something new, is held to that update's own
+          // thread as what it asked of was: never written to by yapd's own hand unless that's steered.
+          ...(open.own === undefined ? {} : { own: open.own }),
         }
         /**
          * What it asked was dealt with in T3 Code meanwhile, so a late answer to
@@ -4563,7 +4566,9 @@ export const make = (options: {
      * and when it says one that "scratch that" reaches, the model is told
      * so, run on into it or not, and what's too faint to take is logged as
      * said after what it did, so how often that's let go can be counted, as
-     * is what may all be yapd's own words let go without the model.
+     * is what may all be yapd's own words let go without the model. Said of
+     * what he said over an update, `own` is that update's own thread, which
+     * nothing he says back writes to by yapd's own hand unless it's steered.
      */
     const followUp =
       (about: Subject, line: Effect.Effect<string>, done?: Brain.Done, own?: Brain.Own) =>
@@ -4648,7 +4653,7 @@ export const make = (options: {
      */
     const deliver = (outcome: Outcome, of: Thought | Utterance | Pick<Utterance, "id" | "turns">, handoff?: Handoff): Effect.Effect<void> =>
       Effect.gen(function* () {
-        const utterance = "utterance" in of ? of.utterance : of
+        const utterance: Pick<Utterance, "id" | "turns" | "own"> = "utterance" in of ? of.utterance : of
         if (outcome.say === "") return
         // Of a request held back as a secret, as note has it, or said again of one, what's said is said, but kept and logged nowhere,
         // whatever its words: the model's answer may give the secret away in words nothing recognises as one.
@@ -4716,6 +4721,9 @@ export const make = (options: {
           reworded = true
         })
         const kind = open !== undefined ? "question" : outcome.kind === "done" ? "done" : "answer"
+        // Of what was said over an update, a follow-up to what came of it is held to that update's own thread as that was: never written
+        // to by yapd's own hand unless it's steered, while its hook may still wait.
+        const { own } = utterance
         yield* options.tell(
           {
             id: mint(at, "a"),
@@ -4785,13 +4793,14 @@ export const make = (options: {
             ...(outcome.unsent === true
               ? {}
               : kind === "answer"
-              ? { followUp: followUp(subject, Effect.sync(() => (reworded && instead !== undefined ? instead : outcome.say))) }
+              ? { followUp: followUp(subject, Effect.sync(() => (reworded && instead !== undefined ? instead : outcome.say)), undefined, own) }
               : kind === "done"
                 ? {
                     followUp: followUp(
                       subject,
                       Effect.sync(() => (reworded && instead !== undefined ? instead : outcome.say)),
                       outcome.changed === undefined ? {} : { change: outcome.changed },
+                      own,
                     ),
                     window: Conversation.linger,
                     after: true as const,
