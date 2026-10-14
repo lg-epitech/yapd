@@ -2880,11 +2880,11 @@ describe("Responder", () => {
     }
     const told = Responder.prompt({ ...interruption, echo: "Over in yapd, the tests pass now" }, Option.none())
     expect(told).toContain(
-      `They began while your own voice could still get into their microphone, so what was heard may start with your own words, from around "Over in yapd, the tests pass now", misheard or not, and their first word may be lost under yours. Words that sound like yours there are yours, however they came out, like "Code up." for "Claude on": take them all out, and never put them in the message or turn them into words of theirs. If nothing surely theirs is left, it's "resume", never "dismiss".`,
+      `They began while your own voice could still get into their microphone, so what was heard may start with your own words, from around "Over in yapd, the tests pass now", misheard or not, and their first word may be lost under yours. Words that sound like yours there are yours, however they came out, like "Code up." for "Claude on": take them all out, and never put them in the message or turn them into words of theirs. A request or a question made of your words with a word or two around them, like "Stop the tests." over your "the tests are" or "Who's done?" over your "is done", may be all yours, misheard: it isn't surely theirs. If nothing surely theirs is left, it's "resume", never "dismiss", "answer" or "send".`,
     )
-    expect(told).toContain(`If a message for the agent sounds cut off, or hangs on a word that may be yours, don't send it: make it "answer", asking them in a few words to say it again. A question or a dismissal goes as usual.`)
+    expect(told).toContain(`If a message for the agent sounds cut off, or hangs on a word that may be yours, don't send it: make it "answer", asking them in a few words to say it again. Once something surely theirs is left, a question or a dismissal goes as usual.`)
     // Just before what he said, which still ends it.
-    expect(told.endsWith(`say it again. A question or a dismissal goes as usual.\n\nWhat the user just said:\nrevert it.`)).toBe(true)
+    expect(told.endsWith(`say it again. Once something surely theirs is left, a question or a dismissal goes as usual.\n\nWhat the user just said:\nrevert it.`)).toBe(true)
     // Begun once its own voice could no longer get in, nothing's said of it.
     expect(Responder.prompt(interruption, Option.none())).not.toContain("your own voice")
   })
@@ -2929,7 +2929,7 @@ describe("Responder", () => {
     const told = Responder.prompt({ ...interruption, echo: "The PR is ready.", afterPause: "Merge it." }, Option.none())
     expect(told).toContain(sentence)
     // In the note on its own voice, just before what he said, which still ends it, all of it.
-    expect(told.endsWith(`A question or a dismissal goes as usual. ${sentence}\n\nWhat the user just said:\nReady. Merge it.`)).toBe(true)
+    expect(told.endsWith(`a question or a dismissal goes as usual. ${sentence}\n\nWhat the user just said:\nReady. Merge it.`)).toBe(true)
     // Without a pause, or without the note, nothing's said of it.
     expect(Responder.prompt({ ...interruption, echo: "The PR is ready." }, Option.none())).not.toContain("after a pause")
     expect(Responder.prompt({ ...interruption, echo: "The PR is ready.", afterPause: "" }, Option.none())).not.toContain("after a pause")
@@ -3113,18 +3113,23 @@ describe("more, and how yapd talks, over an update", () => {
 
   test("what's yapd's to do over an update, how it talks, catching up and tidying a thread included, is handed to it, never sent; mutes, subagents and memories keep the shortcut's line; and what's for this agent is never handed over", () => {
     const prompt = Responder.prompt(over("Let me focus till three."), Option.none())
-    const handed = `- "assistant" if it's for you to do, not this agent: anything about another thread or agent`
+    const handed = `- "assistant" if it's for you to do, not this agent. This update is one of many, and only you know their other threads and how you talk to them, so what reaches beyond this update is yours, even when this update seems to answer part of it: anything about another thread or agent`
     expect(prompt).toContain(handed)
-    // How yapd talks and catching up are among what's handed over, taking back such a change too.
-    expect(prompt).toContain(`how you talk to them, like focus, quiet, being back, shorter updates or everything in full, and taking back such a change you just told them of; catching up.`)
+    // Who needs him, catching up, new work and how yapd talks are among what's handed over, taking back such a change too.
+    expect(prompt).toContain(`who needs them or what's waiting on them; catching up, like "what did I miss?" or "catch me up on the rest";`)
+    expect(prompt).toContain(`starting new work, like "start a thread on the flaky test" or "kick off a review of the docs";`)
+    expect(prompt).toContain(`how you talk to them from now on, like focus, quiet, going to bed, being back, shorter updates or everything in full, and taking back such a change you just told them of.`)
     expect(prompt).not.toContain(`How you talk to them is for you, never the agent`)
     expect(prompt).not.toContain(`Catching up is for you, never the agent`)
     // Never what's for this agent, even naming another thread for it to use.
     expect(prompt).toContain(`Never what's meant for this agent, even when it names another thread for the agent to use, like "use the Mina fee table": that's "send".`)
-    // Tidying a thread, this one or another, is handed over too, never sent.
+    // Tidying a thread, this one or another, is handed over too, never sent; but an answer to what the agent asked about such a thing
+    // in its own work is its, so a misread never changes T3 Code at once.
     expect(prompt).toContain(
-      `- Tidying a thread in T3 Code, this one or another, is for you, never the agent: archiving, unarchiving, renaming, snoozing, settling or pinning it, or undoing that, like "settle it", "archive this thread" or "snooze it till tomorrow". Never "send". It's "assistant".`,
+      `- Tidying a thread in T3 Code, this one or another, is for you, never the agent: archiving, unarchiving, renaming, snoozing, settling or pinning it, or undoing that, like "settle it", "archive this thread" or "snooze it till tomorrow". It's "assistant". Answering what the agent asked about such a thing in its own work isn't that, like "archive it" when it asked whether to archive the old logs: that's "send".`,
     )
+    // Anything else that speaks of muting, a message for the agent included, is handed over, never sent.
+    expect(prompt).toContain(`Anything else that speaks of muting, even a message for the agent, like "tell it I'll mute it if it keeps logging", is never "send" either: it's "assistant".`)
     // The shortcut's lines stay for mutes, subagents and memories.
     for (const kept of [
       `- Muting or unmuting this thread or any other, like "mute this", "silence it for now" or "unmute the Tezos one", or asking what's muted, is for you, never the agent: never "send". It's "answer", telling them in a few words to ask you that with their shortcut.`,
