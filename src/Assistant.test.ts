@@ -2619,6 +2619,32 @@ describe("Assistant", () => {
     expect(result).toEqual({ over: [], open: Option.some(`${choices}, sir?`) })
   })
 
+  test("what may all be yapd's own words said back to a done line, let go without the model or with no model to ask, are logged as let go, never nothing anyone said", async () => {
+    const logged: Array<string> = []
+    const logger = Logger.make(({ message }) => {
+      logged.push((Array.isArray(message) ? message : [message]).join(" "))
+    })
+    const result = await run(
+      Effect.gen(function* () {
+        // The model can't be asked about anything but his message.
+        const made = yield* assistant((situation) => (situation.utterance.heard.startsWith("Tell the Tesla") ? tezosMessage("high")(situation) : undefined))
+        yield* made.dictate("Tell the Tesla's migration to use the fee table from the Mina work.")
+        const sent = made.notices().findLast(({ kind }) => kind === "done")
+        const before = made.spoken().length
+        // Asking to hear it again, nothing anyone said, and words for the model, each over its end.
+        for (const [heard, voiced] of [["Say that again.", 2], ["Thank you.", 0.2], ["On it. Tell the Mina one to wait.", 2]] as const) {
+          yield* made.followUp(heard, voiced, sent, sent?.spoken)
+        }
+        return made.spoken().slice(before)
+      }).pipe(Effect.provide(Logger.replace(Logger.defaultLogger, logger))),
+    )
+    expect(result).toEqual([])
+    expect(logged.filter((line) => line.includes("may have been my own voice"))).toEqual([
+      `Not acting on it, since "Say that again." may have been my own voice`,
+      `Not acting on it, since "On it. Tell the Mina one to wait." may have been my own voice`,
+    ])
+  })
+
   test("what may all be yapd's own words said back to a done line, let go with more the model split off them, do none of it, not even code's own question, and leave a question as it was, whether he was yet to hear it or had", async () => {
     const choices = "Migrate Tezos Integration or Open Mina SSV2 Bug Tickets"
     const taking = (hearing: boolean) =>

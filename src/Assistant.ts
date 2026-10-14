@@ -116,6 +116,16 @@ const quoted = (words: string) => (T3Actions.revealing(words) ? "what he said" :
 /** What may all be yapd's own words let go, logged in the same words wherever it's done, so how often that happens can be counted. */
 const notActing = (utterance: Pick<Utterance, "heard">) => Effect.logInfo(`Not acting on it, since ${quoted(utterance.heard)} may have been my own voice`)
 
+/**
+ * Logged as `notActing` has it: what may all be yapd's own words that code
+ * let go without the model, never nothing anyone said, nor what the model
+ * took for talk not meant for it.
+ */
+const fastLetGo = (thought: Pick<Thought, "source" | "decision" | "utterance">) =>
+  thought.source === "fast" && thought.decision.act === "resume" && Brain.mayBeOwn(thought.utterance) && !Brain.saidNothing(thought.utterance)
+    ? notActing(thought.utterance)
+    : Effect.void
+
 /** What a thread asks of the user, which a short answer can settle. */
 export type Asks =
   | {
@@ -2434,9 +2444,12 @@ export const make = (options: {
     /** What comes of the rest of a request, worked out, said with what was said of the step before. `quietly` when that was said already. */
     const then = (next: Thought, first: Outcome, step: number, said: Lines, quietly: boolean): Effect.Effect<Outcome> =>
       Effect.gen(function* () {
-        // Nothing is said of what may all be yapd's own words, even that it couldn't be worked out.
-        if (next.source === "failed") return Brain.mayBeOwn(next.utterance) ? first : retold(first, (say) => joined(say, `I couldn't work out the rest${addressed(said)}.`, said))
-        if ((next.decision.act === "dismiss" && next.decision.rest.trim() === "") || next.decision.act === "resume") return first
+        // Nothing is said of what may all be yapd's own words, even that it couldn't be worked out: they're let go.
+        if (next.source === "failed") {
+          return Brain.mayBeOwn(next.utterance) ? yield* Effect.as(notActing(next.utterance), first) : retold(first, (say) => joined(say, `I couldn't work out the rest${addressed(said)}.`, said))
+        }
+        if (next.decision.act === "resume") return yield* Effect.as(fastLetGo(next), first)
+        if (next.decision.act === "dismiss" && next.decision.rest.trim() === "") return first
         // A line for going ahead the step before says is kept from being said again in the same breath.
         const after = yield* follow(Brain.check(next.decision, next.situation, said), next, said, {
           step,
@@ -4131,8 +4144,8 @@ export const make = (options: {
           if (yield* off) return yield* stopped
         }
         const { decision } = decided
-        // Nothing was really said, like words Whisper hears in silence: a question stays open.
-        if (decided.source === "fast" && decision.act === "resume") return quiet(decided.subject)
+        // Nothing was really said, like words Whisper hears in silence, or what may all be yapd's own words were let go: a question stays open.
+        if (decided.source === "fast" && decision.act === "resume") return yield* Effect.as(fastLetGo(decided), quiet(decided.subject))
         // Told to stop the update he was hearing, it isn't read again once the dictation that cut it off is dealt with: never in what may
         // all be yapd's own words.
         if (decision.act === "dismiss" && decided.subject._tag === "Session" && hushed(utterance.heard) && !Brain.mayBeOwn(utterance)) {
@@ -4140,11 +4153,9 @@ export const make = (options: {
         }
         const said = yield* persona.lines
         // Nothing was made of it, so that's all that's said, and what he missed isn't marked heard. Still, he said something after the question he heard, which closes it.
-        // All he said may be yapd's own words, nothing is said of them, not even that, and a question is left as it was.
+        // All he said may be yapd's own words, nothing is said of them, not even that, and a question is left as it was: they're let go.
         if (decided.source === "failed") {
-          if (Brain.mayBeOwn(utterance)) {
-            return yield* Effect.as(Effect.logInfo(`Saying nothing of it, since ${quoted(utterance.heard)} may have been my own voice`), quiet(decided.subject))
-          }
+          if (Brain.mayBeOwn(utterance)) return yield* Effect.as(notActing(utterance), quiet(decided.subject))
           const heard = before(utterance)
           if (heard?.said === undefined) return reply(decision.spoken, decided.subject)
           const { open } = heard
@@ -4423,7 +4434,8 @@ export const make = (options: {
      * the change it says yapd made for him is taken back without the model,
      * and when it says one that "scratch that" reaches, the model is told
      * so, run on into it or not, and what's too faint to take is logged as
-     * said after what it did, so how often that's let go can be counted.
+     * said after what it did, so how often that's let go can be counted, as
+     * is what may all be yapd's own words let go without the model.
      */
     const followUp =
       (about: Subject, line: Effect.Effect<string>, done?: Brain.Done) =>
@@ -4449,7 +4461,7 @@ export const make = (options: {
             ...(left === undefined ? {} : { unsaid: left }),
           }
           const thought = yield* think(utterance, it, [{ speaker: "yapd", text: heardOf(said, left), ...routinesOf(about) }])
-          if (thought.decision.act === "resume") return Option.none()
+          if (thought.decision.act === "resume") return yield* Effect.as(fastLetGo(thought), Option.none())
           if (Brain.murmured(thought.decision, utterance)) {
             yield* Effect.logInfo(`Not taking ${quoted(heard)} as a follow-up${done?.change === undefined ? "" : " after what it did"}, with only ${voiced.toFixed(2)} s of speech`)
             return Option.none()

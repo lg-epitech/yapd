@@ -1851,14 +1851,22 @@ const nothing = (heard: string, voiced: number) => {
   return said === "" || (over !== undefined && over.times >= 3 && !meant) || (hallucinated.has(said) && voiced < faint)
 }
 
+/**
+ * Whether all that was heard is nothing anyone said, as `nothing` has it.
+ * Over yapd's first seconds, what he said after a pause is surely his, so
+ * it's never taken for nothing on the strength of what came before, which
+ * may be yapd's own last word, like "Yapd." ahead of his "Yapd, yapd.".
+ */
+export const saidNothing = (utterance: Pick<Assistant.Utterance, "heard" | "voiced" | "echo" | "afterPause">) => {
+  const paused = utterance.echo !== undefined && utterance.afterPause !== undefined && utterance.afterPause.trim() !== ""
+  return nothing(utterance.heard, utterance.voiced) && (!paused || nothing(utterance.afterPause!, utterance.voiced))
+}
+
 const glimpsed = (situation: Situation, lines: Lines): Decision | undefined => {
   const { utterance, open, desk, subject } = situation
   const heard = gist(utterance.heard)
   const { said } = meaning(heard)
-  // Over yapd's first seconds, what he said after a pause is surely his, so it's never taken for nothing on the strength of what came
-  // before, which may be yapd's own last word, like "Yapd." ahead of his "Yapd, yapd.".
-  const paused = utterance.echo !== undefined && utterance.afterPause !== undefined && utterance.afterPause.trim() !== ""
-  if (nothing(utterance.heard, utterance.voiced) && (!paused || nothing(utterance.afterPause!, utterance.voiced))) return decision({ act: "resume" })
+  if (saidNothing(utterance)) return decision({ act: "resume" })
   // The name of an option of the thread's question open, like "Cancel the run", "Close it" or "Repeat it", is that option, said over it:
   // never stopping the work that asked it, taking a card down, or hearing it again. Unless he's hearing of another thread, whose run
   // those words may be to stop.
