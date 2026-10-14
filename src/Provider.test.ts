@@ -39,6 +39,7 @@ describe("Provider", () => {
     expect(providers.claude.command(call).env).toEqual({
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
       CLAUDE_CODE_DISABLE_ADVISOR_TOOL: "1",
+      CLAUDE_CODE_DISABLE_AUTO_MEMORY: "1",
     })
   })
 

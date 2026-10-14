@@ -74,8 +74,9 @@ const claude = ({ prompt, model, effort, schema }: Call) => ({
     ...flag("--effort", effort),
     "--output-format", "json",
     "--json-schema", schema.json,
-    // Prompts end by asking for a JSON object, which other CLIs need. Claude would then often write it out, be told
-    // to call StructuredOutput, and send it again: Sonnet did on 9 of 11 replies, at 2 s each.
+    // Prompts end by asking for a JSON object, which other CLIs need. Claude Code 2.1.293 then often had Sonnet write
+    // it out, be told to call StructuredOutput, and send it again. 2.1.299 doesn't, but Sonnet still answers about
+    // 0.3 s sooner with this.
     "--append-system-prompt", "When asked to reply with a JSON object, give it as the input of the StructuredOutput tool rather than writing it out.",
     "--tools", "",
     "--setting-sources", "",
@@ -84,10 +85,15 @@ const claude = ({ prompt, model, effort, schema }: Call) => ({
     "--no-session-persistence",
   ],
   stdin: prompt,
-  // Without these, Claude Code spent about 1.5 s of each call on traffic a one-off call has no use for, like
-  // titling the session, before it answered, and another second sending telemetry before it exited. It would
-  // also offer the model its Opus advisor tool every time.
-  env: { CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1", CLAUDE_CODE_DISABLE_ADVISOR_TOOL: "1" },
+  // Without these, Claude Code spent about 0.6 s of each call on traffic a one-off call has no use for, a fetch
+  // before it asked and telemetry before it exited, and offered the model its Opus advisor tool every time. Like
+  // Codex's --ignore-user-config, auto memory stays off: what the user's own sessions remember about the folder yapd
+  // runs from would otherwise go into every reply.
+  env: {
+    CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
+    CLAUDE_CODE_DISABLE_ADVISOR_TOOL: "1",
+    CLAUDE_CODE_DISABLE_AUTO_MEMORY: "1",
+  },
 })
 
 export const providers: Record<Name, Provider> = {
