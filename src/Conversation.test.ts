@@ -3162,12 +3162,15 @@ describe("more, and how yapd talks, over an update", () => {
     expect(prompt).toContain(handed)
     // Who needs him, catching up, new work and how yapd talks are among what's handed over, taking back such a change too.
     expect(prompt).toContain(`who needs them or what's waiting on them; catching up, like "what did I miss?" or "catch me up on the rest";`)
-    expect(prompt).toContain(`starting new work, like "start a thread on the flaky test" or "kick off a review of the docs";`)
+    expect(prompt).toContain(`starting new work in a thread of its own, like "start a thread on the flaky test" or "kick off a review of the docs";`)
     expect(prompt).toContain(`how you talk to them from now on, like focus, quiet, going to bed, being back, shorter updates or everything in full, and taking back such a change you just told them of.`)
     expect(prompt).not.toContain(`How you talk to them is for you, never the agent`)
     expect(prompt).not.toContain(`Catching up is for you, never the agent`)
-    // Never what's for this agent, even naming another thread for it to use.
-    expect(prompt).toContain(`Never what's meant for this agent, even when it names another thread for the agent to use, like "use the Mina fee table": that's "send".`)
+    // Never what's for this agent, even a new task for it, asked of yapd, or naming another thread for it to use; nor asking it what it meant.
+    expect(prompt).toContain(
+      `Anything else about what this agent is working on, or what it just told them, is the agent's, never yours, however they put it: even a new task for it, like "delete that repo" after it told them of one, or asking you to do it, calling you by name or speaking of it as "the agent", like "the agent wrote me a draft, can you get it back?". That's "send", and so is naming another thread for the agent to use, like "use the Mina fee table".`,
+    )
+    expect(prompt).toContain(`Not asking the agent what it meant by something, like "do you mean the other ticket?": only the agent can say that, so it's "send", even when its message seems to answer it.`)
     // Tidying a thread, this one or another, is handed over too, never sent; but an answer to what the agent asked about such a thing
     // in its own work is its, so a misread never changes T3 Code at once.
     expect(prompt).toContain(
