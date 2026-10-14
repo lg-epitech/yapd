@@ -141,7 +141,7 @@ export interface Reminders {
    * `Journal.claim` gives it.
    */
   readonly fire: (reminder: Pick<Reminder, "id">, entry: Entry) => Effect.Effect<Option.Option<Option.Option<number>>>
-  /** Forgets those fired or cancelled before `before`. */
+  /** Forgets those that fired before `before`, or were set before it and cancelled since. */
   readonly prune: (before: number) => Effect.Effect<void>
 }
 

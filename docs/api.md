@@ -163,7 +163,7 @@ curl -X DELETE http://127.0.0.1:4747/reminders/42
 | Status | |
 | --- | --- |
 | `204` | It's cancelled. |
-| `404` | No such reminder: it was never set, or it went off or was cancelled more than thirty days ago. A yapd from before it answers this too. |
+| `404` | No such reminder: it was never set, or it went off more than thirty days ago, or was set more than thirty days ago and has since been cancelled, once yapd has restarted. A yapd from before it answers this too. |
 | `409` | It's no longer to come: it already went off, or it was already cancelled, by voice, from a menu or with its thread. The body says which. Nothing changes. |
 
 ## Hearing an update again
