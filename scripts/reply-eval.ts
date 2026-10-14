@@ -1081,12 +1081,14 @@ interface Result {
   readonly rest?: string
   readonly failed?: string
   /** The Brain's decision as the model or `fast` gave it, before `check`: only to look into, never scored. */
-  readonly raw?: { readonly act: string; readonly how?: string; readonly target?: string; readonly spoken?: string; readonly message?: string; readonly rest?: string }
+  readonly raw?: { readonly act: string; readonly how?: string; readonly target?: string; readonly machine?: string; readonly spoken?: string; readonly message?: string; readonly rest?: string }
   /** Which run of the case this is, from 1, when it's worked out more than once. */
   readonly run?: number
   /** Batch 3's: how it was routed, what handed it over, and how the Brain worked it out, with its part of the time and the Responder's. */
   readonly route?: string
   readonly handedBy?: "hook" | "responder"
+  /** Handed over by the Responder, what it answered: "assistant", or a "send" of what may all be yapd's own words. */
+  readonly responded?: string
   readonly brainSource?: string
   readonly brainMs?: number
   readonly responderMs?: number
@@ -1141,6 +1143,7 @@ const rawOf = (decision: Brain.Decision) => ({
   act: decision.act,
   ...(decision.how === "" ? {} : { how: decision.how }),
   ...(decision.target === "" ? {} : { target: decision.target }),
+  ...(decision.machine === "" ? {} : { machine: decision.machine }),
   ...(decision.spoken === "" ? {} : { spoken: decision.spoken }),
   ...(decision.text === "" ? {} : { message: decision.text }),
   ...(decision.rest === "" ? {} : { rest: decision.rest }),
@@ -1275,7 +1278,8 @@ const run = Effect.gen(function* () {
    * update, plainly his or not: "Mute." and the mute hook's commands in so
    * many words, with nothing done; saying it again; the live Responder, told
    * how long he spoke and how late, a second and none unless the case says;
-   * and what it hands over, or the hook does, worked out by the Brain on the
+   * and what it hands over, its message of what may all be yapd's own words
+   * included, or the hook does, worked out by the Brain on the
    * update as "it", with its own thread, as said back to a "done" line, and
    * routed as the assistant routes it. An Act's first step is checked and
    * guarded, and turned down as what only his word does while he isn't at
@@ -1321,6 +1325,7 @@ const run = Effect.gen(function* () {
       }
       let failed: string | undefined
       let responderMs: number | undefined
+      let responded: string | undefined
       const over =
         (muting: boolean) =>
         (heard: string): Effect.Effect<Conversation.Handed> =>
@@ -1455,6 +1460,7 @@ const run = Effect.gen(function* () {
               failed = String(answered.left.cause)
               return { reply: { intent: "answer", spoken: lines.misheard, message: "" }, source: "failed" } satisfies Conversation.Worked
             }
+            responded = answered.right.reply.intent
             return { reply: answered.right.reply, source: answered.right.source, ...(answered.right.modelMs === undefined ? {} : { modelMs: answered.right.modelMs }) } satisfies Conversation.Worked
           }),
         over: (muting) => over(muting),
@@ -1477,6 +1483,7 @@ const run = Effect.gen(function* () {
         ...(reply.spoken === "" ? {} : { spoken: reply.spoken }),
         ...(reply.message === "" ? {} : { message: reply.message }),
         ...(worked.handed === undefined ? {} : handed),
+        ...(worked.handed === undefined || handed.handedBy !== "responder" || responded === undefined ? {} : { responded }),
         route,
         ...(failed === undefined ? {} : { failed }),
       } satisfies Result
@@ -1617,10 +1624,10 @@ const meetsMost = (case_: Case, runs: ReadonlyArray<Result>): boolean | undefine
  * that became a write, a logged send to another thread than the update's
  * own; and for batch 3, a write by yapd's own hand to an unsteered update's
  * own thread, a Pass that's faint, about mutes, over what may be yapd's own
- * words or a routine's name, and on a written case, one that loses a
- * negation he said. A logged "ask me that with the shortcut" that came to
- * the mode, mute, catch-up or tidying it named is listed for his verdict
- * instead.
+ * words or a routine's name, a send of the Responder's own over what may be
+ * yapd's own words, and on a written case, a Pass that loses a negation he
+ * said. A logged "ask me that with the shortcut" that came to the mode,
+ * mute, catch-up or tidying it named is listed for his verdict instead.
  */
 const hardFail = (case_: Case, result: Result, labels: typeof Labels.Type) => {
   if (case_.by !== "responder") return false
@@ -1628,13 +1635,16 @@ const hardFail = (case_: Case, result: Result, labels: typeof Labels.Type) => {
   const label = labels[case_.id]
   if (result.path === "m4" && verdictOnly(case_, result)) return false
   const passed = result.route === "Pass"
+  // Sent to the update's own agent, as a Pass or by the Responder itself.
+  const sent = passed || (result.route === "Responder" && result.intent === "send")
   return (
     (["dismiss", "answer", "resume"].includes(String(wanted)) && changing.has(result.intent)) ||
     (label?.status === "confirmed" && label.intent === "dismiss" && changing.has(result.intent)) ||
     (wanted === "send" && result.intent === "elsewhere") ||
     (wanted === "send" && result.path === "m4" && ["start", "stop", "undo", "tidy", "mute", "mode", "remind", "remember", "forget"].includes(result.intent)) ||
     (result.ownByHands ?? 0) > 0 ||
-    (passed && ((case_.voiced ?? 1) < Brain.faintest || Mutes.mentionsMuting(case_.heard) || (case_.echo !== undefined && (case_.afterPause ?? "").trim() === ""))) ||
+    (passed && ((case_.voiced ?? 1) < Brain.faintest || Mutes.mentionsMuting(case_.heard))) ||
+    (sent && case_.echo !== undefined && (case_.afterPause ?? "").trim() === "") ||
     (passed && (case_.routines ?? []).some(({ name }) => Brain.nameSaid(name, { heard: case_.heard }))) ||
     (passed && case_.era === "synthetic" && lostNegation(case_, result))
   )
@@ -1699,7 +1709,7 @@ const report = (cases: ReadonlyArray<Case>, done: ReadonlyArray<Result>, paths: 
       for (const era of ["log", "journal", "synthetic"] as const) {
         const handed = mine.filter((result) => result.era === era && result.handedBy !== undefined)
         const of = mine.filter((result) => result.era === era).length
-        if (of > 0) lines.push(`  Handed over, ${era}: ${handed.length}/${of}${handed.length === 0 ? "" : `: ${handed.map(({ id, route, act }) => `${id} (${route}, ${act})`).join(" ")}`}.`)
+        if (of > 0) lines.push(`  Handed over, ${era}: ${handed.length}/${of}${handed.length === 0 ? "" : `: ${handed.map(({ id, route, act, responded }) => `${id} (${route}, ${act}${responded === "send" ? ", from the Responder's send" : ""})`).join(" ")}`}.`)
       }
       lines.push(`  Taken as steered: ${mine.filter(({ steered }) => steered === true).length}, unsteered: ${mine.filter(({ steered }) => steered === false).length}.`)
       lines.push(`  Written by yapd's own hand to an unsteered update's own thread: ${all.reduce((sum, { ownByHands }) => sum + (ownByHands ?? 0), 0)}; left for it: ${all.reduce((sum, { leftOver }) => sum + (leftOver ?? 0), 0)}.`)
@@ -1714,8 +1724,8 @@ const report = (cases: ReadonlyArray<Case>, done: ReadonlyArray<Result>, paths: 
       const judged = synthetic.map((result) => ({ result, met: meetsMost(byId.get(result.id)!, runsOf(done, path, result.id)) }))
       const failing = judged.filter(({ met }) => met === false).map(({ result }) => result)
       lines.push(`  Written cases: ${judged.filter(({ met }) => met === true).length} met, ${failing.length} not${failing.length === 0 ? "" : ` (${ids(failing)})`}, ${judged.filter(({ met }) => met === undefined).length} not for this path.`)
-      const passes = synthetic.filter((result) => result.route === "Pass" && hardFail(byId.get(result.id)!, result, labels))
-      if (path === "m4" && passes.length > 0) lines.push(`  A Pass that's a hard fail on a written case: ${ids(passes)}.`)
+      const passes = synthetic.filter((result) => (result.route === "Pass" || (result.route === "Responder" && result.intent === "send")) && hardFail(byId.get(result.id)!, result, labels))
+      if (path === "m4" && passes.length > 0) lines.push(`  A Pass, or a send of the Responder's own, that's a hard fail on a written case: ${ids(passes)}.`)
     }
     // Only to report.
     const sends = logged.filter((result) => byId.get(result.id)?.logged.intent === "send")
