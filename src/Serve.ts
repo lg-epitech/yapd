@@ -459,7 +459,7 @@ export const serve = Effect.gen(function* () {
     rundown: assistant.rundown,
   })
   // What the menu does to a thread it lists: mute it, have its subagents read or not, or hear it again.
-  const { mute, subagents, replayThread } = Latest.menu({ latest, threads, mutes, controls, daemon, mention: assistant.mention, journal, following: assistant.following })
+  const { mute, subagents, replayThread } = Latest.menu({ latest, threads, mutes, controls, daemon, mention: assistant.mention, journal, following: assistant.following, reminders })
   // Every thread it can see, not only the likeliest, in the order the desk puts them.
   const served = Show.served(
     show,

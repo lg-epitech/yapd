@@ -444,17 +444,23 @@ describe("Latest", () => {
   })
 
   describe("menu", () => {
-    /** The menu over the latest threads, with a daemon that heard `heard` updates under their keys, each at its time, and is `on`. */
+    /**
+     * The menu over the latest threads, with a daemon that heard `heard` updates under their keys, each at its time, and is `on`, and
+     * reminders of which those `offers` are offers.
+     */
     const menuOf = (
       heard: ReadonlyArray<{ readonly id: string; readonly key: string; readonly at: number }>,
       on = true,
       shown: Readonly<Record<string, ReadonlyArray<T3Live.Thread>>> = { Rosie: [thread("t-tezos", "Migrate the Tezos integration")] },
+      offers: ReadonlyArray<number> = [],
     ) =>
       Effect.gen(function* () {
         // The newest he heard under the key, kept at `at` or since.
         const latestHeard = (key: string, at: number) => Effect.succeed(Option.fromNullable(heard.filter((one) => one.key === key && one.at >= at).at(-1)?.id))
         const listed = yield* listing(shown, ":memory:", { heard: latestHeard })
         const told: Array<string> = []
+        /** Whether what he says after each told can go anywhere. */
+        const listening: Array<boolean> = []
         const replayed: Array<string> = []
         const mentioned: Array<string> = []
         const controls = Mutes.controls({ mutes: listed.mutes, silence: () => Effect.void, journal: listed.journal })
@@ -470,13 +476,21 @@ describe("Latest", () => {
             power: Effect.succeed({ on, turns: 1 }),
             // Said at once, which makes "it" the thread it's about.
             tell: (notice) =>
-              Effect.sync(() => void told.push(notice.spoken)).pipe(Effect.zipRight(notice.saying ?? Effect.void), Effect.zipRight(notice.heard ?? Effect.void), Effect.as(true)),
+              Effect.sync(() => {
+                told.push(notice.spoken)
+                listening.push(notice.followUp !== undefined)
+              }).pipe(Effect.zipRight(notice.saying ?? Effect.void), Effect.zipRight(notice.heard ?? Effect.void), Effect.as(true)),
           } as Parameters<typeof Latest.menu>[0]["daemon"],
           mention: (ref, said) => Effect.sync(() => void mentioned.push(`${ref.machine}/${ref.id}: ${said}`)),
           journal: listed.journal,
+          following: () => () => Effect.succeed(Option.none()),
+          reminders: {
+            get: (id) =>
+              Effect.succeed(Option.some({ id, at: 0, heard: "", text: "", machine: "Rosie", thread: "t-tezos", state: "fired" as const, ...(offers.includes(id) ? { propose: "Run the tests again." } : {}) })),
+          },
         })
         const settle = Effect.zipRight(TestClock.adjust("250 millis"), flush)
-        return { ...listed, menu, told, replayed, mentioned, settle }
+        return { ...listed, menu, told, listening, replayed, mentioned, settle }
       })
 
     test("a row kept while off, heard again from the menu, is said in full, its more too, never only its headline, before it counts as heard", async () => {
@@ -538,6 +552,39 @@ describe("Latest", () => {
         }),
       )
       expect(result).toEqual({ before: 1, replayed: "queued", told: ["integration's review pass 7 is running."], after: 0 })
+    })
+
+    test("a row said again from the menu is followed up from its end only as it could be as it was first said; over what its thread waits on him for, like a secret, an offer, or that his reminders went with it, only 'Mute.' is listened for", async () => {
+      const result = await run(
+        Effect.gen(function* () {
+          const { journal, menu, told, listening, settle } = yield* menuOf([], true, undefined, [7])
+          const rows: ReadonlyArray<Pick<Journal.Entry, "kind" | "key" | "said" | "detail">> = [
+            { kind: "update", said: "integration. Halfway.", detail: { session: "claude:s" } },
+            { kind: "notice", key: "fail:Rosie:run-1", said: "The Tezos migration failed, sir: the fee tests broke." },
+            { kind: "notice", key: "limit:Claude:2026-10-13T05:00:00.000Z", said: "The Tezos migration hit your Claude limit, sir." },
+            { kind: "notice", key: "remind:6", said: "Sir, the Tezos migration finished, as you asked." },
+            { kind: "notice", key: "ask:Rosie:r1", said: "The Tezos migration needs the API key from you, sir, which I never take by voice." },
+            { kind: "notice", key: "remind:7", said: "When the Tezos migration finished, you wanted me to offer to tell it to run the tests again, sir." },
+            { kind: "notice", key: "dropped:8:1", said: "Your reminder went with the Tezos migration, sir." },
+          ]
+          for (const [at, row] of rows.entries()) {
+            yield* journal.write({ ...row, at: at + 1, machine: "Rosie", thread: "t-tezos" })
+            yield* settle
+            yield* menu.replayThread("t3:Rosie:t-tezos")
+          }
+          return { told: [...told], listening: [...listening] }
+        }),
+      )
+      expect(result.told).toEqual([
+        "integration. Halfway.",
+        "The Tezos migration failed, sir: the fee tests broke.",
+        "The Tezos migration hit your Claude limit, sir.",
+        "Sir, the Tezos migration finished, as you asked.",
+        "The Tezos migration needs the API key from you, sir, which I never take by voice.",
+        "When the Tezos migration finished, you wanted me to offer to tell it to run the tests again, sir.",
+        "Your reminder went with the Tezos migration, sir.",
+      ])
+      expect(result.listening).toEqual([true, true, true, true, false, false, false])
     })
 
     test("hears a thread again from the update it shows, not one he heard before what was kept quiet of it or a question it asked since", async () => {

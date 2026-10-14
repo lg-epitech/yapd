@@ -73,6 +73,16 @@ export const key = {
   done: (machine: string, runId: string) => `done:${machine}:${runId}`,
 }
 
+/**
+ * Whether a notice kept in the journal is of those said to be followed up
+ * from their end about their thread: a failure, a limit a thread hit, or a
+ * reminder, though one that was an offer was asked instead. Never what a
+ * thread waits on him for, which may ask for a secret or for what yapd can't
+ * word, nor that his reminders went with it.
+ */
+export const answerable = (kept: Pick<Kept, "kind" | "key">) =>
+  kept.kind === "notice" && (kept.key?.startsWith("fail:") === true || kept.key?.startsWith("limit:") === true || Reminders.of(kept) !== undefined)
+
 /** How long a failed run is left for a hook that tells of it, which then has said it. */
 const failing = "10 seconds"
 /** How much longer a run that went well is left for its hook, which only hooks know to skip, as a turn he was watching. */

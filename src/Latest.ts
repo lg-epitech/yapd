@@ -5,6 +5,8 @@ import type * as Icons from "./Icons.ts"
 import type { Journal, Kept, Kind } from "./Journal.ts"
 import * as Missed from "./Missed.ts"
 import * as Mutes from "./Mutes.ts"
+import * as Notices from "./Notices.ts"
+import * as Reminders from "./Reminders.ts"
 import type * as Server from "./Server.ts"
 import type * as T3Live from "./T3Live.ts"
 import * as Threads from "./Threads.ts"
@@ -59,8 +61,20 @@ export interface Latest {
    * to be the thread's. Unmuting the thread takes those off too.
    */
   readonly under: (key: string) => Effect.Effect<ReadonlyArray<string>>
-  /** The journal entry a thread listed now shows, by its key, and all of what it said, its "more" too, to say it again in full. */
-  readonly row: (key: string) => Effect.Effect<Option.Option<{ readonly id: number; readonly full: string }>>
+  /** The journal entry a thread listed now shows, by its key, to say it again in full. */
+  readonly row: (key: string) => Effect.Effect<Option.Option<Shown>>
+}
+
+/**
+ * The journal entry a row shows: all of what it said, its "more" too, and
+ * what kind it is and the key it was kept under, which tell whether it can be
+ * followed up.
+ */
+export interface Shown {
+  readonly id: number
+  readonly full: string
+  readonly kind: Kind
+  readonly key?: string | undefined
 }
 
 /**
@@ -103,7 +117,7 @@ export const make = (options: {
     const heard = options.heard ?? (() => Effect.succeedNone)
 
     /** Nothing listed yet, and the keys nothing is muted under. */
-    const none = { rows: [] as ReadonlyArray<Server.Recent>, under: new Map<string, ReadonlyArray<string>>(), entries: new Map<string, { readonly id: number; readonly full: string }>(), waiting: 0, unheard: 0, blind: false }
+    const none = { rows: [] as ReadonlyArray<Server.Recent>, under: new Map<string, ReadonlyArray<string>>(), entries: new Map<string, Shown>(), waiting: 0, unheard: 0, blind: false }
 
     const compute = Effect.gen(function* () {
       const now = yield* Clock.currentTimeMillis
@@ -144,7 +158,7 @@ export const make = (options: {
         .toSorted((one, other) => other.last.at - one.last.at || other.last.id - one.last.id)
         .slice(0, shown)
       const under = new Map<string, ReadonlyArray<string>>()
-      const entries = new Map<string, { readonly id: number; readonly full: string }>()
+      const entries = new Map<string, Shown>()
       let blind = false
       /** How many of a thread's updates and notices he hasn't heard, muted or not: under its own key, and every session of it, as a catch-up of everything tells of them. */
       const unheardOf = (machine: string, threads: ReadonlyArray<string>) =>
@@ -160,7 +174,7 @@ export const make = (options: {
           const sessions = [...new Set([found.get(kept)?.own, own])].flatMap((own) => (own === undefined || own.startsWith("finished:") ? [] : [own]))
           const by = sessions.map((own) => Mutes.key.session(machine, own))
           under.set(key, by)
-          entries.set(key, { id: last.id, full: Missed.full(last) })
+          entries.set(key, { id: last.id, full: Missed.full(last), kind: last.kind, key: last.key })
           // One of T3 Code's own subagents', listed for the thread it's part of: muted when that thread is, and read when that thread's
           // subagents are.
           const part = Missed.subagent(kept)
@@ -284,8 +298,26 @@ export const menu = (options: {
   readonly journal?: Pick<Journal["Type"], "markHeard">
   /** What makes of what he says right after what's said again of a row a follow-up about its thread. Without it, only "Mute." is listened for. */
   readonly following?: (ref: Threads.Ref, line: string) => Conversation.Answer["followUp"]
+  /** His reminders, to tell one that was told from an offer, which was asked: without them, a reminder said again is never followed up. */
+  readonly reminders?: Pick<Reminders.Reminders, "get">
 }) => {
-  const { latest, threads, mutes, controls, daemon, mention, journal, following } = options
+  const { latest, threads, mutes, controls, daemon, mention, journal, following, reminders } = options
+  /**
+   * Whether a row, said again, can be followed up from its end about its
+   * thread, as it could as it was first said: an update, a failure, a limit
+   * it hit, or a reminder about it that wasn't an offer. Over anything else,
+   * like what it waits on him for, which may ask for a secret, only "Mute."
+   * is listened for.
+   */
+  const answerable = (shown: Shown) =>
+    Effect.gen(function* () {
+      if (shown.kind === "update") return true
+      if (!Notices.answerable(shown)) return false
+      const id = Reminders.of(shown)
+      if (id === undefined) return true
+      if (reminders === undefined) return false
+      return Option.exists(yield* reminders.get(id), ({ propose }) => propose === undefined)
+    })
   return {
     /**
      * Mutes a thread from the menu, by its key: one it lists, one /threads
@@ -327,7 +359,8 @@ export const menu = (options: {
      * Says a thread's latest update again, by its key, all of it, its "more"
      * too: as an update, when it's one he heard, so a reply to it still gets
      * there, otherwise what was kept of it, as an answer that makes "it" the
-     * thread, which he can follow up from its end. A session's row, or
+     * thread, which he can follow up from its end when it could be followed
+     * up as it was first said. A session's row, or
      * a thread yapd can't reach now, as when it was archived or its machine
      * can't be seen, isn't said again then: "it" would be something nothing
      * he says can act on.
@@ -356,6 +389,7 @@ export const menu = (options: {
         // What "say that again" says is all of what was played, never only its headline.
         const entry = yield* latest.row(key)
         const spoken = Option.match(entry, { onNone: () => row.text, onSome: ({ full }) => (full === "" ? row.text : full) })
+        const listens = Option.isSome(entry) && (yield* answerable(entry.value))
         yield* daemon.tell(
           {
             id: `again:${key}:${now}`,
@@ -368,7 +402,7 @@ export const menu = (options: {
             ...(journal === undefined || Option.isNone(entry)
               ? {}
               : { heard: Effect.flatMap(Clock.currentTimeMillis, (at) => journal.markHeard([entry.value.id], at)) }),
-            ...(following === undefined ? {} : { followUp: following(ref, spoken), window: Conversation.answering, after: true }),
+            ...(following === undefined || !listens ? {} : { followUp: following(ref, spoken), window: Conversation.answering, after: true }),
           },
           turns,
         )
