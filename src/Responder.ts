@@ -6,7 +6,7 @@ import { Model } from "./Model.ts"
 import { afterOnIt, Persona, withOnIt } from "./Persona.ts"
 import { agreed, callingOff, enough, gist, type Line, morePlease, noted, question } from "./Words.ts"
 
-export const Intent = Schema.Literal("dismiss", "answer", "send", "resume")
+export const Intent = Schema.Literal("dismiss", "answer", "send", "resume", "assistant")
 export type Intent = typeof Intent.Type
 
 /** A flat object rather than a union, since some CLIs only take an object schema. */
@@ -71,8 +71,7 @@ Reply with only a JSON object with the keys "intent", "spoken" and "message".
 - "resume" if it wasn't meant for you, like talking to someone else or background noise.
 - Muting or unmuting this thread or any other, like "mute this", "silence it for now" or "unmute the Tezos one", or asking what's muted, is for you, never the agent: never "send". It's "answer", telling them in a few words to ask you that with their shortcut. Taking back a mute or unmute you just told them of, like "scratch that" or "undo that" right after you said you muted it, is never "send" either: it's "answer", asking them in a few words to say it again.
 - Which threads you read aloud to them, a thread's subagents included, like "read me its subagents", "start reading the subagents" or "keep its subagents to yourself", is for you, never the agent: never "send". It's "answer", telling them in a few words to ask you that with their shortcut. Asking the agent to use subagents, like "have a subagent review it", is the agent's as usual.
-- How you talk to them is for you, never the agent: focus, quiet, goodnight, being back, shorter updates or everything in full, like "let me focus till three", "I'm off to bed" or "stop giving me the short version". Never "send". It's "answer", telling them in a few words to ask you that with their shortcut. So is taking back such a change you just told them of, like "scratch that" right after you said focus is on.
-- Catching up is for you, never the agent: hearing what they missed or haven't heard, or what came in while they were away or had you off, however they put it, like "what did I miss?", "catch me up" or "anything else from rig?". Never "send". It's "answer", telling them in a few words to ask you that with their shortcut.
+- "assistant" if it's for you to do, not this agent: anything about another thread or agent, like "tell the Mina one to wait" or "what's the Tezos one doing?", except muting, subagents, keeping in mind, tidying and routine names, which stay "answer" as their own lines here say; who needs them; their usage or limits; putting something on their screen, like "show me the PR"; starting new work; how you talk to them, like focus, quiet, being back, shorter updates or everything in full, and taking back such a change you just told them of; catching up. Never what's meant for this agent, even when it names another thread for the agent to use, like "use the Mina fee table": that's "send". When part of it is for this agent and part is yours, like "tell it to rebase and tell the Mina one to wait", it's "assistant". "spoken" and "message" are empty.
 - What they want you to keep in mind, or forget, is for you, never the agent: a fact, like "remember that rig's T3 Code runs the nightly", or steps for when they say a name, like "when I say review it, have Sol review it until it's clean". Never "send". It's "answer", telling them in a few words to ask you that with their shortcut. A bare "forget it" or "never mind" isn't that: it's "dismiss".
 - Tidying a thread in T3 Code is for you, never the agent: archiving, unarchiving, renaming, snoozing, settling or pinning it, or undoing that, like "archive this thread" or "snooze it till tomorrow". Never "send". It's "answer", telling them in a few words to ask you that with their shortcut.
 
@@ -80,7 +79,7 @@ Reply with only a JSON object with the keys "intent", "spoken" and "message".
 ${aloud}
 - For "answer", the answer in at most 50 words.
 - For "send", empty: you say your usual line that it's in hand. Only when there's more they must know than that, say just that, in a few words, like "I took that to mean the staging branch." Don't repeat back what they asked for: they've just said it.
-- Empty for "dismiss" and "resume".
+- Empty for "dismiss", "resume" and "assistant".
 
 "message": for "send", the message for the agent, written as the user would type it: first person, keeping their intent and wording, with anything they referred to spelled out so it stands on its own. Keep every request they made, in their order, including what to do once something's done, like "when that's merged, update the deployment". Empty otherwise.
 
@@ -207,6 +206,8 @@ export const ProviderResponder = Layer.effect(
           const modelMs = (yield* Clock.currentTimeMillis) - began
           // Going ahead, an "On it" the model wrote anyway gives way to a line of yapd's own: picked as it's passed on
           // when that was all of it, or put in its place now, with the rest after it.
+          // Handed to yapd's assistant, it's said nothing of here, so there's no line to put right.
+          if (reply.intent === "assistant") return { reply: { ...reply, spoken: "", message: "" }, source: "model", modelMs } satisfies Responded
           const said = reply.spoken.trim()
           const rest = reply.intent === "send" ? afterOnIt(said, yield* persona.lines) : said
           const spoken = yield* inEnglish(model, rest)

@@ -15,7 +15,7 @@ import * as Questions from "./Questions.ts"
 import * as Reminders from "./Reminders.ts"
 import * as T3Actions from "./T3Actions.ts"
 import * as Threads from "./Threads.ts"
-import { again, agreed, enough, gist, hallucinated, halts, type Line, morePlease, noted, padding, wakes } from "./Words.ts"
+import { again, agreed, enough, gist, hallucinated, halts, type Line, morePlease, noted, padding, pardon, wakes } from "./Words.ts"
 
 // What the user wants, worked out in one call to the model from all yapd
 // knows right now: their threads, what it said lately, what they missed and
@@ -1286,6 +1286,28 @@ export const subagentLines = (lines: Lines, name: string) => {
   }
 }
 
+/**
+ * What's said of what he handed to yapd over an update that it doesn't do:
+ * what only the shortcut does while he isn't at hand, a routine's name, which
+ * only the shortcut sends, and a step left for the update's own session, by
+ * his words for it, made fit to say.
+ */
+export const handoffLines = (lines: Lines) => {
+  const sir = addressed(lines)
+  return {
+    shortcut: `Ask me that with the shortcut${sir}.`,
+    routine: `Say that with your shortcut${sir}.`,
+    left: (words: string, desk: Threads.Desk) => {
+      const step = speakable(words, desk).replace(/[.!?]+$/, "")
+      return step === "" || T3Actions.revealing(words) ? `I left that${sir}.` : `I left that${sir}: ${step}.`
+    },
+    rest: (words: string, desk: Threads.Desk) => {
+      const left = speakable(words, desk).replace(/[.!?]+$/, "")
+      return left === "" || T3Actions.revealing(words) ? `I left the rest${sir}.` : `I left the rest${sir}: ${left}.`
+    },
+  }
+}
+
 /** What's said when the change he said yes to taking back is no longer the last of its kind, like with a mute from the menu since: nothing is taken back. */
 export const changedSince = (lines: Lines) => `That's changed since${addressed(lines)}.`
 
@@ -1732,7 +1754,8 @@ export const about = (subject: Assistant.Subject): Option.Option<Threads.Ref> =>
     case "Answer":
       return subject.about
     case "Session":
-      return Option.fromNullable(subject.update.about)
+      // Handed over, a rig update's thread it's only known to be from is "it" too.
+      return Option.fromNullable(subject.update.about ?? subject.own?.ref)
     case "Nothing":
       return Option.none()
   }
@@ -2214,7 +2237,7 @@ export const bareHandle = (text: string, situation: Handled) => handlesShown(sit
  * preferences, nor one called "C" for his "C++", nor one called "ship" for the
  * rest of "tell the Tezos one to ship, and the Mina one to rebase".
  */
-const nameSaid = (name: string, utterance: Pick<Assistant.Utterance, "heard" | "whole">) => {
+export const nameSaid = (name: string, utterance: Pick<Assistant.Utterance, "heard" | "whole">) => {
   const wanted = calledAs(name)
   const says = (said: string) => wanted !== "" && ` ${calledAs(said)} `.includes(` ${wanted} `)
   return says(utterance.whole ?? utterance.heard) && (utterance.whole === undefined || says(utterance.heard))
@@ -2866,6 +2889,130 @@ const rememberLines = (lines: Pick<Lines, "address">) => {
     pause: `Pause after its name${sir}: when I say ship, then the steps.`,
     written: `That one's in your preferences${sir}.`,
     answered: `That's something I already answer to${sir}.`,
+  }
+}
+
+
+// ---------------------------------------------------------------- handed over
+
+/** The update's own thread, as what's handed over from it has it: none for a subagent's, reached only through its hook. */
+export interface Own {
+  readonly ref?: Threads.Ref
+  /** Whether what's said over it goes to its thread by yapd's own hand, rather than through its waiting hook, as for a terminal session. */
+  readonly steered: boolean
+}
+
+/** What's handed over says of him: whether he's at hand, and whether it's about mutes, whose words are never written to a thread. */
+export interface Handed {
+  readonly present: boolean
+  readonly muting?: true
+}
+
+/** The handle on the desk of an update's own thread, when it has one there. */
+const handleOfOwn = (own: Pick<Own, "ref">, desk: Threads.Desk) => (own.ref === undefined ? undefined : handleOf(desk, own.ref.machine, own.ref.id))
+
+/**
+ * The handle on the desk of the thread a handed-over update is from, what
+ * "it" is: its own, or, for one of rig's tied only by `owner`, that one.
+ * None for anything else, like a dictation's "it".
+ */
+export const ownHandle = (situation: Pick<Situation, "subject" | "desk">) => {
+  const { subject } = situation
+  return subject._tag !== "Session" || subject.own === undefined ? undefined : handleOfOwn(subject.own, situation.desk)
+}
+
+/**
+ * Whether a decision aims at "it", the update's own session: by its handle
+ * when it has one on the desk, or else by none, or by s1 over a subagent's.
+ * Never a take-back by none, which is of what was done last.
+ */
+const aimed = (decision: Pick<Decision, "act" | "target">, own: Pick<Own, "ref">, situation: Pick<Situation, "subject" | "desk">) => {
+  const handle = handleOfOwn(own, situation.desk)
+  const named = decision.act === "tidy" ? tidyHandles(decision.target) : [decision.target.trim()]
+  if (handle !== undefined) return named.includes(handle)
+  if (decision.act === "undo") return false
+  return named.length === 0 || named.some((target) => target === "" || Option.isSome(subagentBy(target, situation)))
+}
+
+/**
+ * Whether a write handed over from an update is left, never done: any while
+ * it's about mutes, which never reach an agent; and one aimed at the update's
+ * own session when that isn't steered, like one whose Stop hook waits, a
+ * rig's tied only by `owner`, or one tied to none, which T3 Code reaching
+ * would put two processes on one session.
+ */
+export const leftOver = (decision: Pick<Decision, "act" | "target">, own: Own, handed: Handed | undefined, situation: Pick<Situation, "subject" | "desk">) =>
+  writes.has(decision.act) && (handed?.muting === true || (!own.steered && aimed(decision, own, situation)))
+
+/** Whether it's only done on his word, but isn't a write: new work, a mute, a mode, a reminder, an offer, a memory, clearing the catch-up. */
+export const unattended = (decision: Pick<Decision, "act" | "how">) => ownWord(decision) && !writes.has(decision.act)
+
+/**
+ * Whether what `fast` made of what was handed over is taken without the
+ * model: an answer, something shown, or saying something again, over an
+ * update that needs him only in words that can't answer it; or letting go
+ * of what may all be yapd's own words. Anything else, letting go included,
+ * is the model's, so a request Whisper heard three times over is never
+ * dropped as nothing.
+ */
+export const atOnce = (decided: Pick<Decision, "act">, utterance: Pick<Assistant.Utterance, "heard" | "echo" | "afterPause" | "afterDone" | "echoedBack">, subject: Assistant.Subject) => {
+  if (decided.act === "answer" || decided.act === "show") return true
+  if (decided.act === "again") return !(subject._tag === "Session" && subject.update.needsYou) || pardon.has(gist(utterance.heard))
+  return decided.act === "resume" && mayBeOwn(utterance)
+}
+
+/** What's handed over comes to, before it's acted on. */
+export type Routed =
+  | { readonly _tag: "Resume" }
+  | { readonly _tag: "Dismiss" }
+  | { readonly _tag: "Answer"; readonly spoken: string }
+  /** For the update's own session, as the Responder's messages go, with what's said of a rest left. */
+  | { readonly _tag: "Pass"; readonly message: string; readonly left?: string }
+  /** Done as a follow-up to an answer is, `aims` when its first step is at the update itself, `doubted` when all of it may be yapd's own words. */
+  | { readonly _tag: "Act"; readonly aims: boolean; readonly doubted: boolean }
+
+/**
+ * What a decision about what was handed over from an update comes to: let go,
+ * as when it's nothing anyone said, faint, or may all be yapd's own words,
+ * however `check` lets it go; dismissed; answered by a line of code's own,
+ * for a routine's name, which only the shortcut sends, or what only his word
+ * does while he isn't at hand; passed to the update's own session as the
+ * Responder's messages are, when it's plainly for it, and never about
+ * mutes; or else acted on.
+ */
+export const route = (decision: Decision, situation: Situation, lines: Lines): Routed => {
+  const { utterance, desk } = situation
+  if (decision.act === "resume") return { _tag: "Resume" }
+  const checked = check(decision, situation, lines)
+  if (checked._tag === "Do" && checked.plan.decision.act === "resume") return { _tag: "Resume" }
+  if (decision.act === "dismiss" && decision.rest.trim() === "") return { _tag: "Dismiss" }
+  const said = handoffLines(lines)
+  const routine = checked._tag === "Do" ? checked.plan.routine : checked._tag === "Ask" ? checked.open.routine : undefined
+  const named = remembered(situation).some(({ kind, name }) => kind === "routine" && name !== undefined && nameSaid(name, utterance))
+  if (routine !== undefined || named) return { _tag: "Answer", spoken: said.routine }
+  const { own, handed } = utterance
+  if (own !== undefined && handed?.muting !== true && decision.act === "send") {
+    const how = decision.how.trim()
+    const handle = handleOfOwn(own, desk)
+    const target = decision.target.trim()
+    const text = decision.text.trim()
+    const timed = how === "" || how === "now" || (how === "after" && !own.steered)
+    const rested = decision.rest.trim() === "" || !own.steered
+    const worded = text !== "" && !bareHandle(text, situation)
+    // A "" when "it" has a handle on the desk is the model being unsure, as the Responder has said it isn't for this agent: never passed.
+    const its =
+      handle !== undefined
+        ? target === handle && checked._tag === "Do" && checked.plan.decision.act === "send" && checked.plan.routine === undefined
+        : target === "" || Option.isSome(subagentBy(target, situation))
+    if (timed && rested && worded && its) {
+      return { _tag: "Pass", message: text, ...(decision.rest.trim() === "" ? {} : { left: said.rest(decision.rest, desk) }) }
+    }
+  }
+  if (handed?.present === false && unattended(decision)) return { _tag: "Answer", spoken: said.shortcut }
+  return {
+    _tag: "Act",
+    aims: decision.act === "dismiss" || (writes.has(decision.act) && own !== undefined && aimed(decision, own, situation)),
+    doubted: mayBeOwn(utterance),
   }
 }
 
@@ -4383,7 +4530,9 @@ const focus = (situation: Situation) => {
     }
     case "Session": {
       const { update } = subject
-      const handle = update.about === undefined ? undefined : handleIn(situation, update.about)
+      // Handed over, the thread it's from is "it" by its handle, a rig update's tied only by `owner` too; or else its own session is.
+      const own = subject.own === undefined ? undefined : ownHandle(situation)
+      const handle = own ?? (update.about === undefined ? undefined : handleIn(situation, update.about))
       const head = update.subagent?.head?.ref
       return [
         update.subagent !== undefined
@@ -4397,6 +4546,13 @@ const focus = (situation: Situation) => {
           : [`What you said last, over it: ${(subject.routines ?? []).length > 0 ? `of ${byName(subject.routines ?? [])}, whose steps you never see` : fenced(subject.said, 400)}`]),
         ...Option.match(update.turn.prompt, { onNone: () => [], onSome: (prompt) => [`What it was asked: ${sentAs(prompt, update.about, situation, 300)}`] }),
         `What it wrote: ${fenced(update.turn.message, 700)}`,
+        ...(subject.own === undefined || own !== undefined
+          ? []
+          : [
+              update.subagent !== undefined
+                ? `He's speaking over this update, so "it" is that subagent, ${subagentHandle}, not the thread it's part of: a message for it is "send" with "target" "".`
+                : `He's speaking over this update, so "it" is that work's own session, not a thread in THREADS: a message for it is "send" with "target" "".`,
+            ]),
       ].join("\n")
     }
     case "Answer": {

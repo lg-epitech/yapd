@@ -58,7 +58,9 @@ const update: Conversation.Update = {
  * With `model`, replies are worked out by the provider's responder with that model instead, and the persona's
  * lines are `lines`, or the plain ones. With `persona`, it's that one that picks and is told the lines. With `routines`,
  * those are the names of his routines. With `over`, it's that update that's read, with what the journal `kept` before it,
- * and with `present`, while he's at hand.
+ * and with `present`, while he's at hand. With `reply`, that's what the Responder answers, still after five seconds;
+ * with `handing`, what's yapd's to do is handed to it; with `off`, "Mute." turns yapd off; and the first `echoing`
+ * frames may carry yapd's own voice.
  */
 const conversation = (
   said: ReadonlyArray<string>,
@@ -76,10 +78,17 @@ const conversation = (
     readonly over?: Conversation.Update
     readonly kept?: ReadonlyArray<Journal.Entry>
     readonly present?: boolean
+    readonly reply?: (heard: string) => Responder.Reply
+    readonly handing?: NonNullable<Parameters<typeof Conversation.make>[0]["over"]>
+    readonly off?: Effect.Effect<void>
+    readonly echoing?: number
   } = {},
 ) =>
   Effect.gen(function* () {
     const microphone = yield* Queue.unbounded<Float32Array>()
+    /** What was played, in order. */
+    const played: Array<string> = []
+    let echoed = 0
     const heard: Array<string> = []
     const sent: Array<string> = []
     const late: Array<string> = []
@@ -104,7 +113,7 @@ const conversation = (
         play: (path) =>
           given.unplayable === true && path !== update.audio
             ? Effect.fail(new AudioError({ message: "The audio helper didn't start playing" }))
-            : Effect.succeed({
+            : Effect.sync(() => void played.push(path)).pipe(Effect.as({
                 duration: 10,
                 confirmed: given.afplay === undefined || path === update.audio,
                 finished:
@@ -113,9 +122,9 @@ const conversation = (
                     : Effect.sleep("10 seconds"),
                 stop: Effect.succeed(2),
                 volume: () => Effect.void,
-              }),
+              })),
         microphone: Effect.succeed(Option.some(microphone)),
-        echo: () => Effect.succeed(false),
+        echo: () => Effect.sync(() => echoed++ < (given.echoing ?? 0)),
         rest: Effect.void,
         warm: Effect.void,
         tick: Effect.void,
@@ -136,9 +145,11 @@ const conversation = (
               Effect.sync(() => heard.push(text)).pipe(
                 Effect.zipRight(Effect.sleep("5 seconds")),
                 Effect.as({
-                  reply: text.startsWith("Sam,")
-                    ? { intent: "resume" as const, spoken: "", message: "" }
-                    : { intent: "send" as const, spoken: text.startsWith("Just") ? "" : "Okay.", message: text },
+                  reply:
+                    given.reply?.(text) ??
+                    (text.startsWith("Sam,")
+                      ? { intent: "resume" as const, spoken: "", message: "" }
+                      : { intent: "send" as const, spoken: text.startsWith("Just") ? "" : "Okay.", message: text }),
                   source: "model" as const,
                 }),
               ),
@@ -162,6 +173,8 @@ const conversation = (
       saying: (_, line) => Effect.sync(() => void saying.push(line)),
       withholds: () => Effect.succeed(false),
       ...(given.routines === undefined ? {} : { routines: Effect.succeed(given.routines) }),
+      ...(given.handing === undefined ? {} : { over: given.handing }),
+      ...(given.off === undefined ? {} : { off: given.off }),
     }).pipe(Effect.provide(context))
     for (const entry of given.kept ?? []) yield* Context.get(context, Journal.Journal).write(entry)
     const fiber = yield* Effect.fork(made.converse(given.over ?? update, Effect.void, given.present === undefined ? {} : { present: given.present }))
@@ -203,6 +216,7 @@ const conversation = (
     return {
       ...made,
       fiber,
+      played,
       heard,
       sent,
       late,
@@ -1297,10 +1311,10 @@ describe("Over its first seconds, while yapd's own voice can still get into the 
     expect(echoed.lines).toContain("Reply: answer")
     // Nor what he hadn't heard of that answer when he talks over it, which a few words of may not show to be one, like the last
     // digits of a code.
-    const talkedOver = await answered("I won't keep the key ending four eight one five nine two, sir. Ask me that with your shortcut.", "What?")
+    const talkedOver = await answered("I won't keep the key ending four eight one five nine two, sir. Ask me that with your shortcut.", "Thanks.")
     expect(talkedOver.journal.map(({ kind, text, said, detail }) => ({ kind, text, said, detail }))).toEqual([
       { kind: "reply", text: undefined, said: undefined, detail: { intent: "answer", withheld: true, ...worked } },
-      { kind: "reply", text: "What?", said: "", detail: { intent: "dismiss", ...worked, voiced: 1.18 } },
+      { kind: "reply", text: "Thanks.", said: "", detail: { intent: "dismiss", ...worked, voiced: 1.18 } },
     ])
     expect(JSON.stringify(talkedOver.journal)).not.toContain("nine two")
   })
@@ -3091,19 +3105,33 @@ describe("more, and how yapd talks, over an update", () => {
     expect(Words.agreed.has("go on")).toBe(true)
   })
 
-  test("the model is given the rest to say if he asks for more, and told how yapd talks is never for the agent", () => {
+  test("the model is given the rest to say if he asks for more", () => {
     const prompt = Responder.prompt(over("Can you tell me the rest?", "Retries back off now."), Option.none())
     expect(prompt).toContain(`What you left out of your update, to say only if they ask for more or for the details, as "answer" with these words as they are:\nRetries back off now.`)
-    expect(prompt).toContain(`How you talk to them is for you, never the agent: focus, quiet, goodnight, being back, shorter updates or everything in full`)
-    expect(prompt).toContain(`Never "send". It's "answer", telling them in a few words to ask you that with their shortcut.`)
     expect(Responder.prompt(over("Thanks."), Option.none())).not.toContain("What you left out")
   })
 
-  test("catching up said over an update is never for the agent: the model is told to have him ask with the shortcut, and nothing takes it without the model", () => {
-    const prompt = Responder.prompt(over("What did I miss?"), Option.none())
-    expect(prompt).toContain(`Catching up is for you, never the agent: hearing what they missed or haven't heard, or what came in while they were away or had you off, however they put it`)
-    expect(prompt).toContain(`Never "send". It's "answer", telling them in a few words to ask you that with their shortcut.`)
-    for (const heard of ["What did I miss?", "Catch me up.", "Anything else from rig?"]) expect(quickly(over(heard, "Retries back off now."))).toBeUndefined()
+  test("what's yapd's to do over an update, how it talks and catching up included, is handed to it, never sent; mutes, subagents, memories and tidying keep the shortcut's line; and what's for this agent is never handed over", () => {
+    const prompt = Responder.prompt(over("Let me focus till three."), Option.none())
+    const handed = `- "assistant" if it's for you to do, not this agent: anything about another thread or agent`
+    expect(prompt).toContain(handed)
+    // How yapd talks and catching up are among what's handed over, taking back such a change too.
+    expect(prompt).toContain(`how you talk to them, like focus, quiet, being back, shorter updates or everything in full, and taking back such a change you just told them of; catching up.`)
+    expect(prompt).not.toContain(`How you talk to them is for you, never the agent`)
+    expect(prompt).not.toContain(`Catching up is for you, never the agent`)
+    // Never what's for this agent, even naming another thread for it to use.
+    expect(prompt).toContain(`Never what's meant for this agent, even when it names another thread for the agent to use, like "use the Mina fee table": that's "send".`)
+    // The shortcut's lines stay for mutes, subagents, memories and tidying.
+    for (const kept of [
+      `- Muting or unmuting this thread or any other, like "mute this", "silence it for now" or "unmute the Tezos one", or asking what's muted, is for you, never the agent: never "send". It's "answer", telling them in a few words to ask you that with their shortcut.`,
+      `It's "answer", telling them in a few words to ask you that with their shortcut. Asking the agent to use subagents, like "have a subagent review it", is the agent's as usual.`,
+      `- What they want you to keep in mind, or forget, is for you, never the agent`,
+      `- Tidying a thread in T3 Code is for you, never the agent`,
+    ]) {
+      expect(prompt).toContain(kept)
+    }
+    // Nothing takes catching up or a mode in other words without the model.
+    for (const heard of ["What did I miss?", "Catch me up.", "Anything else from rig?", "Let me focus till three."]) expect(quickly(over(heard, "Retries back off now."))).toBeUndefined()
   })
 
   test("a bare forget it or never mind over an update is hearing enough, without the model, even when the agent asked something: never asked to use the shortcut", () => {
@@ -3342,5 +3370,176 @@ describe("the rest of an update", () => {
     expect(Conversation.restOf("Sir, requests back off from a second up to a minute.", more)).toBe(false)
     expect(Conversation.restOf("Requests back off.", more)).toBe(false)
     expect(Conversation.restOf("Sir.", "")).toBe(false)
+  })
+})
+
+describe("what's yapd's to do, said over an update", () => {
+  const dismissing = (): Responder.Reply => ({ intent: "dismiss", spoken: "", message: "" })
+  const handedOver = (): Responder.Reply => ({ intent: "assistant", spoken: "", message: "" })
+  /** What was said back over the update, as the journal keeps it. */
+  const replies = (kept: ReadonlyArray<Journal.Kept>) =>
+    kept
+      .filter(({ kind }) => kind === "reply")
+      .map(({ text, said, detail }) => ({ text, said, ...(detail as { readonly source?: string; readonly intent?: string }) }))
+      .map(({ text, said, source, intent }) => ({ text, said, source, intent }))
+
+  test("'say that again' over an update plays the line again at once with no model, at most twice, and talk that keeps coming still reaches the misses cap; over one that asks him something, 'repeat it' goes to the Responder, and so does anything said over its first seconds", async () => {
+    // Over an update that asks him nothing, any way of asking, even a bare "What?", plays it again from its start, twice at most.
+    const plain = await scoped(
+      Effect.gen(function* () {
+        const { fiber, heard, played, speak, wait, journal } = yield* conversation(["What?", "Say that again.", "Say it again."], 0, [], "sent", { reply: dismissing })
+        for (let index = 0; index < 3; index++) {
+          yield* speak
+          yield* wait(1)
+        }
+        yield* wait(20)
+        yield* Fiber.join(fiber)
+        return { heard: [...heard], played: [...played], replies: replies(yield* journal) }
+      }),
+    )
+    expect(plain.played).toEqual([update.audio, update.audio, update.audio])
+    expect(plain.heard).toEqual(["Say it again."])
+    expect(plain.replies).toEqual([
+      { text: "What?", said: update.spoken, source: "again", intent: "answer" },
+      { text: "Say that again.", said: update.spoken, source: "again", intent: "answer" },
+      { text: "Say it again.", said: "", source: "model", intent: "dismiss" },
+    ])
+    // Said again in between, talk not meant for yapd still stops it being listened over, a TV's or anyone's, after as much as ever.
+    const talked = await scoped(
+      Effect.gen(function* () {
+        const said = ["Sam, one.", "What?", "Sam, two.", "What?", "Sam, three.", "Sam, four."]
+        const { fiber, heard, played, speak, wait } = yield* conversation(said)
+        for (const words of said) {
+          yield* speak
+          yield* wait(words.startsWith("Sam,") ? 6 : 1)
+        }
+        yield* wait(20)
+        yield* Fiber.join(fiber)
+        return { heard: [...heard], played: [...played] }
+      }),
+    )
+    expect(talked.heard).toEqual(["Sam, one.", "Sam, two.", "Sam, three."])
+    // Over one that asks him something, only words that can't be its answer say it again: "Repeat it." may be his answer to it.
+    const asking: Conversation.Update = { ...update, needsYou: true, spoken: "Shall I repeat the migration?", turn: { prompt: Option.none(), message: "Shall I repeat the migration?" } }
+    const asked = await scoped(
+      Effect.gen(function* () {
+        const { fiber, heard, played, speak, wait } = yield* conversation(["Say that again.", "Repeat it."], 0, [], "sent", { reply: dismissing, over: asking })
+        yield* speak
+        yield* wait(1)
+        yield* speak
+        yield* wait(20)
+        yield* Fiber.join(fiber)
+        return { heard: [...heard], played: [...played] }
+      }),
+    )
+    expect(asked.played).toEqual([update.audio, update.audio])
+    expect(asked.heard).toEqual(["Repeat it."])
+    // Over its first seconds, it may be yapd's own words: the Responder weighs it.
+    const echoed = await scoped(
+      Effect.gen(function* () {
+        const { fiber, heard, played, speak, wait } = yield* conversation(["Say that again."], 0, [], "sent", { reply: dismissing, echoing: 40 })
+        yield* speak
+        yield* wait(20)
+        yield* Fiber.join(fiber)
+        return { heard: [...heard], played: [...played] }
+      }),
+    )
+    expect(echoed.heard).toEqual(["Say that again."])
+    expect(echoed.played).toEqual([update.audio])
+  })
+
+  test("what's handed over is worked out while he may carry on, again with all he said if he does, acted on once he's stopped and only once, even when a dictation starts as it's handed over", async () => {
+    const handed: Array<string> = []
+    const ran: Array<string> = []
+    // The Brain takes three seconds, and registering what it decided a second, as a dictation might start meanwhile.
+    const handing = () => (heard: string) =>
+      Effect.sync(() => void handed.push(heard)).pipe(
+        Effect.zipRight(Effect.sleep("3 seconds")),
+        Effect.as<Conversation.Handed>({
+          _tag: "Act",
+          aims: false,
+          doubted: false,
+          run: () => Effect.sleep("1 second").pipe(Effect.zipRight(Effect.sync(() => void ran.push(heard)))),
+          source: "model",
+          ms: 3000,
+          modelMs: 3000,
+          routed: "act, send",
+        }),
+      )
+    const result = await scoped(
+      Effect.gen(function* () {
+        const { fiber, heard, speak, wait } = yield* conversation(["Tell the Mina one to wait.", "And the fee one too."], 0, [], "sent", { reply: handedOver, handing })
+        yield* speak
+        // The Responder's five seconds, then into the Brain's three, he carries on.
+        yield* wait(6)
+        yield* speak
+        yield* wait(5)
+        yield* wait(3)
+        // As it's being registered, a dictation stops what's being said: it's registered all the same.
+        const stopping = yield* Effect.fork(Fiber.interrupt(fiber))
+        yield* wait(1)
+        return { heard: [...heard], exit: yield* Fiber.join(stopping) }
+      }),
+    )
+    const all = "Tell the Mina one to wait. And the fee one too."
+    expect(result.heard).toEqual(["Tell the Mina one to wait.", all])
+    expect(handed).toEqual(["Tell the Mina one to wait.", all])
+    expect(ran).toEqual([all])
+    expect(result.exit._tag).toBe("Failure")
+  })
+
+  test("'Mute.' said over the line after a handoff's Pass, and during the Brain's call, turns yapd off at once, cuts the line, and runs no Act", async () => {
+    // Passed to the update's own session, as the Responder's messages are, then "Mute." over the line that says so.
+    let offs = 0
+    const passed = await scoped(
+      Effect.gen(function* () {
+        const handing = () => () => Effect.succeed<Conversation.Handed>({ _tag: "Pass", message: "Rebase onto master.", source: "model", ms: 0, routed: "pass, send" })
+        const { fiber, sent, played, speak, wait } = yield* conversation(["Tell it to rebase.", "Mute."], 0, [], "sent", {
+          reply: handedOver,
+          handing,
+          off: Effect.sync(() => void offs++),
+          render: () => Effect.void,
+        })
+        yield* speak
+        yield* wait(6)
+        yield* speak
+        yield* wait(20)
+        yield* Fiber.join(fiber)
+        return { sent: [...sent], played: [...played] }
+      }),
+    )
+    expect(passed.sent).toEqual(["Rebase onto master."])
+    expect(offs).toBe(1)
+    // The update, then the line saying it went, and nothing after "Mute.".
+    expect(passed.played).toHaveLength(2)
+    // During the Brain's call, nothing of it is acted on.
+    offs = 0
+    const ran: Array<string> = []
+    const thinking = await scoped(
+      Effect.gen(function* () {
+        const handing = () => (heard: string) =>
+          Effect.sleep("3 seconds").pipe(
+            Effect.as<Conversation.Handed>({
+              _tag: "Act",
+              aims: false,
+              doubted: false,
+              run: () => Effect.sync(() => void ran.push(heard)),
+              source: "model",
+              ms: 3000,
+              routed: "act, show",
+            }),
+          )
+        const { fiber, played, speak, wait } = yield* conversation(["Show me the Mina one.", "Mute."], 0, [], "sent", { reply: handedOver, handing, off: Effect.sync(() => void offs++) })
+        yield* speak
+        yield* wait(6)
+        yield* speak
+        yield* wait(20)
+        yield* Fiber.join(fiber)
+        return { played: [...played] }
+      }),
+    )
+    expect(offs).toBe(1)
+    expect(ran).toEqual([])
+    expect(thinking.played).toEqual([update.audio])
   })
 })

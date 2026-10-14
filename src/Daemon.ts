@@ -1,7 +1,8 @@
-import { Cause, Clock, Deferred, Effect, Exit, Fiber, FiberMap, Option, PubSub, STM, Stream, SubscriptionRef, TRef } from "effect"
+import { Cause, Clock, Deferred, type Duration, Effect, Exit, Fiber, FiberMap, Option, PubSub, STM, Stream, SubscriptionRef, TRef } from "effect"
 import { mkdtemp, rm } from "node:fs/promises"
 import { hostname, tmpdir } from "node:os"
 import { join } from "node:path"
+import type * as Assistant from "./Assistant.ts"
 import { Audio } from "./Audio.ts"
 import * as Brain from "./Brain.ts"
 import { type Ticket, Waiting, wake } from "./ClaudeCode.ts"
@@ -29,6 +30,7 @@ import * as T3Actions from "./T3Actions.ts"
 import * as T3Code from "./T3Code.ts"
 import * as Threads from "./Threads.ts"
 import { extension, Voice } from "./Voice.ts"
+import type { Line } from "./Words.ts"
 
 const squash = (text: string) => text.replace(/\s+/g, " ").trim()
 
@@ -238,7 +240,17 @@ export const make = (
      * yapd's own hand, which "scratch that" reaches. Without it, such a line
      * listens only for "Mute.".
      */
-    readonly following?: (update: Conversation.Update, line: string, done?: Brain.Done) => Conversation.Answer["followUp"]
+    readonly following?: (update: Conversation.Update, line: string, done?: Brain.Done, own?: Brain.Own) => Conversation.Answer["followUp"]
+    /**
+     * What hands what he says over an update to yapd's assistant, as the
+     * Responder took it for yapd's to do, or the mute hook did: with what's
+     * known of the update here, whether it's steered, whether he's at hand,
+     * and what the line he spoke over or just heard says yapd changed.
+     * Without it, that's said to be asked with the shortcut.
+     */
+    readonly over?: (update: Conversation.Update, lines: ReadonlyArray<Line>, line: string, given: Assistant.Over) => Conversation.Handing
+    /** The last change to how yapd talks he asked for, in the last two minutes, which "scratch that" said next takes back: none without modes. */
+    readonly modeChange?: Effect.Effect<Option.Option<Modes.Change>>
   } = {},
 ) => Effect.gen(function* () {
   const lifetime = yield* Effect.scope
@@ -381,6 +393,8 @@ export const make = (
   const owed = new WeakMap<Notices.Stop, Owed>()
   /** The change to what's muted he just made over an update, by when it was made, which "scratch that" said next takes back. */
   const changedOver = new WeakMap<Conversation.Update, number>()
+  /** The change to how yapd talks he just made over an update, by when it was made, kept the same way. */
+  const modeChangedOver = new WeakMap<Conversation.Update, number>()
   const events = yield* Effect.makeSemaphore(1)
   const workers = yield* Effect.makeSemaphore(3)
   /**
@@ -423,20 +437,24 @@ export const make = (
    * they start: what they're still saying can't be answered yet, and a long
    * dictation would otherwise use the whole of it up.
    */
-  const lapse = Effect.gen(function* () {
-    while (true) {
-      yield* dictationOver
-      if (yield* Effect.raceFirst(Effect.as(Effect.sleep(holding), true), Effect.as(dictationStarted, false))) return
-    }
-  })
-  const awaiting = Effect.gen(function* () {
-    const answer = {}
-    yield* STM.commit(TRef.update(awaited, (all) => [...all, answer]))
-    const arrived = STM.commit(TRef.update(awaited, (all) => all.filter((other) => other !== answer)))
-    // Stoppable even when awaited from what can't be stopped, like an answer being taken in, so closing yapd never waits for it.
-    yield* lapse.pipe(Effect.zipRight(arrived), Effect.interruptible, Effect.forkIn(lifetime))
-    return arrived
-  })
+  const lapse = (after: Duration.DurationInput) =>
+    Effect.gen(function* () {
+      while (true) {
+        yield* dictationOver
+        if (yield* Effect.raceFirst(Effect.as(Effect.sleep(after), true), Effect.as(dictationStarted, false))) return
+      }
+    })
+  /** An answer on its way, holding everything else back for `after` once he's stopped dictating at most. */
+  const awaitingFor = (after: Duration.DurationInput) =>
+    Effect.gen(function* () {
+      const answer = {}
+      yield* STM.commit(TRef.update(awaited, (all) => [...all, answer]))
+      const arrived = STM.commit(TRef.update(awaited, (all) => all.filter((other) => other !== answer)))
+      // Stoppable even when awaited from what can't be stopped, like an answer being taken in, so closing yapd never waits for it.
+      yield* lapse(after).pipe(Effect.zipRight(arrived), Effect.interruptible, Effect.forkIn(lifetime))
+      return arrived
+    })
+  const awaiting = awaitingFor(holding)
 
   /**
    * Whether something yapd has to say answers what he asked, or comes of it,
@@ -526,7 +544,10 @@ export const make = (
           stale: Effect.succeed(false),
           // Only once it's known to play, so a line for going ahead dropped as yapd was turned off, or that afplay couldn't play, never counts as the last one he heard.
           confirmed: persona.said(spoken),
-          ...(following === undefined || quotes || failed ? {} : { followUp: following(update, line, reported(update)), window: Conversation.linger, after: true }),
+          // Its own thread, which nothing written by yapd's own hand reaches unless it's steered, as a reply over the update itself.
+          ...(following === undefined || quotes || failed
+            ? {}
+            : { followUp: following(update, line, reported(update), ownOf(update)), window: Conversation.linger, after: true }),
         },
         readSince.get(update),
       )
@@ -539,6 +560,12 @@ export const make = (
    */
   const steered = (update: Conversation.Update) => update.about !== undefined && options.hands !== undefined && !hooked.has(update)
 
+  /** An update's own thread, as what's said over it is held to: none for a subagent's, reached only through its hook. */
+  const ownOf = (update: Conversation.Update): Brain.Own => {
+    const ref = update.subagent === undefined ? (update.about ?? update.owner) : undefined
+    return { ...(ref === undefined ? {} : { ref }), steered: steered(update) }
+  }
+
   /**
    * What a line saying how a reply over an update went says yapd changed:
    * the reply, by the request it went under, when it went by yapd's own
@@ -548,6 +575,30 @@ export const make = (
   const reported = (update: Conversation.Update): Brain.Done => {
     const [utterance, ...more] = steered(update) ? (steeredAs.get(update) ?? []) : []
     return utterance === undefined || more.length > 0 ? {} : { change: { what: "acted", utterance } }
+  }
+
+  /**
+   * What the line said of an update that he spoke over or just heard says yapd
+   * changed, as `made` tells it: a reply sent by yapd's own hand, alone, a mute
+   * or a mode he just made over it, while it's the last of its kind; nothing
+   * for the update itself, an answer, a line said again, or a reply through a
+   * hook, after which any take-back is asked about first.
+   */
+  const doneBy = (update: Conversation.Update, made: Conversation.Made): Brain.Done => {
+    switch (made) {
+      case "sent":
+        return reported(update)
+      case "mute": {
+        const at = changedOver.get(update)
+        return at === undefined ? {} : { change: { what: "mute", at } }
+      }
+      case "mode": {
+        const at = modeChangedOver.get(update)
+        return at === undefined ? {} : { change: { what: "mode", at } }
+      }
+      default:
+        return {}
+    }
   }
 
   /**
@@ -780,36 +831,50 @@ export const make = (
     // that" said next takes it back, rather than be the model's to make something of, which could take it for something to tell the
     // agent. What he says in between that isn't for its agent, like a cough heard as "Thank you." or the "Scratch" of "Scratch...
     // that", leaves it to be taken back, for as long as it's the last change he made.
-    mute: (update, heard, voiced, echo) => {
+    mute: (update, heard, voiced, echo): Option.Option<Conversation.Hooked> => {
       const muted = controls
       const plain = echo === undefined && voiced >= Brain.faintest
       const made = changedOver.get(update)
-      // How yapd talks, like "focus" or "talk shorter", plainly his and in so many words, is changed here, and never reaches the agent.
+      // How yapd talks, like "focus" or "talk shorter", plainly his and in so many words, is changed here, and never reaches the agent:
+      // what it changed, if it did, is what "scratch that" handed over next takes back.
       const commanded = plain && options.command !== undefined ? options.command(heard, update.needsYou) : Option.none()
       if (Option.isSome(commanded)) {
         changedOver.delete(update)
-        return commanded
+        modeChangedOver.delete(update)
+        return Option.some({
+          _tag: "Done",
+          made: "mode",
+          doing: Effect.gen(function* () {
+            const before = yield* Clock.currentTimeMillis
+            const said = yield* commanded.value
+            const last = options.modeChange === undefined ? Option.none<Modes.Change>() : yield* options.modeChange
+            if (Option.isSome(last) && last.value.at >= before) modeChangedOver.set(update, last.value.at)
+            return said
+          }),
+        })
       }
       if (muted === undefined || !plain) return Option.none()
       if (made !== undefined && Brain.takesBack(heard)) {
         changedOver.delete(update)
-        return Option.some(
-          Effect.gen(function* () {
+        return Option.some({
+          _tag: "Done",
+          made: "mute",
+          doing: Effect.gen(function* () {
             const [lines, now] = [yield* persona.lines, yield* Clock.currentTimeMillis]
             // Only while it's still the last change he made, made in the last two minutes.
             const last = options.mutes === undefined ? Option.none<Mutes.Change>() : yield* options.mutes.last
             if (!Option.exists(last, ({ at }) => at === made)) return Brain.muteLines(lines, "it", now).unchanged
             return Brain.takenBack(lines, yield* muted.undo, now)
           }),
-        )
+        })
       }
       const asked = Mutes.command(heard)
       // Anything else about mutes, like "mute the Tezos one", "mute it for a bit" or "what's muted?", or about which subagents are read,
-      // like "can you read me its subagents", is the shortcut's to work out: the model reading him this update knows only this thread, and
-      // could take it for something to tell the agent.
+      // like "can you read me its subagents", is yapd's assistant's to work out, which knows his threads, never the Responder's, which
+      // knows only this one, and could take it for something to tell the agent. Without the assistant, it's the shortcut's.
       if (Option.isNone(asked)) {
-        if (Mutes.aboutSubagents(heard)) return Option.some(Effect.map(persona.lines, (lines) => Brain.subagentLines(lines, "it").elsewhere))
-        return Mutes.aboutMuting(heard) ? Option.some(Effect.map(persona.lines, (lines) => Brain.muteLines(lines, "it", 0).elsewhere)) : Option.none()
+        if (Mutes.aboutSubagents(heard)) return Option.some({ _tag: "Over", line: Effect.map(persona.lines, (lines) => Brain.subagentLines(lines, "it").elsewhere) })
+        return Mutes.aboutMuting(heard) ? Option.some({ _tag: "Over", line: Effect.map(persona.lines, (lines) => Brain.muteLines(lines, "it", 0).elsewhere) }) : Option.none()
       }
       changedOver.delete(update)
       const { how, minutes } = asked.value
@@ -820,8 +885,10 @@ export const make = (
           if (Option.isSome(last)) changedOver.set(update, last.value.at)
           return changed
         })
-      return Option.some(
-        Effect.gen(function* () {
+      return Option.some({
+        _tag: "Done",
+        made: "mute",
+        doing: Effect.gen(function* () {
           const lines = yield* persona.lines
           const now = yield* Clock.currentTimeMillis
           const said = Brain.muteLines(lines, "it", now)
@@ -863,8 +930,22 @@ export const make = (
           const done = yield* muted.mute({ key, project: update.project, ...(name === undefined ? {} : { called: name }) }, ends)
           return (yield* noted(done)) ? said.muted(ends) : said.already
         }),
-      )
+      })
     },
+    // What's yapd's to do, handed over, with what's known of the update here: whether what's said over it goes to its thread by yapd's
+    // own hand, whether he's at hand, and what the line he spoke over or just heard says yapd changed, which "scratch that" reaches.
+    // Acted on, he's at hand, as when anything he says back is taken up.
+    ...(options.over === undefined
+      ? {}
+      : {
+          over: (update: Conversation.Update, lines: ReadonlyArray<Line>, line: string, made: Conversation.Made, muting: boolean): Conversation.Handing =>
+            (heard, voiced, echo, afterPause, unsaid) =>
+              Effect.gen(function* () {
+                const given: Assistant.Over = { steered: steered(update), present: yield* present, done: doneBy(update, made), ...(muting ? { muting: true } : {}) }
+                const handed = yield* options.over!(update, lines, line, given)(heard, voiced, echo, afterPause, unsaid)
+                return handed._tag === "Act" ? { ...handed, run: (running: Conversation.Running) => Effect.zipRight(heardHim, handed.run(running)) } : handed
+              }),
+        }),
     ...(options.routines === undefined ? {} : { routines: options.routines }),
     // "Mute." said on its own over anything yapd says, or right after, is his emergency off. It's turned off from outside what's being
     // said, as the menu turns it off, which cuts that off as it does anything being said, keeping it unheard: so this waits to be cut
@@ -2097,9 +2178,16 @@ export const make = (
    */
   const say = (said: Inbox.Said, dealtWith: Effect.Effect<void>, listening = true, ended: Effect.Effect<void> = Effect.void) =>
     Effect.gen(function* () {
-      const { question, followUp } = said.notice
+      const { question, followUp, handoff } = said.notice
       if (yield* said.notice.stale) return yield* dealtWith
-      const saying = said.notice.saying ?? Effect.void
+      // What came of something handed over from an update, how long that took, part by part, as it starts to play.
+      const timed =
+        handoff === undefined
+          ? Effect.void
+          : Effect.flatMap(Clock.currentTimeMillis, (now) =>
+              Conversation.answeredIn(handoff.since, { responder: handoff.responder, brain: handoff.brain, acting: said.notice.at - handoff.ran, rendering: now - said.notice.at }),
+            )
+      const saying = Effect.zipRight(timed, said.notice.saying ?? Effect.void)
       const confirmed = said.notice.confirmed ?? Effect.void
       const { path: played, spoken, used } = yield* words(said)
       // Settled while its words were rendered, like a question closed by what he said meanwhile, it's dropped all the same.
@@ -2467,11 +2555,31 @@ export const make = (
           ),
         )
       }).pipe(Effect.uninterruptible)
+    /** Where it's put back to be read again from, once what he handed over that needs it to be is acted on. */
+    let putting: number | undefined
+    /**
+     * Puts it back to be read again from where he cut in, once the answer to
+     * what he handed over is said: whichever of this and a dictation starting
+     * then finds it put back already never takes that back.
+     */
+    const back = (from: number) =>
+      Effect.gen(function* () {
+        putting = from
+        const again = yield* keep("update" in ready ? { ...ready, from } : ready, false, turns)
+        kept = kept || again
+        if (again) yield* Effect.logInfo("Put back to be read again from where he cut in")
+      })
     const reading =
       "update" in ready
         ? conversation
-            // Longer after one that asks him something while he's at hand, or one heard again, which he asked for.
-            .converse(ready.update, heard(ready.update), { replay: ready.replay !== undefined, present: yield* present })
+            // Longer after one that asks him something while he's at hand, or one heard again, which he asked for. From where it was put
+            // back to be read again, when it was.
+            .converse(ready.update, heard(ready.update), {
+              replay: ready.replay !== undefined,
+              present: yield* present,
+              ...(ready.from === undefined ? {} : { from: ready.from }),
+              back,
+            })
             .pipe(Effect.flatMap((heardIt) => (heardIt ? heard(ready.update) : Effect.void)))
         : say(
             ready,
@@ -2497,9 +2605,9 @@ export const make = (
         Effect.zipRight(
           dictationStarted,
           Effect.map(
-            Effect.suspend(() => keep(ready, dealtWith || through, turns)),
+            Effect.suspend(() => keep(putting === undefined || !("update" in ready) ? ready : { ...ready, from: putting }, dealtWith || through, turns)),
             (again) => {
-              kept = again
+              kept = kept || again
             },
           ),
         ),
@@ -2715,6 +2823,8 @@ export const make = (
      * after the user last stopped dictating at most.
      */
     awaiting,
+    /** As `awaiting`, but for as long as `after` once he last stopped dictating at most. */
+    awaitingFor,
     /** Whether these words are waiting to be said, like an update or work that started, which a dictation cut off. */
     queued: (spoken: string) =>
       STM.commit(
