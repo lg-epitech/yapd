@@ -686,10 +686,11 @@
     },
     {
       "id": "S48",
-      "note": "catching up over an update from rig, tied by its owner, so the Brain knows rig: the catch-up, never a write",
+      "note": "catching up over an update from rig, tied by its owner, so the Brain knows rig, with another of rig's unheard: the catch-up, never a write",
       "update": "rig",
       "how": "owner",
       "machine": "rig",
+      "unheard": [{ "thread": "t-rig-docs", "project": "docs", "said": "Over in the docs site on rig, the build is green again, sir.", "ago": 1200 }],
       "heard": "Anything else from rig?",
       "expect": { "act": ["catchup"], "never": ["send", "stop", "undo", "decide", "reply", "tidy"] }
     },

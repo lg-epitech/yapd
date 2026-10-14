@@ -175,6 +175,8 @@ const Synthetic = Schema.Struct({
       acted: Schema.optional(Schema.Struct({ thread: Schema.String, text: Schema.String, ago: Schema.Number })),
       /** His routines, by name, with their steps. */
       routines: Schema.optional(Schema.Array(Schema.Struct({ name: Schema.String, steps: Schema.String }))),
+      /** What he hasn't heard yet, on the case's machine, held for the digest `ago` seconds before: nothing, unless it says. */
+      unheard: Schema.optional(Schema.Array(Schema.Struct({ thread: Schema.String, project: Schema.String, said: Schema.String, ago: Schema.Number }))),
       expect: Expect,
     }),
   ),
@@ -225,6 +227,8 @@ interface Case {
   readonly routines?: ReadonlyArray<{ readonly name: string; readonly steps: string }>
   /** The journal's last few rows before it, as the Brain is shown them. */
   readonly lately?: ReadonlyArray<Kept>
+  /** Written: what he hasn't heard yet. */
+  readonly unheard?: ReadonlyArray<Kept>
   /** What came of it live: the Responder's intent, or the assistant's act, what was said and what was sent. */
   readonly logged: { readonly intent?: string; readonly act?: string; readonly spoken?: string; readonly message?: string }
   readonly expect?: Expect
@@ -946,6 +950,13 @@ const synthetic = Effect.gen(function* () {
       ...(written.done === undefined ? {} : { done: written.done.change === undefined ? {} : { change: written.done.change } }),
       ...(acted === undefined ? {} : { acted }),
       ...(written.routines === undefined ? {} : { routines: written.routines }),
+      ...(written.unheard === undefined
+        ? {}
+        : {
+            unheard: written.unheard.map(
+              (row, at): Kept => ({ id: at + 1, at: when - row.ago * 1000, kind: "update", machine, project: row.project, thread: row.thread, said: row.said, detail: { held: "progress" } }),
+            ),
+          }),
       logged: written.expect.intent === undefined ? {} : { intent: written.expect.intent },
       expect: written.expect,
       note: written.note,
@@ -1020,6 +1031,7 @@ const situation = (case_: Case, base: T3Live.View, handoff = false): Brain.Situa
     others,
     now,
   })
+  const desk: Threads.Desk = { threads, away: [] }
   return {
     utterance: {
       id: `eval-${case_.id}`,
@@ -1034,9 +1046,9 @@ const situation = (case_: Case, base: T3Live.View, handoff = false): Brain.Situa
     subject,
     lines: case_.lines,
     open: Option.none(),
-    desk: { threads, away: [] },
+    desk,
     lately: case_.lately ?? [],
-    missed: { since: now - day, spoke: now - day, groups: [] },
+    missed: { since: now - day, spoke: now - day, groups: Missed.group(case_.unheard ?? [], desk) },
     mutes: [],
     muteChange: Option.none(),
     usage: Option.none(),
