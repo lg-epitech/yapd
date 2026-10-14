@@ -211,6 +211,15 @@ struct Cancelling: Asking, Equatable {
 
   var method: String { "DELETE" }
   var path: String { "reminders/\(encoded(id))" }
+
+  /// What yapd said turning it down, `body` and `response` as they came back, as "It's already gone off.": a 409's first line,
+  /// cut short when it's long, as a row's label is. None when it's cancelled, or for anything else, as when yapd doesn't answer.
+  static func refusal(_ body: Data, _ response: URLResponse) -> String? {
+    guard (response as? HTTPURLResponse)?.statusCode == 409, let text = String(data: body, encoding: .utf8) else { return nil }
+    let line = text.split(whereSeparator: \.isNewline).first.map { $0.trimmingCharacters(in: .whitespaces) } ?? ""
+    if line.isEmpty { return nil }
+    return line.count > 60 ? "\(line.prefix(59))…" : line
+  }
 }
 
 /// Hearing a thread's latest update again, as `POST /threads/{key}/replay`.

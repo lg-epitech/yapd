@@ -31,8 +31,9 @@ import Foundation
 /// Clear Catch-Up under Catch Me Up, and the recent rows opening a panel each instead of the Mute menu, which offers hearing the
 /// thread again, muting it, for an hour too, or taking the mute off, a subagent's its own, or saying it's muted with the thread
 /// it's part of, having its subagents read, checked while they are, on a T3 Code thread's, a subagent's by the thread it's part
-/// of, and its pull request when it has an https one, and lists his reminders, each to cancel, while yapd is off too; and it keeps
-/// each item by an id from one state to the next, so the open menu changes in place.
+/// of, and its pull request when it has an https one, and lists his reminders, each to cancel, while yapd is off too, one gone
+/// while it's open turned off where it is, and yapd's refusal of the last he chose to cancel under them; and it keeps each item
+/// by an id from one state to the next, so the open menu changes in place.
 @MainActor func checkMenu() {
   let decoded = { (json: String) in try? JSONDecoder().decode(Status.self, from: Data(json.utf8)) }
   let utc = TimeZone(identifier: "UTC")!
@@ -213,6 +214,21 @@ import Foundation
   let nested = menu(reminding(true, set), true).all.map(\.id)
   check(Set(nested).count == nested.count, "names each item once, its reminders' and their Cancel too, not \(nested)")
   check(nested == menu(reminding(false, set), true).all.map(\.id), "keeps each reminder as one item, on or off, so the open menu changes it in place")
+  // Gone while the menu's open, as one that went off, a reminder and its Cancel are turned off where they are, and nothing else is,
+  // nor anything that came.
+  let opened = menu(reminding(true, set), true).all.map(\.id)
+  let fired = reminding(true, [reminder("41", "", "When the Mina tickets on rig asks you something"), reminder("43", offer, "Tomorrow at 9:00 AM")].joined(separator: ", "))
+  check(menu(fired, true).gone(opened) == ["reminder 42", "reminder 42 cancel"], "turns off a reminder gone while the menu's open, and its Cancel, not \(menu(fired, true).gone(opened))")
+  check(menu(reminding(true, ""), true).gone(opened).count == 6 && menu(reminding(true, set), true).gone(menu(reminding(true, ""), true).all.map(\.id)).isEmpty, "turns off every reminder gone, and nothing that came")
+  // yapd's refusal of the last one he chose to cancel, in its words, under Reminders, once; a 409's alone, its first line.
+  let refusing = drawn(Menu(reminding(true, set), now: now, last: true, refused: "It's already gone off.", zone: utc, locale: english).items).first { $0.hasPrefix("Reminders") }
+  check(refusing?.hasPrefix("Reminders — It's already gone off. ▸ Call the bank") == true, "says yapd's refusal under Reminders, not \(refusing ?? "nothing")")
+  let answer = { (status: Int, body: String) in
+    Cancelling.refusal(Data(body.utf8), HTTPURLResponse(url: URL(string: "http://127.0.0.1:4747/reminders/42")!, statusCode: status, httpVersion: nil, headerFields: nil)!)
+  }
+  check(answer(409, "It's already gone off.") == "It's already gone off." && answer(409, "It's already cancelled.\n") == "It's already cancelled.", "reads yapd's refusal as it says it")
+  check(answer(204, "") == nil && answer(404, "No such reminder.") == nil && answer(409, " \n") == nil, "reads nothing else as a refusal")
+  check(answer(409, String(repeating: "a", count: 80)) == "\(String(repeating: "a", count: 59))…", "cuts a long refusal short")
 
   // What the icon tells VoiceOver.
   let told: [(Status?, String)] = [

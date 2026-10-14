@@ -14,6 +14,9 @@ final class Yapd {
   private(set) var state: Status?
   /// The last card yapd showed, to show again.
   private(set) var last: String?
+  /// What yapd said the last time it turned down cancelling one of his reminders, as "It's already gone off.", which the menu
+  /// says under Reminders the next time it opens; none once it's shown that, or once yapd cancels another.
+  private(set) var refused: String?
   /// The time the menu's times are told from, moved on every minute.
   private(set) var now = Date()
   /// The recent threads' project icons.
@@ -161,9 +164,19 @@ final class Yapd {
   }
 
   /// Cancels one of his reminders by its id, as "cancel the bank reminder" does, with nothing said: "scratch that" by voice keeps
-  /// it again. One that went off or was cancelled since is refused, and the list drops it as the state says so.
+  /// it again. One that went off or was cancelled since is refused, which the menu says the next time it opens, in yapd's words,
+  /// and the list drops it as the state says so.
   func cancel(_ reminder: Status.Reminder) {
-    ask(Cancelling(reminder))
+    guard let request = request(Cancelling(reminder)) else { return }
+    Task {
+      guard let (body, response) = try? await URLSession.shared.data(for: request) else { return }
+      refused = Cancelling.refusal(body, response)
+    }
+  }
+
+  /// Lets go of what yapd said turning down cancelling a reminder, once the menu has shown it, unless it's said another since.
+  func shown(_ refusal: String) {
+    if refused == refusal { refused = nil }
   }
 
   /// What yapd tells of a thread for its panel, by its key, unless it doesn't know it, is too old to tell, or doesn't answer.

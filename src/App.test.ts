@@ -214,13 +214,16 @@ describe.skipIf(swiftc === undefined)("App", () => {
   )
 
   test(
-    "the menu shows everything it did, in the same order and turned on and off by the same rules, with a panel beside each recent thread instead of the Mute menu, to hear it again, mute it, for an hour too, or take the mute off, and have its subagents read, lists his reminders to cancel each by its id, and keeps each item by an id, so the open menu changes in place",
+    "the menu shows everything it did, in the same order and turned on and off by the same rules, with a panel beside each recent thread instead of the Mute menu, to hear it again, mute it, for an hour too, or take the mute off, and have its subagents read, lists his reminders to cancel each by its id, one gone while it's open turned off where it is and yapd's refusal said the next time it opens, and keeps each item by an id, so the open menu changes in place",
     async () => {
       expect(await run("menu")).toEqual({ code: 0, out: "The app's checks pass.\n" })
       // What the checks cover is what the menu bar draws: the menu and each panel are only ever built from Menu, and what's chosen does what the
       // item says.
       const bar = await Bun.file(join(app, "yapd", "MenuBar.swift")).text()
-      expect(bar.match(/\bMenu\([^)]*\)/g)).toEqual(["Menu(state, now: yapd.now, last: yapd.last != nil)", "Menu(yapd.state, now: yapd.now, last: yapd.last != nil)"])
+      expect(bar.match(/\bMenu\([^)]*\)/g)).toEqual([
+        "Menu(state, now: yapd.now, last: yapd.last != nil, refused: refused)",
+        "Menu(yapd.state, now: yapd.now, last: yapd.last != nil, refused: refused)",
+      ])
       expect(bar.match(/Menu\.panel\([^)]*\)/g)).toEqual(["Menu.panel(for: row, details: details[key])", "Menu.panel(for: row, details: details[key])"])
       expect(bar).toMatch(/@objc private func choose\(_ item: NSMenuItem\) \{\s*guard let action = item\.representedObject as\? Menu\.Action else \{ return \}\s*perform\(action\)\s*\}/)
       expect(bar.match(/made\.isEnabled = [^\n]*/g)).toEqual(["made.isEnabled = item.enabled"])
@@ -231,14 +234,23 @@ describe.skipIf(swiftc === undefined)("App", () => {
       // A reminder is cancelled only by its id, through Cancelling, as the checks check, and nothing else is sent of it.
       expect(bar).toMatch(/case \.cancel\(let reminder\): yapd\.cancel\(reminder\)/)
       const yapd = await Bun.file(join(app, "yapd", "YapdApp.swift")).text()
-      expect(yapd).toMatch(/func cancel\(_ reminder: Status\.Reminder\) \{\s*ask\(Cancelling\(reminder\)\)\s*\}/)
+      expect(yapd).toMatch(/func cancel\(_ reminder: Status\.Reminder\) \{\s*guard let request = request\(Cancelling\(reminder\)\) else \{ return \}/)
       expect(yapd).not.toMatch(/reminders\//)
+      // yapd's refusal is read as the checks read it, and said under Reminders as the menu next opens, from then until it closes, never as it
+      // comes while it's open, so nothing moves under his pointer, then let go.
+      expect(yapd).toMatch(/guard let \(body, response\) = try\? await URLSession\.shared\.data\(for: request\) else \{ return \}\s*refused = Cancelling\.refusal\(body, response\)/)
+      expect(bar.match(/yapd\.refused/g)).toEqual(["yapd.refused"])
+      expect(bar).toMatch(/private func build\(\) \{\s*refused = yapd\.refused\s/)
+      expect(bar).toMatch(/if let refused \{ yapd\.shown\(refused\) \}\s*refused = nil\s*\}/)
+      // A reminder gone while the menu is open, and its Cancel, are turned off where they are, as the checks check, and nothing else is.
+      expect(bar.match(/isEnabled = false[^\n]*/g)).toEqual(["isEnabled = false }"])
+      expect(bar).toMatch(/for id in model\.gone\(made\.keys\) \{ made\[id\]\?\.isEnabled = false \}/)
       // A row clicked is heard again only when it can be, and closes the menu then; otherwise the menu stays open, and its panel still opens.
       expect(bar).toMatch(/private func click\(_ key: String\) \{\s*guard let row = rows\[key\], row\.hearable else \{ return \}\s*menu\.cancelTracking\(\)\s*perform\(\.hear\(row\.recent\)\)\s*\}/)
       // Open, the menu changes only what it shows already, in place, what isn't offered hidden; built again as it opens, and as yapd stops or
       // starts, which leaves nothing in common with what's shown but Quit, and no rows on one side to move.
       expect(bar).toMatch(/guard open else \{ return \}(\s*\/\/[^\n]*)*\s*if \(state != nil\) != running \{\s*build\(\)\s*fetch\(\)\s*\} else \{\s*change\(menu\)\s*\}/)
-      expect(bar).toMatch(/let model = Menu\(yapd\.state, now: yapd\.now, last: yapd\.last != nil\)\s*running = yapd\.state != nil/)
+      expect(bar).toMatch(/let model = Menu\(yapd\.state, now: yapd\.now, last: yapd\.last != nil, refused: refused\)\s*running = yapd\.state != nil/)
       expect(bar).toMatch(/for item in model\.all \{\s*if let made = made\[item\.id\] \{ apply\(item, to: made\) \}\s*\}/)
       expect(bar).toMatch(/made\.isHidden = item\.hidden/)
       expect(bar).toMatch(/func menuNeedsUpdate\(_ menu: NSMenu\) \{\s*if menu === self\.menu \{\s*build\(\)/)

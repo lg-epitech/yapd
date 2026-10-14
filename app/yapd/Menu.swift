@@ -104,8 +104,9 @@ struct Menu: Equatable {
   let items: [Item]
 
   /// The menu for `state`, none while yapd isn't running, with times told from `now`, in his time, offering to show the last
-  /// card again once there's a `last` one to show.
-  init(_ state: Status?, now: Date, last: Bool, zone: TimeZone = .current, locale: Locale = .current) {
+  /// card again once there's a `last` one to show, and saying under Reminders what yapd `refused` of the last one he chose to
+  /// cancel, if it did.
+  init(_ state: Status?, now: Date, last: Bool, refused: String? = nil, zone: TimeZone = .current, locale: Locale = .current) {
     guard let state else {
       items = [.line("down", "yapd isn't running"), .separator("quit"), Menu.quit]
       return
@@ -134,13 +135,15 @@ struct Menu: Equatable {
     items.append(Item(id: "show last", kind: .action(.showLast), title: "Show Last Card", enabled: last))
     // His reminders, set by voice, each with Cancel beside it, as "cancel the bank reminder" does, with no asking first: "scratch
     // that" by voice keeps it again. It works while yapd is off too, and the list drops one as the state says so. There with none
-    // too, so the item never comes and goes.
+    // too, so the item never comes and goes. yapd's refusal of the last one he chose to cancel, as one that went off just before,
+    // is said under Reminders, in its words.
     if let reminders = state.reminders {
       let rows = reminders.map { reminder in
         let cancel = Item(id: "reminder \(reminder.id) cancel", kind: .action(.cancel(reminder)), title: "Cancel", enabled: true)
         return Item(id: "reminder \(reminder.id)", kind: .submenu([cancel]), title: reminder.label, enabled: true, detail: reminder.detail)
       }
-      items.append(Item(id: "reminders", kind: .submenu(rows.isEmpty ? [.line("no reminders", "No Reminders")] : rows), title: "Reminders", enabled: true))
+      let list = rows.isEmpty ? [Item.line("no reminders", "No Reminders")] : rows
+      items.append(Item(id: "reminders", kind: .submenu(list), title: "Reminders", enabled: true, detail: refused))
     }
     if let recent = state.recent {
       if !recent.isEmpty {
@@ -169,6 +172,14 @@ struct Menu: Equatable {
     items.flatMap { item in
       if case .submenu(let items) = item.kind { [item] + all(items) } else { [item] }
     }
+  }
+
+  /// Of the items `shown` in the open menu, by their ids, each reminder's, and its Cancel, that this one no longer has, as one
+  /// that went off or was cancelled since it opened: they're turned off where they are, so nothing moves under his pointer, and
+  /// it can't be chosen to cancel again.
+  func gone(_ shown: some Sequence<String>) -> [String] {
+    let ids = Set(all.map(\.id))
+    return shown.filter { $0.hasPrefix("reminder ") && !ids.contains($0) }
   }
 
   /// The rows of the recent threads, in order.

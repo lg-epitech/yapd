@@ -9,8 +9,9 @@ import AppKit
 // is doing and the latest told of it, to hear it again, mute it, have its
 // subagents read or open its pull request. While the menu is open, what
 // changes is changed in place, and what comes or goes waits for the next time
-// it opens, so nothing moves under his pointer, unless yapd stops or starts,
-// when it's built again, as there are no rows on one side to move.
+// it opens, a reminder that goes turned off where it is, so nothing moves under
+// his pointer, unless yapd stops or starts, when it's built again, as there are
+// no rows on one side to move.
 
 @MainActor
 final class MenuBar: NSObject, NSMenuDelegate {
@@ -36,6 +37,9 @@ final class MenuBar: NSObject, NSMenuDelegate {
   /// Each panel open now, asking yapd again every few seconds what it tells of its thread, since what the thread is doing, or
   /// its pull request's checks, change with nothing of its row changing.
   private var watching: [ObjectIdentifier: Task<Void, Never>] = [:]
+  /// What yapd said as the menu opened of the last reminder he chose to cancel that it turned down, said under Reminders while
+  /// it's open, and only then, so nothing moves under his pointer as one comes.
+  private var refused: String?
 
   init(_ yapd: Yapd) {
     self.yapd = yapd
@@ -64,7 +68,7 @@ final class MenuBar: NSObject, NSMenuDelegate {
   private func show() {
     let state = yapd.state
     icon(state)
-    let menu = Menu(state, now: yapd.now, last: yapd.last != nil)
+    let menu = Menu(state, now: yapd.now, last: yapd.last != nil, refused: refused)
     // Each row's icon is looked at even while the menu is closed, so one fetched while it's open is drawn once it's in.
     for row in menu.rows { _ = yapd.icons.icon(for: row.recent) }
     guard open else { return }
@@ -124,6 +128,9 @@ final class MenuBar: NSObject, NSMenuDelegate {
     open = false
     highlighted?.highlight(false)
     highlighted = nil
+    // Said once.
+    if let refused { yapd.shown(refused) }
+    refused = nil
   }
 
   /// A row draws its own highlight, as the pointer or the keyboard moves onto it or off it; it stays highlighted while its
@@ -138,7 +145,8 @@ final class MenuBar: NSObject, NSMenuDelegate {
 
   /// The menu afresh, from yapd's state as it opens.
   private func build() {
-    let model = Menu(yapd.state, now: yapd.now, last: yapd.last != nil)
+    refused = yapd.refused
+    let model = Menu(yapd.state, now: yapd.now, last: yapd.last != nil, refused: refused)
     running = yapd.state != nil
     menu.removeAllItems()
     made = [:]
@@ -234,12 +242,14 @@ final class MenuBar: NSObject, NSMenuDelegate {
 
   /// Changes what's shown in place, as yapd's state has it now: every item still there, and every row's panel, asking yapd
   /// again what it tells of a row's thread once anything of the row changed, as when a new update comes or a mute ends. What
-  /// came or went since the menu opened waits for the next time it opens.
+  /// came or went since the menu opened waits for the next time it opens, but a reminder gone, as one that went off, is turned
+  /// off where it is, its Cancel too, so it can't be chosen.
   private func change(_ model: Menu) {
     let before = rows
     for item in model.all {
       if let made = made[item.id] { apply(item, to: made) }
     }
+    for id in model.gone(made.keys) { made[id]?.isEnabled = false }
     for (key, row) in rows {
       change(panel: key)
       if before[key]?.recent != row.recent { fetch(key) }
