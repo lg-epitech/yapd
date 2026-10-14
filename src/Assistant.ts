@@ -340,8 +340,9 @@ export interface Outcome {
   /** Run once what's said is known to be playing, like noting the line for going ahead it starts with as the one he heard last. */
   readonly confirmed?: Effect.Effect<void>
   /**
-   * Whether it says a message of his may not have gone without saying its
-   * words, like what a restart couldn't confirm: "send it again" is his
+   * Whether it says a message of his may not have gone, or speaks of sending
+   * one again, without saying its words, like what a restart couldn't
+   * confirm, or "I sent that a minute ago" let go: "send it again" is his
    * likely reply, which the model could only send the agent as it is, so
    * nothing said after it is listened for.
    */
@@ -528,6 +529,13 @@ const onceBack = "I'll ask you again once I can."
 const unasked = (about: string, said: Lines) => `I left ${about || "that"} for now, since I'd have to ask you something about it${addressed(said)}.`
 
 /**
+ * Whether a question offers to send a message again: one that may not have
+ * got there, or the same words that went to the same thread lately, "Again?",
+ * the one yes or no to sending anything, never one to stopping or tidying.
+ */
+const sendsAgain = (open: Pick<Open, "kind" | "decision">) => open.kind === "resend" || (open.kind === "confirm" && open.decision.act === "send")
+
+/**
  * What a question left unasked would have asked, said after the news it
  * follows, which named what it's about already: tidying, the threads it
  * counted as "them", and any other yes or no to the same words, sending them again.
@@ -535,17 +543,18 @@ const unasked = (about: string, said: Lines) => `I left ${about || "that"} for n
 const unaskedAfter = (open: Pick<Open, "kind" | "about" | "decision" | "candidates">) =>
   open.decision.act === "tidy"
     ? `I didn't ask whether to ${open.candidates.length > 1 ? `${open.decision.how} them` : open.about}`
-    : open.kind === "resend" || open.kind === "confirm"
+    : sendsAgain(open)
       ? "I didn't ask about sending it again"
       : `I didn't ask whether to ${open.about}`
 
 /**
  * What's said of a question never asked, or let go unanswered: of an offer to
- * send a message again, it says the message may not have gone without its
- * words, so nothing said after it is listened for, since "send it again",
- * his likely reply, the model could only send as it is.
+ * send a message again, whether one that may not have gone or the same words
+ * that went lately, it speaks of the message without its words, so nothing
+ * said after it is listened for, since "send it again", his likely reply, the
+ * model could only send as it is.
  */
-const withoutWords = (outcome: Outcome, open: Pick<Open, "kind">): Outcome => (open.kind === "resend" ? { ...outcome, unsent: true } : outcome)
+const withoutWords = (outcome: Outcome, open: Pick<Open, "kind" | "decision">): Outcome => (sendsAgain(open) ? { ...outcome, unsent: true } : outcome)
 
 /** The thread a yes or no question, or a thread's own, is about, which it names, so what's said once it's answered needn't name it again. */
 const askedAbout = (open: Pick<Open, "kind" | "candidates">) =>

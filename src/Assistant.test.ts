@@ -10022,6 +10022,65 @@ describe("Assistant", () => {
     expect(letGo).toEqual({ spoken: "I didn't hear back about whether to send that to Migrate Tezos Integration again, so I left it, sir.", listened: false })
   })
 
+  test("'I sent that a minute ago. Again?' never asked, or let go unanswered, is told with nothing listened for after it", async () => {
+    const message = "Tell the Tesla's migration to use the fee table from the Mina work."
+    /** What's said last, and whether what he says after it can go anywhere. */
+    const last = (notices: () => ReadonlyArray<{ readonly spoken: string; readonly followUp?: unknown }>) => {
+      const { spoken, followUp } = notices().at(-1)!
+      return { spoken, listened: followUp !== undefined }
+    }
+    const asked = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant((situation) =>
+          situation.utterance.heard.startsWith("What")
+            ? Brain.decision({ act: "clarify", target: handle(situation, tezos), others: handle(situation, mina), sure: "low" })
+            : tezosMessage("high")(situation),
+        )
+        yield* made.dictate(message)
+        yield* made.wait(60)
+        const said = yield* TestClock.currentTimeMillis
+        yield* made.wait(5)
+        // Asked about something else, then the same words said before that was asked are handed on.
+        yield* made.dictate("What's it doing?")
+        yield* made.heard({ heard: message, via: "shortcut", at: said, voiced: 3, turns: 1 })
+        return last(made.notices)
+      }),
+    )
+    expect(asked).toEqual({
+      spoken: "I sent that to Migrate Tezos Integration a minute ago, sir. I didn't ask about sending it again, since I'm waiting on your answer to something else.",
+      listened: false,
+    })
+    const movedOn = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant((situation) => (situation.utterance.heard.startsWith("What") ? minaStatus(situation) : tezosMessage("high")(situation)), undefined, {
+          waiting: true,
+        })
+        yield* made.dictate(message)
+        yield* made.wait(60)
+        yield* made.dictate(message)
+        // He pressed again before it was asked.
+        yield* made.dictate("What's the Mina one doing?")
+        return made.notices().map(({ spoken, followUp }) => ({ spoken, listened: followUp !== undefined }))
+      }),
+    )
+    expect(movedOn.slice(2)).toEqual([
+      { spoken: "I sent that to Migrate Tezos Integration a minute ago, sir. I didn't ask about sending it again, since you'd moved on.", listened: false },
+      { spoken: "The Mina SSV2 tickets are filed, sir: four bugs, and fee rounding is the worst.", listened: true },
+    ])
+    const letGo = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(tezosMessage("high"))
+        yield* made.dictate(message)
+        yield* made.dictate(message)
+        yield* made.unanswered()
+        yield* made.wait(60)
+        yield* made.unanswered()
+        return last(made.notices)
+      }),
+    )
+    expect(letGo).toEqual({ spoken: "I didn't hear back about whether to send that to Migrate Tezos Integration again, so I left it, sir.", listened: false })
+  })
+
   test("an answer in his own words to a thread's question, or a message that went as its answer, that didn't get there with nothing offered is told with nothing listened for after it", async () => {
     const cloud = waitingOn({ id: "q1", kind: "user_input" })
     const network = { id: "network", question: "Which network first?", options: [{ label: "Mainnet" }, { label: "Ghostnet" }] }
