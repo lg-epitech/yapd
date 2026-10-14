@@ -13674,6 +13674,45 @@ describe("Assistant tidying", () => {
     expect(await unarchiving("medium", "Scratch that.")).toEqual(undone)
   })
 
+  test("unarchiving at once the two of three threads archived together that T3 Code said it archived unarchives those two alone, never the third, and he's told one at a time, never to say scratch that", async () => {
+    /** The Tezos importer, fees and docs archived together, the docs' answer lost, then the importer and fees unarchived, the model `sure` of it. */
+    const unarchiving = (sure: Brain.Sure) =>
+      run(
+        Effect.gen(function* () {
+          const made = yield* assistant(
+            (situation) => {
+              const { heard } = situation.utterance
+              if (heard.startsWith("Archive")) {
+                return Brain.decision({ act: "tidy", how: "archive", target: [importer, fees, docs].map((one) => handle(situation, one)).join(", "), sure: "high" })
+              }
+              if (heard === "Unarchive the fees and importer.") {
+                return Brain.decision({ act: "tidy", how: "unarchive", target: (situation.archived ?? []).map((_, index) => Brain.archivedHandle(index)).join(", "), sure })
+              }
+              return undefined
+            },
+            undefined,
+            {
+              others: tezosThreads,
+              answer: () => (payload, bounded) =>
+                payload.type === "thread.archive" && payload.threadId === docs.id
+                  ? Effect.fail(new T3CodeServer.Trouble({ reason: "T3 Code is taking too long.", sent: true }))
+                  : takes(payload, bounded),
+            },
+          )
+          yield* made.dictate("Archive the Tezos importer, fees and docs.")
+          yield* made.answer("Yes.")
+          // T3 Code archived all three, though it never said so of the docs.
+          for (const one of [importer, fees, docs]) yield* made.becomes({ ...one, archivedAt: "2026-10-01T02:18:01.000Z" })
+          yield* made.dictate("Unarchive the fees and importer.")
+          return { said: made.spoken().at(-1), sent: tidied(made.dispatched).map(({ type, threadId }) => `${String(type)} ${String(threadId)}`) }
+        }),
+      )
+    const archived = [importer, fees, docs].map(({ id }) => `thread.archive ${id}`)
+    const both = await unarchiving("high")
+    expect(both.sent).toEqual([...archived, `thread.unarchive ${importer.id}`, `thread.unarchive ${fees.id}`])
+    expect(await unarchiving("medium")).toEqual({ said: "I can only do that to one thread at a time, sir.", sent: archived })
+  })
+
   test("taking back the reminder of a thread he names by its handle in ARCHIVED, with none the archive dropped to bring back, takes back nothing, never another thread's", async () => {
     /** The Tezos one's reminder set before archiving the Mina one, which had none, or after an archive that dropped the Mina one's, then the Mina one's asked back. */
     const undoing = (then: "before" | "after") =>

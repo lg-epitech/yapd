@@ -31,9 +31,17 @@ export type Act =
    * Takes back what was just done: a stop, by letting the thread carry on, a
    * message, by withdrawing it, or a tidy, by doing the opposite to each
    * thread it tidied. `only` when he said which he meant: a message, or
-   * what was done to a thread by tidying it.
+   * what was done to a thread by tidying it. `among`, the threads he named
+   * of a tidy, when he named several: only those are taken back, never one
+   * of it he didn't name.
    */
-  | { readonly _tag: "Undo"; readonly to: Option.Option<Threads.Ref>; readonly carry: boolean; readonly only?: "message" | "tidy" }
+  | {
+      readonly _tag: "Undo"
+      readonly to: Option.Option<Threads.Ref>
+      readonly carry: boolean
+      readonly only?: "message" | "tidy"
+      readonly among?: ReadonlyArray<Threads.Ref>
+    }
   /**
    * Tidies threads in T3 Code, in the order given, each once, as he agreed
    * to: renamed to `title`, as he said it, or snoozed `until` then, in UTC
@@ -658,6 +666,18 @@ const stateOf = (thread: T3Live.Thread): typeof Before.Type => ({
 
 /** What a tidy is noted with once it's taken back, so it's never taken back twice. */
 const takenBack = "Taken back."
+
+/** The rows of a tidy that taking it back acts on, each with what was done: one that went, or may have, and isn't taken back already. */
+const undoable = (rows: ReadonlyArray<Ledger.Row>) =>
+  rows.flatMap((row) =>
+    (row.state === "sent" || row.state === "unknown") && row.reason !== takenBack ? Option.toArray(Option.map(tidyOf(row.body), (was) => ({ row, was }))) : [],
+  )
+
+/**
+ * The threads taking back a tidy acts on, of its rows, as `untidy` has them:
+ * even one T3 Code never said it tidied, which isn't among what it archived.
+ */
+export const untidies = (rows: ReadonlyArray<Ledger.Row>): ReadonlyArray<Threads.Ref> => undoable(rows).map(({ row }) => refOf(row))
 
 /** Why a tidy isn't taken back when it's one that's a way back itself, or kept nothing of how the thread was. */
 const oneWay = "I can only take back archiving, renaming, snoozing, settling or pinning a thread."
@@ -1422,10 +1442,17 @@ export const make = (options: {
   /**
    * Withdraws the message just sent while it's still in the queue; once it's
    * been read, it can only be told to ignore it. A tidy just done is taken
-   * back, every thread of it, as `untidy` has it. It's only ever the last
-   * thing done, never anything before it, of what he said he meant, `only`.
+   * back, every thread of it, or only those he named, `among`, as `untidy`
+   * has it. It's only ever the last thing done, never anything before it, of
+   * what he said he meant, `only`.
    */
-  const withdraw = (step: Step, to: Option.Option<Threads.Ref>, wanted: Effect.Effect<boolean>, only?: "message" | "tidy") =>
+  const withdraw = (
+    step: Step,
+    to: Option.Option<Threads.Ref>,
+    wanted: Effect.Effect<boolean>,
+    only?: "message" | "tidy",
+    among?: ReadonlyArray<Threads.Ref>,
+  ) =>
     Effect.gen(function* () {
       const kinds: ReadonlyArray<Ledger.Kind> = only === "tidy" ? ["tidy"] : only === "message" ? ["message", "stop", "undo", "decide", "reply", "start", "relay"] : []
       const last = yield* ledger.latest(scratch, {
@@ -1437,7 +1464,7 @@ export const make = (options: {
       const row = last.value
       if (row.kind === "stop") return yield* refused("It was a stop, which carrying on takes back.")
       if (row.kind === "start") return yield* refused("Starting work can't be taken back yet.")
-      if (row.kind === "tidy") return yield* untidy(step, row, to, wanted)
+      if (row.kind === "tidy") return yield* untidy(step, row, among === undefined ? Option.map(to, (one) => [one]) : Option.some(among), wanted)
       const messageId = row.messageId
       if (row.kind !== "message" || messageId === null) return yield* refused("There's nothing more to take back.")
       if (row.state !== "sent" && row.state !== "unknown") return yield* refused("It never went, so there's nothing to take back.")
@@ -1612,28 +1639,21 @@ export const make = (options: {
    * Takes back the tidy just done, every thread of it, as far as T3 Code
    * lets it: the way back from what went to each, under ids of this step,
    * then what T3 Code cleared as it was tidied that can be put back, as
-   * `putBack` has it; only the thread he named of it, `to`, when he named
-   * one. Each taken back is noted so, and never taken back twice.
+   * `putBack` has it; only the threads he named of it, `to`, when he named
+   * any. Each taken back is noted so, and never taken back twice.
    * Unarchived, what archiving it dropped comes back; what it stopped never
    * starts again, which is never claimed, nor is unsettling it ever taken
    * for leaving it as T3 Code would have it on its own. One pinned, or
    * settled, before it was is never unpinned, or unsettled: it's left so.
    */
-  const untidy = (step: Step, last: Ledger.Row, to: Option.Option<Threads.Ref>, wanted: Effect.Effect<boolean>) =>
+  const untidy = (step: Step, last: Ledger.Row, to: Option.Option<ReadonlyArray<Threads.Ref>>, wanted: Effect.Effect<boolean>) =>
     Effect.gen(function* () {
       const refused = (reason: string) => failing({ _tag: "Refused", reason } satisfies Outcome, "take a tidy back")
-      const rows = yield* ledger.steps(0, {
-        kinds: ["tidy"],
-        utterance: last.utterance,
-        step: last.step,
-        ...Option.match(to, { onNone: () => ({}), onSome: ({ machine, id }) => ({ machine, thread: id }) }),
-      })
-      const now = yield* Clock.currentTimeMillis
-      const going = rows.flatMap((row) =>
-        (row.state === "sent" || row.state === "unknown") && row.reason !== takenBack
-          ? Option.toArray(Option.map(tidyOf(row.body), (was) => ({ row, was, back: opposite(was, now) })))
-          : [],
+      const rows = (yield* ledger.steps(0, { kinds: ["tidy"], utterance: last.utterance, step: last.step })).filter((row) =>
+        Option.match(to, { onNone: () => true, onSome: (named) => named.some(({ machine, id }) => machine === row.machine && id === row.thread) }),
       )
+      const now = yield* Clock.currentTimeMillis
+      const going = undoable(rows).map(({ row, was }) => ({ row, was, back: opposite(was, now) }))
       if (going.length === 0) {
         return yield* refused(rows.some(({ reason }) => reason === takenBack) ? "I've taken that back already." : "It never went, so there's nothing to take back.")
       }
@@ -1835,7 +1855,7 @@ export const make = (options: {
         case "Stop":
           return stop(step, act.to, wanted)
         case "Undo":
-          return act.carry ? carry(step, act.to, wanted) : withdraw(step, act.to, wanted, act.only)
+          return act.carry ? carry(step, act.to, wanted) : withdraw(step, act.to, wanted, act.only, act.among)
         case "Tidy":
           return tidy(step, act, wanted)
       }

@@ -1157,6 +1157,10 @@ export const make = (options: {
         const archived = yield* Effect.filter(Hands.archives(tidied), ({ ref }) =>
           Effect.map(threads.find(ref), (found) => !Option.exists(found, ({ archivedAt }) => archivedAt === null)),
         )
+        // Every thread taking back the tidy just done would act on, even one T3 Code never said it tidied.
+        const last = Option.getOrUndefined(Option.filter(acted, ({ kind }) => kind === "tidy"))
+        const untidies =
+          last === undefined ? undefined : Hands.untidies(yield* ledger.steps(0, { kinds: ["tidy"], utterance: last.utterance, step: last.step }))
         // What he hasn't heard, a thread at a time: what was never read out, however much he's spoken since, and what was cut off since
         // he last said something, other than catching up, which he may never have heard the answer to, or something only heard as noise,
         // like a cough taken for "Thank you.". Not what's waiting to be read, like an update his asking cut off: he's told of that as
@@ -1187,6 +1191,7 @@ export const make = (options: {
           second: Option.none(),
           asked,
           acted,
+          ...(untidies === undefined ? {} : { untidies }),
           reminders,
           noted: Option.filter(Option.fromNullable(noted), ({ at }) => now - at <= Duration.toMillis(scratchable)),
           memories: { kept, written },
@@ -1921,6 +1926,13 @@ export const make = (options: {
         case "undo": {
           // Taking back a message, or what tidying did, is only that, whatever came after.
           const only = decision.how === "message" || decision.how === "tidy" ? decision.how : undefined
+          // Several he named of what tidying just did, by their handles in ARCHIVED, are all that's taken back: any of them not there is
+          // nothing taken back, never all of it.
+          if (Brain.tidyHandles(decision.target).length > 1) {
+            const among = Option.getOrUndefined(Brain.tidyTargets(decision.target, situation))
+            if (only !== "tidy" || among === undefined) return undefined
+            return { _tag: "Undo", to: Option.none(), carry: false, only, among: among.map(({ ref }) => ref) }
+          }
           return { _tag: "Undo", to, carry: decision.how === "carry" || (only === undefined && stopped), ...(only === undefined ? {} : { only }) }
         }
         case "tidy": {

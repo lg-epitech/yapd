@@ -194,6 +194,11 @@ export interface Situation {
   readonly asked: ReadonlyArray<string>
   /** What yapd last did for him in the last two minutes, whatever it was, which "scratch that" means. */
   readonly acted: Option.Option<Ledger.Row>
+  /**
+   * Every thread taking back the tidy just done would act on, as the ledger
+   * has it: even one T3 Code never said it tidied, which isn't in ARCHIVED.
+   */
+  readonly untidies?: ReadonlyArray<Threads.Ref>
   /** What he asked to be told later and is still to come, newest first. */
   readonly reminders?: ReadonlyArray<Reminders.Reminder>
   /** The reminder he last set or cancelled, or memory he had kept or forgotten, in the last two minutes, which "scratch that" means when it's the newest change he made. */
@@ -3295,16 +3300,20 @@ const tidying = (
   if (murmured(choice, utterance)) return { _tag: "Do", plan: { decision: { ...choice, act: "resume" }, target: Option.none() } }
   if (!tidyings.has(choice.how)) return { _tag: "Say", spoken: lines.cantTell }
   const handles = tidyHandles(choice.target)
-  // Several unarchived at once that are all yapd just archived in one step are that taken back, reminders and all, as for "scratch
-  // that", only when the model's sure, and none left out nor any more. Only unsure of it, he's told to say "scratch that", while that's
-  // what it takes back; any other several are one at a time, since taking an archive back would bring back threads he didn't name.
+  // Several unarchived at once that are all yapd just archived in one step are that taken back, reminders and all, only when the model's
+  // sure, and none left out nor any more, and of those alone, never one of it T3 Code never said it archived, which isn't in ARCHIVED.
+  // Only unsure of it, he's told to say "scratch that", while that's what it takes back and it brings back those and no other; any other
+  // several are one at a time, since taking an archive back would bring back threads he didn't name.
   if (handles.length > 1 && choice.how === "unarchive") {
     const step = archiveStep(situation)
     const all = step.length > 0 && sameThreads(handles.map((handle) => archivedBy(handle, situation)), step)
     if (all && choice.sure === "high") {
-      return { _tag: "Do", plan: { decision: { ...choice, act: "undo", how: "tidy", target: "", text: "", when: "", others: "" }, target: Option.none() } }
+      const undo = { ...choice, act: "undo" as const, how: "tidy", target: handles.join(", "), text: "", when: "", others: "" }
+      return { _tag: "Do", plan: { decision: undo, target: Option.none() } }
     }
-    return { _tag: "Say", spoken: all && newest(situation) === "acted" ? said.back : said.one }
+    const untidies = situation.untidies ?? []
+    const only = untidies.length === step.length && untidies.every((ref) => step.some((archived) => Threads.same(archived.ref, ref)))
+    return { _tag: "Say", spoken: all && only && newest(situation) === "acted" ? said.back : said.one }
   }
   if (handles.length > 1 && !listable.has(choice.how)) return { _tag: "Say", spoken: said.one }
   if (handles.length > tidiedAtMost) return { _tag: "Say", spoken: said.many(handles.length) }

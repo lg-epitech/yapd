@@ -2186,10 +2186,12 @@ describe("memories", () => {
       reason: null,
       at: now - 30_000,
     }
-    const unarchive = (target: string, sure: Brain.Sure = "high", shown: Partial<Brain.Situation> = { archived, acted: Option.some(acted) }) =>
-      Brain.check(Brain.decision({ act: "tidy", how: "unarchive", target, sure }), situation("Unarchive them.", shown), lines)
+    const shown = { archived, acted: Option.some(acted), untidies: [thread(1), thread(2)] }
+    const unarchive = (target: string, sure: Brain.Sure = "high", given: Partial<Brain.Situation> = shown) =>
+      Brain.check(Brain.decision({ act: "tidy", how: "unarchive", target, sure }), situation("Unarchive them.", given), lines)
+    // Taken back of those he named alone.
     const undone = unarchive("a2, a1")
-    expect(undone._tag === "Do" ? undone.plan.decision : undone).toMatchObject({ act: "undo", how: "tidy", target: "", sure: "high" })
+    expect(undone._tag === "Do" ? undone.plan.decision : undone).toMatchObject({ act: "undo", how: "tidy", target: "a2, a1", sure: "high" })
     // The model unsure he means all of it, he's told to say "scratch that", which takes back that step and nothing else.
     const told = { _tag: "Say" as const, spoken: "I can only unarchive one thread at a time. Say scratch that to undo the archive, sir." }
     expect(unarchive("a1, a2", "medium")).toEqual(told)
@@ -2199,12 +2201,18 @@ describe("memories", () => {
     const one = { _tag: "Say" as const, spoken: "I can only do that to one thread at a time, sir." }
     expect(unarchive("a1, a2, a3")).toEqual(one)
     expect(unarchive("a1, a01")).toEqual(one)
+    // The Tezos docs archived with them, though T3 Code never said so: still those two alone taken back, but "scratch that" would
+    // bring the docs back too, so it's one at a time.
+    const unconfirmed = { ...shown, untidies: [thread(1), thread(2), thread(4)] }
+    const named = unarchive("a2, a1", "high", unconfirmed)
+    expect(named._tag === "Do" ? named.plan.decision : named).toMatchObject({ act: "undo", how: "tidy", target: "a2, a1" })
+    expect(unarchive("a1, a2", "medium", unconfirmed)).toEqual(one)
     // With nothing just archived to take back, it's one at a time.
     expect(unarchive("a1, a2", "high", { archived })).toEqual(one)
     expect(unarchive("a1, a2", "high", { archived, acted: Option.some({ ...acted, kind: "message" }) })).toEqual(one)
     // Muted since, "scratch that" would take back the mute, so he's never told to say it.
     const muted = Option.some({ how: "mute" as const, at: now - 10_000, added: [{ key: `t3:Rosie:${tezos.id}`, at: now - 10_000 }], removed: [] })
-    expect(unarchive("a1, a2", "medium", { archived, acted: Option.some(acted), muteChange: muted })).toEqual(one)
+    expect(unarchive("a1, a2", "medium", { ...shown, muteChange: muted })).toEqual(one)
     // The Tezos fees and importer archived together, then the Mina fees alone just now: unarchiving the first two, which taking back
     // the newest archive would leave archived while it brought back the Mina fees, is one at a time.
     const later = { utterance: "u1", step: 0 }
