@@ -4740,16 +4740,17 @@ describe("Assistant", () => {
     expect(result.muted).toEqual([`t3:Rosie:${tezos.id}`])
   })
 
+  /** Takes each message in behind the turn under way, in a run of its own, as T3 Code queues it, so any can be withdrawn. */
+  const queues: Answer = (payload, bounded) =>
+    Effect.sync(() => {
+      if (payload.type === "message.dispatch") {
+        bounded.messages.push({ id: String(payload.messageId), role: "user", text: String(payload.text), createdAt: "x" })
+        bounded.runs.push({ id: `run-${String(payload.messageId)}`, status: "queued", ordinal: 4, userMessageId: String(payload.messageId) })
+      }
+      return { sequence: 2 }
+    })
+
   test("a no after a late word that a reply went asks about that reply, never what the dictation that cut it off sent since, and a yes withdraws that reply alone", async () => {
-    // Behind the turn under way, each in a run of its own, as T3 Code queues it, so either can be withdrawn.
-    const queues: Answer = (payload, bounded) =>
-      Effect.sync(() => {
-        if (payload.type === "message.dispatch") {
-          bounded.messages.push({ id: String(payload.messageId), role: "user", text: String(payload.text), createdAt: "x" })
-          bounded.runs.push({ id: `run-${String(payload.messageId)}`, status: "queued", ordinal: 4, userMessageId: String(payload.messageId) })
-        }
-        return { sequence: 2 }
-      })
     const said = (heard: string, since: T3Live.Thread) =>
       run(
         Effect.gen(function* () {
@@ -4789,6 +4790,43 @@ describe("Assistant", () => {
         expect(result.withdrawn).toEqual([result.reply])
         expect(result.after).toEqual(Option.some("sent"))
       }
+    }
+  })
+
+  test("taken back after a late word that a reply went, it's that reply alone, though more went to the same thread between working it out and doing it", async () => {
+    const said = (heard: string) =>
+      run(
+        Effect.gen(function* () {
+          const { dictate, following, wait, flush, dispatched, ledger } = yield* assistant(
+            (situation) => {
+              const asked = situation.utterance.heard
+              if (asked.startsWith("Tell the Tesla")) return Brain.decision({ act: "send", target: handle(situation, tezos), text: "Use staging.", how: "now" })
+              if (asked.startsWith("Then tell")) return Brain.decision({ act: "send", target: handle(situation, tezos), text: "Add tests.", how: "now" })
+              return Brain.decision({ act: "undo", sure: "high" })
+            },
+            undefined,
+            { answer: () => queues },
+          )
+          yield* dictate("Tell the Tesla's migration to use staging.")
+          const reply = Option.getOrThrow(yield* ledger.latest("1 minute"))
+          yield* wait(5)
+          const taken = yield* following({ machine: "Rosie", id: tezos.id }, "On it, sir.", { change: { what: "acted", utterance: reply.utterance } })(heard, 1)
+          // Worked out, and before it's done, more goes to the same thread.
+          yield* dictate("Then tell it to add tests.")
+          const after = Option.getOrThrow(yield* ledger.latest("1 minute"))
+          if (Option.isSome(taken)) yield* taken.value
+          yield* flush
+          return {
+            withdrawn: dispatched.filter(({ type }) => type === "queued-run.cancel").map(({ runId }) => runId),
+            reply: `run-${reply.messageId}`,
+            after: Option.map(yield* ledger.get(after.commandId), ({ state }) => state),
+          }
+        }),
+      )
+    for (const heard of ["Scratch that.", "No."]) {
+      const result = await said(heard)
+      expect(result.withdrawn).toEqual([result.reply])
+      expect(result.after).toEqual(Option.some("sent"))
     }
   })
 

@@ -278,6 +278,12 @@ export interface Plan {
   readonly left?: string
   /** For a message or an offer that's one of his routines' steps, as code put them in for its name, the routine's name. */
   readonly routine?: string
+  /**
+   * For taking back the step a "done" line said yapd took, said back to it:
+   * that step's command, which is all it takes back, never a step written
+   * between working out what he said and doing it.
+   */
+  readonly pinned?: string
 }
 
 /** What a decision comes to once checked: done, asked about, or answered with a reason. */
@@ -2946,7 +2952,7 @@ const checking = (choice: Decision, situation: Situation, lines: Lines): Checked
     case "undo": {
       // Words for his screen, like "take that down" once its card has faded, never take back a message: at most, they take a card down.
       if (hiding.has(gist(situation.utterance.heard))) return doing({ decision: { ...choice, act: "show", how: "hide", target: "" }, target: Option.none() })
-      return answeredBack(choice, situation, lines) ?? writing(choice, target, candidates, situation, lines, ask)
+      return answeredBack(choice, situation, lines, () => writing(choice, target, candidates, situation, lines, ask))
     }
     case "send": {
       // Nothing he says goes to a thread waiting on a secret, which it could be in other words: only T3 Code takes that.
@@ -2972,12 +2978,14 @@ const checking = (choice: Decision, situation: Situation, lines: Lines): Checked
       // Taking back the last change he asked for, as "scratch that" right after it does: said back to a "done" line, only the one it said.
       if (!modes.has(choice.how) && choice.how !== "undo") return { _tag: "Say", spoken: lines.cantTell }
       // About yapd alone, never a thread.
-      return (choice.how === "undo" ? answeredBack(choice, situation, lines) : undefined) ?? doing({ decision: { ...choice, target: "" }, target: Option.none() })
+      return choice.how === "undo"
+        ? answeredBack(choice, situation, lines, () => doing({ decision: { ...choice, target: "" }, target: Option.none() }))
+        : doing({ decision: { ...choice, target: "" }, target: Option.none() })
     case "mute":
       // Said over something, too little speech is talk or noise nearby, never something to do.
       if (murmured(choice, situation.utterance)) return doing({ decision: { ...choice, act: "resume" }, target: Option.none() })
       // Taking back the last change he made to them, said back to a "done" line, is only the one it said.
-      if (choice.how === "undo") return answeredBack(choice, situation, lines) ?? doing({ decision: { ...choice, target: "" }, target: Option.none() })
+      if (choice.how === "undo") return answeredBack(choice, situation, lines, () => doing({ decision: { ...choice, target: "" }, target: Option.none() }))
       if (choice.how === "clear") return doing({ decision: { ...choice, target: "" }, target: Option.none() })
       if (choice.how === "subagents" || choice.how === "nosubagents") {
         // A lasting setting, never one for a set time, which he's told rather than have it taken for another.
@@ -3316,18 +3324,28 @@ const theirs = (choice: Decision, situation: Situation): Reach | undefined => {
  * Said back to a "done" line, a take-back reaches exactly what that line said
  * yapd changed, or he's asked first, naming what his yes takes back, and it
  * takes back that alone: the line's own change, when he means that kind of
- * change, however much was done since, or else what it would reach. None
- * when it reaches the line's own change, or there's nothing to ask about,
- * which goes on as ever, like a refusal of what can't be taken back.
+ * change, however much was done since, or else what it would reach. It goes
+ * ahead, as `going` has it, when it reaches the line's own change, a step
+ * pinned to its command, so one written before it's done is never what's
+ * taken back; or when there's nothing to ask about, as ever, like a refusal
+ * of what can't be taken back.
  */
-const answeredBack = (choice: Decision, situation: Situation, lines: Lines): Checked | undefined => {
-  if (situation.utterance.afterDone === undefined) return undefined
+const answeredBack = (choice: Decision, situation: Situation, lines: Lines, going: () => Checked): Checked => {
+  if (situation.utterance.afterDone === undefined) return going()
   const reach = reaching(choice, situation)
-  if (reach !== undefined && owned(situation, reach.change)) return undefined
+  if (reach !== undefined && owned(situation, reach.change)) return pinning(going(), reach)
   const own = theirs(choice, situation)
   const said = choice.act === "undo" ? choice : { how: "", target: "" }
-  return (own === undefined ? undefined : askingBack(own, situation, lines, said)) ?? (reach === undefined ? undefined : askingBack(reach, situation, lines, said))
+  return (
+    (own === undefined ? undefined : askingBack(own, situation, lines, said)) ??
+    (reach === undefined ? undefined : askingBack(reach, situation, lines, said)) ??
+    going()
+  )
 }
+
+/** Going ahead to take back a step, pinned to it by its command: that step alone, whatever's written since. */
+const pinning = (checked: Checked, reach: Reach): Checked =>
+  checked._tag !== "Do" || reach.row === undefined ? checked : { ...checked, plan: { ...checked.plan, pinned: reach.row.commandId } }
 
 /** Whether he's replying to a "done" line saying yapd started work for him, which can't be taken back. */
 const startedBack = (situation: Situation) => {

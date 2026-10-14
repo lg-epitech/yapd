@@ -3996,7 +3996,8 @@ export const make = (options: {
         case "Ask":
           return Effect.map(opening(checked.open, thought.utterance), (outcome) => listing(outcome, checked.open))
         case "Do":
-          return perform(checked.plan, thought, said, at)
+          // Taking back the step a "done" line said, said back to it, is that step alone, whatever's written before it's done.
+          return perform(checked.plan, thought, said, checked.plan.pinned === undefined ? at : { ...at, pinned: checked.plan.pinned })
       }
     }
 
