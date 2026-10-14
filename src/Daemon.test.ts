@@ -7150,17 +7150,22 @@ describe("Daemon handing over what's yapd's to do", () => {
   test.each([
     ["a hooked update", "hooked"],
     ["a rig update tied by owner, its thread on the desk", "owner"],
-  ] as const)("over %s, 'tell it to rebase', handed over, goes through its waiting hook; 'tell the Mina one to wait and tell it to rebase' sends Mina's through T3 Code and leaves the rebase, said; nothing reaches the update's own thread through T3 Code", async (_, how) => {
+  ] as const)("over %s, 'tell it to rebase', handed over, goes through its waiting hook; 'tell the Mina one to wait and tell it to rebase' sends both to the Mina one through T3 Code, and with 'tell this one to rebase' leaves the rebase, said; nothing reaches the update's own thread through T3 Code", async (_, how) => {
     const over = (said: string) =>
       run(
         Effect.gen(function* () {
           const t3 = yield* handing
           const { handle, talk, wait, nextEvent, nextPlayback, played, followUps } = yield* assisted(
-            (situation) =>
-              situation.utterance.heard.toLowerCase().startsWith("tell it to rebase")
-                ? // "It", as the model is shown it: the update's own thread, by its handle.
-                  Brain.decision({ act: "send", target: Option.match(Brain.focused(situation), { onNone: () => "", onSome: ({ handle }) => handle }), text: "Rebase onto master." })
-                : Brain.decision({ act: "send", target: handleOf(situation, "t-mina"), text: "Wait for the Tezos migration.", rest: "tell it to rebase" }),
+            (situation) => {
+              const heard = situation.utterance.heard.toLowerCase()
+              // "It", as the model is shown it: the update's own thread, by its handle, or after a step to the Mina one, that one;
+              // "this one" is still the update's own.
+              if (heard.startsWith("tell it to rebase")) {
+                return Brain.decision({ act: "send", target: Option.match(Brain.focused(situation), { onNone: () => "", onSome: ({ handle }) => handle }), text: "Rebase onto master." })
+              }
+              if (heard.startsWith("tell this one to rebase")) return Brain.decision({ act: "send", target: Brain.ownHandle(situation) ?? "", text: "Rebase onto master." })
+              return Brain.decision({ act: "send", target: handleOf(situation, "t-mina"), text: "Wait for the Tezos migration.", rest: heard.slice(heard.indexOf(" and ") + " and ".length).replace(/\.$/, "") })
+            },
             {
               says: said,
               hands: t3.hands,
@@ -7191,9 +7196,13 @@ describe("Daemon handing over what's yapd's to do", () => {
     expect(own.relayed).toEqual(["s-tezos sent: Rebase onto master."])
     expect(own.sent).toEqual([])
     const both = await over("Tell the Mina one to wait and tell it to rebase.")
-    expect(both.sent).toEqual(["t-mina: Wait for the Tezos migration."])
+    expect(both.sent).toEqual(["t-mina: Wait for the Tezos migration.", "t-mina: Rebase onto master."])
     expect(both.relayed).toEqual([])
-    expect(both.played).toEqual(["On it: Open the Mina SSV2 bug tickets. I left that: tell it to rebase."])
+    expect(both.played).toEqual(["On it: Open the Mina SSV2 bug tickets. On it."])
+    const left = await over("Tell the Mina one to wait and tell this one to rebase.")
+    expect(left.sent).toEqual(["t-mina: Wait for the Tezos migration."])
+    expect(left.relayed).toEqual([])
+    expect(left.played).toEqual(["On it: Open the Mina SSV2 bug tickets. I left that: tell this one to rebase."])
   })
 
   test("over a hooked Tezos update, 'tell the migration one to wait', asked which, answered 'the Tezos one', sends nothing through T3 Code and says it was left; and a reply to a late 'On it' over a hooked update never reaches its thread through T3 Code", async () => {

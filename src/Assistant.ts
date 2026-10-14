@@ -220,7 +220,9 @@ export type Subject =
    * An update from a session T3 Code doesn't run, and what of it was said
    * last, like an answer over it. Handed over from it, `own`: the thread
    * it's from, its own or, on another machine, the one it's only known to
-   * be from, which is "it", or none, when its own session is.
+   * be from, which is "it", or none, when its own session is. In the rest of
+   * what's handed over, `went`: the thread the step before went to, when
+   * that's another, which "it" is then, while "this one" is still the update.
    */
   | {
       readonly _tag: "Session"
@@ -229,6 +231,7 @@ export type Subject =
       readonly routines?: ReadonlyArray<string>
       readonly withheld?: true
       readonly own?: { readonly ref?: Threads.Ref }
+      readonly went?: Threads.Ref
     }
   | {
       readonly _tag: "Answer"
@@ -1308,8 +1311,9 @@ export const make = (options: {
         const open = Option.filter(current(now, utterance.at), (open) => before(utterance)?.said !== undefined && !apart(utterance, about, open))
         const focus = Brain.about(about)
         const pending = Option.match(open, { onNone: () => [], onSome: ({ candidates }) => candidates })
-        // A reply is about what he just heard, which is on the desk already.
-        const found = utterance.via === "reply" ? [] : yield* searching(utterance.heard)
+        // A reply is about what he just heard, which is on the desk already; going on from a step that went to another thread over an
+        // update, so is the update's own thread, which "this one" still is.
+        const found = utterance.via === "reply" ? Brain.besideIt(about) : yield* searching(utterance.heard)
         const [shortlist, recent, said, usage, asked, coming, acted, mutes, muteChange, mode, modeChange, reminders, kept, written, reading, tidied] = yield* Effect.all([
           threads.desk(focus, pending, utterance.via === "reply" ? desk.reply : desk.asked, found, desk.named, utterance.heard),
           // Never what was held for later, which he was never told.
@@ -2486,8 +2490,10 @@ export const make = (options: {
         // Working it out has no effect, so it carries on whether or not what's said waits for it, until yapd is turned off, which stops it like the rest of the request.
         // "It" is the step before as it'll be said, part of catching up when that is, so what the rest comes to is too, however late it's said,
         // and one of his routines' steps in it by its name alone. Said over one of a thread's subagents' update, it's still that subagent.
-        // Handed over from an update, "it" stays the update, with its own thread, so "…and tell it to rebase" is the agent he was hearing.
-        const handed = thought.utterance.handed !== undefined && thought.subject._tag === "Session" ? thought.subject : undefined
+        // Handed over from an update, the update stays FOCUS, with its own thread, so "…and tell this one to rebase" is the agent he was
+        // hearing; but after a step that went to another thread, "it" is that one, so "tell the Mina one to wait and tell it to rebase" is
+        // all the Mina one's.
+        const handed = thought.utterance.handed !== undefined && thought.subject._tag === "Session" ? Brain.itAfter(thought.subject, on) : undefined
         const it = overSubagent(first.subject, on, first.say) ?? { _tag: "Answer", said: first.say, about: on }
         const thinking = yield* job(
           think(utterance, handed ?? along(thought, { ...it, ...routinesOf(first.subject) }), [

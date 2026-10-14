@@ -1773,12 +1773,37 @@ export const about = (subject: Assistant.Subject): Option.Option<Threads.Ref> =>
     case "Answer":
       return subject.about
     case "Session":
-      // Handed over, a rig update's thread it's only known to be from is "it" too.
-      return Option.fromNullable(subject.update.about ?? subject.own?.ref)
+      // Handed over, a rig update's thread it's only known to be from is "it" too, and in the rest, the thread the step before went to.
+      return Option.fromNullable(subject.went ?? subject.update.about ?? subject.own?.ref)
     case "Nothing":
       return Option.none()
   }
 }
+
+type Over = Extract<Assistant.Subject, { readonly _tag: "Session" }>
+
+/** The update's own thread, as what's handed over from it has it, a rig update's by `owner` too, and for a subagent's, its thread. */
+const ownOf = (subject: Over) => subject.update.about ?? subject.own?.ref ?? subject.update.subagent?.head?.ref
+
+/**
+ * What "it" is in the rest of what he handed over from an update, once the
+ * step before is done: still the update, unless that step went to another
+ * thread, which "it" is then, as he'd mean it, while "this one" is still the
+ * update, which stays FOCUS. A subagent's thread is its own here, as
+ * `overSubagent` has it.
+ */
+export const itAfter = (subject: Over, on: Option.Option<Threads.Ref>): Over => {
+  const { went: _, ...over } = subject
+  const own = ownOf(subject)
+  return Option.match(
+    Option.filter(on, (ref) => own === undefined || !Threads.same(ref, own)),
+    { onNone: () => over, onSome: (went) => ({ ...over, went }) },
+  )
+}
+
+/** Besides "it", what the desk keeps up front for what he says back: the update's own thread, once "it" is another. */
+export const besideIt = (subject: Assistant.Subject): ReadonlyArray<Threads.Ref> =>
+  subject._tag !== "Session" || subject.went === undefined ? [] : Option.toArray(Option.fromNullable(ownOf(subject)))
 
 /** The thread he's on about: what he heard about last, when it's on the desk. */
 export const focused = (situation: Pick<Situation, "subject" | "desk">) => {
@@ -4600,6 +4625,8 @@ const focus = (situation: Situation) => {
       const own = subject.own === undefined ? undefined : ownHandle(situation)
       const handle = own ?? (update.about === undefined ? undefined : handleIn(situation, update.about))
       const head = update.subagent?.head?.ref
+      // Going on from a step that went to another thread, "it" is that one, and the update "this one".
+      const it = subject.went === undefined ? `"it"` : `"this one"`
       return [
         update.subagent !== undefined
           ? `${subagentHandle}, ${update.subagent.called === undefined ? "" : `${fenced(update.subagent.called, 90)}, `}one of the subagents of ${(head === undefined ? undefined : handleOf(desk, head.machine, head.id)) ?? "a thread not in THREADS"}. Your update from it, ${lasted(now - update.at)} ago: ${fenced(update.spoken, 400)}`
@@ -4616,14 +4643,19 @@ const focus = (situation: Situation) => {
           ? []
           : [
               update.subagent !== undefined
-                ? `He's speaking over this update, so "it" is that subagent, ${subagentHandle}, not the thread it's part of: a message for it is "send" with "target" "", and tidying it is "tidy" with "target" "".`
-                : `He's speaking over this update, so "it" is that work's own session, not a thread in THREADS: a message for it is "send" with "target" "", and tidying it is "tidy" with "target" "".`,
+                ? `He's speaking over this update, so ${it} is that subagent, ${subagentHandle}, not the thread it's part of: a message for it is "send" with "target" "", and tidying it is "tidy" with "target" "".`
+                : `He's speaking over this update, so ${it} is that work's own session, not a thread in THREADS: a message for it is "send" with "target" "", and tidying it is "tidy" with "target" "".`,
             ]),
         // What he asks of the work he's hearing about is for the agent doing it, which knows it, never a new thread that would have to guess.
         ...(subject.own === undefined
           ? []
           : [
               `What he asks of the work this update is about, or of what it just told him, even a new task like deleting something it made or spoke of, is for its agent: "send" to ${own ?? `it, with "target" ""`}, never "start". Only asking to start or kick off something of its own, like a new thread, a review or another agent, is "start".`,
+            ]),
+        ...(subject.own === undefined || subject.went === undefined
+          ? []
+          : [
+              `He's going on from a step that went to ${handleIn(situation, subject.went) ?? "a thread not in THREADS"}: in what he says now, "it" and "that" mean that thread, while "this one" and "this thread" still mean ${own ?? (update.subagent !== undefined ? subagentHandle : "this update's own session")}.`,
             ]),
       ].join("\n")
     }

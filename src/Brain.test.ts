@@ -2854,6 +2854,21 @@ describe("handed over from an update", () => {
     expect(route(tidy("archive", ""), over("Archive it.", "untied"))).toEqual({ _tag: "Act", aims: false, doubted: false })
   })
 
+  test("in the rest of what's handed over, 'it' is the thread the step before went to when that's another, while the update stays FOCUS as 'this one'; a write to its own thread is still left", () => {
+    const hooked = over("Tell the Mina one to wait and tell it to rebase.", "hooked")
+    const session = hooked.subject as Extract<Assistant.Subject, { readonly _tag: "Session" }>
+    const after = Brain.itAfter(session, Option.some(ref(mina)))
+    const rest: Brain.Situation = { ...hooked, subject: after }
+    expect(Option.map(Brain.focused(rest), ({ handle }) => handle)).toEqual(Option.some(handle(mina)))
+    expect(Brain.prompt(rest, Option.none())).toContain(`"it" and "that" mean that thread, while "this one" and "this thread" still mean ${handle(tezos)}.`)
+    // After a step on its own thread, or none, "it" is still the update.
+    expect(Brain.itAfter(after, Option.some(ref(tezos)))).toEqual(session)
+    expect(Brain.itAfter(after, Option.none())).toEqual(session)
+    // "Tell this one to rebase" still never reaches its own thread through T3 Code while its hook waits.
+    expect(Brain.leftOver(send(handle(tezos)), rest.utterance.own!, rest.utterance.handed, rest)).toBe(true)
+    expect(Brain.leftOver(send(handle(mina)), rest.utterance.own!, rest.utterance.handed, rest)).toBe(false)
+  })
+
   test("over a TV in an empty room, new work, a reminder, a memory, a mode or a mute handed over is never done", () => {
     const shortcut: Brain.Routed = { _tag: "Answer", spoken: "Ask me that with the shortcut, sir.", unattended: true }
     const away = (decision: Brain.Decision, heard: string) => Brain.route(decision, over(heard, "tied", { present: false }), lines)
