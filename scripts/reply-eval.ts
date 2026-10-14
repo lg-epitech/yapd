@@ -100,8 +100,9 @@ const Route = Schema.Literal("Again", "Hook", "Responder", "Resume", "Dismiss", 
  * Brain's act and thread, and what neither may come to; and for batch 3's
  * path, what it may come to, how it's routed, how it was worked out, what
  * a Pass says was left, whether its rest step was left for the update's own
- * session, what's never done, what a question it asks names, what handed it
- * over, what's never said, what is, and the Brain's "how".
+ * session, what of what he said is never dropped, what's never done, what a
+ * question it asks names, what handed it over, what's never said, what is,
+ * and the Brain's "how".
  */
 const Expect = Schema.Struct({
   intent: Schema.optional(Intent),
@@ -119,6 +120,8 @@ const Expect = Schema.Struct({
   source: Schema.optional(Schema.String),
   left: Schema.optional(Schema.String),
   restLeft: Schema.optional(Schema.Boolean),
+  /** A piece of what he said that's never dropped: in the first step's message, or in its rest, sent, asked about or left. */
+  carries: Schema.optional(Schema.String),
   neverDone: Schema.optional(Schema.Array(Brain.Act)),
   asking: Schema.optional(Schema.String),
   handedBy: Schema.optional(Schema.Literal("hook", "responder")),
@@ -1543,9 +1546,9 @@ const meets = (case_: Case, result: Result): boolean | undefined => {
  * Whether batch 3's path meets a written case: the Responder's intent when it
  * kept it, the Brain's act, thread and rest when it was handed over, what
  * it may come to, how it's routed and worked out, what a Pass left, whether
- * the rest was left, none when there's no rest, what's never done, what a
- * question names, what handed it over, what's never said and what is, and
- * the Brain's "how" for it; and always, nothing written by
+ * the rest was left, what of what he said is never dropped, what's never
+ * done, what a question names, what handed it over, what's never said and
+ * what is, and the Brain's "how" for it; and always, nothing written by
  * yapd's own hand to an unsteered update's own thread, nor a Pass that loses
  * a negation he said or puts in words nothing said.
  */
@@ -1564,7 +1567,12 @@ const meetsHandoff = (case_: Case, expect: Expect, result: Result): boolean => {
   if (expect.neverRoute !== undefined) checks.push(!expect.neverRoute.includes(result.route as typeof Route.Type))
   if (expect.source !== undefined) checks.push(result.source === expect.source || result.brainSource === expect.source)
   if (expect.left !== undefined) checks.push(lower(result.left).includes(lower(expect.left)))
-  if (expect.restLeft !== undefined) checks.push((result.restLeft ?? false) === expect.restLeft)
+  if (expect.restLeft !== undefined) checks.push(result.restLeft === expect.restLeft)
+  if (expect.carries !== undefined) {
+    const piece = lower(expect.carries)
+    const restKept = result.restLeft === true || ["send", "reply", "clarify"].includes(result.restAct ?? "")
+    checks.push(lower(result.message).includes(piece) || lower(result.left).includes(piece) || (restKept && lower(result.rest).includes(piece)))
+  }
   if (expect.neverDone !== undefined) checks.push(result.done === undefined || result.leftFirst === true || !expect.neverDone.includes(result.done as Brain.Act))
   if (expect.asking !== undefined) checks.push(result.checked !== "Ask" || lower(result.spoken).includes(lower(expect.asking)))
   if (expect.handedBy !== undefined) checks.push(result.handedBy === expect.handedBy)

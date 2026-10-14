@@ -831,7 +831,7 @@
       "update": "rig",
       "how": "owner",
       "machine": "rig",
-      "heard": "Tell the Mina one to wait, and tell this one to rebase.",
+      "heard": "Tell the Mina one to wait and tell it to rebase.",
       "expect": { "act": ["send"], "target": "Mina", "rest": "rebase", "restLeft": true, "neverSpoken": ["couldn't tell"] }
     },
     {
@@ -847,7 +847,7 @@
       "note": "a mixed request over a hooked update, the other thread's part first: sent to it, the rebase left for its own session",
       "update": "tezos",
       "how": "hooked",
-      "heard": "Tell the Mina one to wait, and tell this one to rebase.",
+      "heard": "Tell the Mina one to wait and tell it to rebase.",
       "expect": { "act": ["send"], "target": "Mina", "rest": "rebase", "restLeft": true, "neverSpoken": ["couldn't tell"] }
     },
     {
@@ -1014,11 +1014,11 @@
     },
     {
       "id": "S83",
-      "note": "a mixed request over a hooked update, the other thread's part first, then 'it', which after 'the Mina one' is the Mina one: both parts sent to it, nothing left",
+      "note": "S66h's words, with 'it' read either way, as the plan's 2.2 and 6 leave it to the model: Mina's sent, and the rebase reaches the Mina one too or is left for the update's own session, never dropped; S66h holds the plan's own reading, pending his verdict",
       "update": "tezos",
       "how": "hooked",
       "heard": "Tell the Mina one to wait and tell it to rebase.",
-      "expect": { "act": ["send"], "target": "Mina", "restLeft": false, "neverSpoken": ["couldn't tell"] }
+      "expect": { "act": ["send"], "target": "Mina", "carries": "rebase", "neverSpoken": ["couldn't tell"] }
     },
     {
       "id": "S84",
@@ -1043,6 +1043,23 @@
       "how": "tied",
       "heard": "Pin it.",
       "expect": { "intent": "send", "never": ["tidy"], "neverDone": ["tidy"] }
+    },
+    {
+      "id": "S87",
+      "note": "S66 with the update's own session named as this one: Mina's sent, the rebase left for its own session",
+      "update": "rig",
+      "how": "owner",
+      "machine": "rig",
+      "heard": "Tell the Mina one to wait, and tell this one to rebase.",
+      "expect": { "act": ["send"], "target": "Mina", "rest": "rebase", "restLeft": true, "neverSpoken": ["couldn't tell"] }
+    },
+    {
+      "id": "S87h",
+      "note": "S66h with the update's own session named as this one: Mina's sent, the rebase left for its own session",
+      "update": "tezos",
+      "how": "hooked",
+      "heard": "Tell the Mina one to wait, and tell this one to rebase.",
+      "expect": { "act": ["send"], "target": "Mina", "rest": "rebase", "restLeft": true, "neverSpoken": ["couldn't tell"] }
     }
   ]
 }
