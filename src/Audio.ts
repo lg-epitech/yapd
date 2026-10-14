@@ -72,6 +72,13 @@ export class Audio extends Context.Tag("yapd/Audio")<
      * Whoever calls it rests it again if nothing comes.
      */
     readonly warm: Effect.Effect<void>
+    /**
+     * A soft note, so he knows he was heard while what he said is worked
+     * out: only while the microphone is open and nothing else plays, never
+     * over a line, and never starting the helper. Whatever's played next
+     * takes its place. It never counts as speaking.
+     */
+    readonly tick: Effect.Effect<void>
   }
 >() {}
 
@@ -137,6 +144,7 @@ export const AfplayAudio = Layer.effectContext(
       echo: () => Effect.succeed(false),
       rest: Effect.void,
       warm: Effect.void,
+      tick: Effect.void,
     }
     return Context.make(Audio, audio).pipe(Context.add(Activity, activity))
   }),
@@ -170,6 +178,55 @@ const settle = (current: Current, error: AudioError, at: number) => {
   Deferred.unsafeDone(current.finished, Exit.fail(error))
   if (current.stopped !== undefined) Deferred.unsafeDone(current.stopped, Exit.succeed(at))
 }
+
+/** Kokoro's rate, which the helper already plays at. */
+const rate = 24000
+/** Well under yapd's voice. */
+const level = 0.12
+/** Each note fades in and out over this, so it doesn't click. */
+const fade = 0.008
+
+/** Soft sine notes, one after the other. */
+export const tone = (notes: ReadonlyArray<readonly [frequency: number, seconds: number]>, sampleRate = rate) => {
+  const parts = notes.map(([frequency, seconds]) => {
+    const length = Math.round(seconds * sampleRate)
+    const edge = Math.round(fade * sampleRate)
+    return Float32Array.from({ length }, (_, i) => {
+      const envelope = Math.min(1, i / edge, (length - 1 - i) / edge)
+      return level * envelope * Math.sin((2 * Math.PI * frequency * i) / sampleRate)
+    })
+  })
+  const joined = new Float32Array(parts.reduce((length, part) => length + part.length, 0))
+  parts.reduce((offset, part) => {
+    joined.set(part, offset)
+    return offset + part.length
+  }, 0)
+  return joined
+}
+
+/** 16-bit mono WAV. */
+export const wav = (samples: Float32Array, sampleRate = rate) => {
+  const bytes = new Uint8Array(44 + samples.length * 2)
+  const view = new DataView(bytes.buffer)
+  const text = (offset: number, value: string) => bytes.set(new TextEncoder().encode(value), offset)
+  text(0, "RIFF")
+  view.setUint32(4, 36 + samples.length * 2, true)
+  text(8, "WAVEfmt ")
+  view.setUint32(16, 16, true)
+  view.setUint16(20, 1, true)
+  view.setUint16(22, 1, true)
+  view.setUint32(24, sampleRate, true)
+  view.setUint32(28, sampleRate * 2, true)
+  view.setUint16(32, 2, true)
+  view.setUint16(34, 16, true)
+  text(36, "data")
+  view.setUint32(40, samples.length * 2, true)
+  samples.forEach((sample, i) => view.setInt16(44 + i * 2, Math.max(-1, Math.min(1, sample)) * 0x7fff, true))
+  return bytes
+}
+
+/** One short, soft note, like a tap, that he was heard. */
+const tap = wav(tone([[1000, 0.06]]))
 
 /** Twenty milliseconds of 16-bit mono silence at 24 kHz, as a WAV file. */
 const quiet20ms = (() => {
@@ -231,9 +288,10 @@ export const native = (
     )
     const path = join(dir, "socket")
     const silence = join(dir, "silence.wav")
+    const ticked = join(dir, "tick.wav")
     yield* Effect.tryPromise({
-      try: () => Bun.write(silence, quiet20ms),
-      catch: (cause) => new Helper.HelperError({ message: "Could not prepare the audio helper's warm-up", cause }),
+      try: () => Promise.all([Bun.write(silence, quiet20ms), Bun.write(ticked, tap)]),
+      catch: (cause) => new Helper.HelperError({ message: "Could not prepare the audio helper's warm-up and tick", cause }),
     })
     const runtime = yield* Effect.runtime<never>()
     const runSync = Runtime.runSync(runtime)
@@ -245,6 +303,8 @@ export const native = (
     let current: Current | undefined
     /** The silence played to get the speaker ready, while it plays. It's nobody's playback. */
     let warming: string | undefined
+    /** The note that he was heard, while it plays. Nobody's playback either, and never speaking. */
+    let ticking: string | undefined
     let listening = false
     /** How long the echo cancellation has heard yapd for, in what it played to the end or stopped. */
     let heard = 0
@@ -339,8 +399,8 @@ export const native = (
           runFork(endMicrophone())
           return
         case "playing":
-          // Silence, which neither speaks nor teaches the echo cancellation anything.
-          if (event.value.id === warming) return
+          // Silence, or a note so soft it's never taken for yapd talking, which neither speaks nor teaches the echo cancellation anything.
+          if (event.value.id === warming || event.value.id === ticking) return
           // Playing something new stops what it played before without saying so.
           quiet()
           playingSince = now()
@@ -349,6 +409,10 @@ export const native = (
         case "failed":
           if (event.value.id === warming) {
             warming = undefined
+            return
+          }
+          if (event.value.id === ticking) {
+            ticking = undefined
             return
           }
           quiet()
@@ -360,12 +424,20 @@ export const native = (
             warming = undefined
             return
           }
+          if (event.value.id === ticking) {
+            ticking = undefined
+            return
+          }
           quiet()
           if (current?.id === event.value.id) Deferred.unsafeDone(current.finished, Exit.void)
           return
         case "stopped":
           if (event.value.id !== undefined && event.value.id === warming) {
             warming = undefined
+            return
+          }
+          if (event.value.id !== undefined && event.value.id === ticking) {
+            ticking = undefined
             return
           }
           quiet()
@@ -400,6 +472,7 @@ export const native = (
     const disconnected = () => {
       connection = undefined
       warming = undefined
+      ticking = undefined
       unsent = []
       runFork(endMicrophone())
       quiet()
@@ -515,8 +588,9 @@ export const native = (
               return Option.getOrElse(at, () => 0)
             })
             current = playback
-            // It replaces the silence, if that's still playing.
+            // It replaces the silence, or the note, if that's still playing.
             warming = undefined
+            ticking = undefined
             yield* Effect.addFinalizer(() => stop)
             send({ type: "play", id: playback.id, path: file, from })
             playback.duration = yield* restore(
@@ -563,8 +637,15 @@ export const native = (
         warming = crypto.randomUUID()
         send({ type: "play", id: warming, path: silence, from: 0 })
       }),
+      // Over a line, the helper would stop it without a word, leaving it never to finish: so only while nothing plays, not even afplay.
+      tick: Effect.sync(() => {
+        if (connection === undefined || !listening || current !== undefined || warming !== undefined || ticking !== undefined || afplaying > 0) return
+        ticking = crypto.randomUUID()
+        send({ type: "play", id: ticking, path: ticked, from: 0 })
+      }),
       rest: Effect.suspend(() => {
         warming = undefined
+        ticking = undefined
         send({ type: "rest" })
         // It stops whatever it's playing without saying so.
         quiet()

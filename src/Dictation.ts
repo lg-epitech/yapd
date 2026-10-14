@@ -2,7 +2,7 @@ import { Cause, Chunk, Clock, Context, Deferred, Effect, Either, Fiber, FiberSet
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { Audio } from "./Audio.ts"
+import { Audio, tone, wav } from "./Audio.ts"
 import { defaults } from "./Endpointer.ts"
 import * as Floor from "./Floor.ts"
 import { Shortcut } from "./Shortcut.ts"
@@ -133,52 +133,6 @@ const cues = {
     [440, 0.11],
   ],
 } as const
-
-/** Kokoro's rate, which the helper already plays at. */
-const rate = 24000
-/** Well under yapd's voice. */
-const level = 0.12
-/** Each note fades in and out over this, so it doesn't click. */
-const fade = 0.008
-
-/** Soft sine notes, one after the other. */
-export const tone = (notes: ReadonlyArray<readonly [frequency: number, seconds: number]>, sampleRate = rate) => {
-  const parts = notes.map(([frequency, seconds]) => {
-    const length = Math.round(seconds * sampleRate)
-    const edge = Math.round(fade * sampleRate)
-    return Float32Array.from({ length }, (_, i) => {
-      const envelope = Math.min(1, i / edge, (length - 1 - i) / edge)
-      return level * envelope * Math.sin((2 * Math.PI * frequency * i) / sampleRate)
-    })
-  })
-  const joined = new Float32Array(parts.reduce((length, part) => length + part.length, 0))
-  parts.reduce((offset, part) => {
-    joined.set(part, offset)
-    return offset + part.length
-  }, 0)
-  return joined
-}
-
-/** 16-bit mono WAV. */
-export const wav = (samples: Float32Array, sampleRate = rate) => {
-  const bytes = new Uint8Array(44 + samples.length * 2)
-  const view = new DataView(bytes.buffer)
-  const text = (offset: number, value: string) => bytes.set(new TextEncoder().encode(value), offset)
-  text(0, "RIFF")
-  view.setUint32(4, 36 + samples.length * 2, true)
-  text(8, "WAVEfmt ")
-  view.setUint32(16, 16, true)
-  view.setUint16(20, 1, true)
-  view.setUint16(22, 1, true)
-  view.setUint32(24, sampleRate, true)
-  view.setUint32(28, sampleRate * 2, true)
-  view.setUint16(32, 2, true)
-  view.setUint16(34, 16, true)
-  text(36, "data")
-  view.setUint32(40, samples.length * 2, true)
-  samples.forEach((sample, i) => view.setInt16(44 + i * 2, Math.max(-1, Math.min(1, sample)) * 0x7fff, true))
-  return bytes
-}
 
 type End = "Sent" | "Cancelled"
 

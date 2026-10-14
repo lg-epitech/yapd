@@ -7,6 +7,7 @@ import * as Helper from "./Helper.ts"
 interface Command {
   readonly type: string
   readonly id?: string
+  readonly path?: string
 }
 
 /** The real socket protocol, with playback and microphone frames supplied by the test. */
@@ -16,6 +17,8 @@ const device = (delayPlaying = false, delayStopping = false) =>
     const runSync = Runtime.runSync(runtime)
     const commands = yield* Queue.unbounded<Command>()
     const order: Array<string> = []
+    /** What it was asked to play, by file name. */
+    const played: Array<string> = []
     const sockets: Array<Socket<Helper.Decoder>> = []
     let connection: Socket<Helper.Decoder> | undefined
     let playing: string | undefined
@@ -44,6 +47,7 @@ const device = (delayPlaying = false, delayStopping = false) =>
                   order.push(command.type)
                   runSync(Queue.offer(commands, command))
                   if (command.type === "play") {
+                    played.push(command.path?.split("/").at(-1) ?? "")
                     playing = command.id
                     if (!running) send({ type: "active", listening: true })
                     running = true
@@ -92,6 +96,7 @@ const device = (delayPlaying = false, delayStopping = false) =>
       }),
       next,
       order,
+      played,
       closed: Deferred.await(closed),
       disconnect: Effect.sync(() => connection?.terminate()),
       inactive: Effect.sync(() => send({ type: "active", listening: false })),
@@ -259,6 +264,55 @@ describe("Native audio", () => {
         yield* fake.frame(0)
         yield* flush
         expect(yield* hear(next.value)).toBe(true)
+      }),
+    ))
+
+  test("the tick plays only while the microphone is open and nothing else plays: never over a line or the warm-up, never launching the helper; a line played right after it still finishes, and the tick never reads as speaking", () =>
+    run(
+      Effect.gen(function* () {
+        const fake = yield* device()
+        const flush = Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 50)))
+        const seen: Array<string> = []
+        yield* fake.activity.pipe(Stream.runForEach((doing) => Effect.sync(() => void seen.push(doing))), Effect.forkScoped)
+        const tick = Effect.zipRight(fake.audio.tick, flush)
+        /** Plays a line to the end, ticking as it plays, and lets go of it as a line said is let go of. */
+        const line = (file: string) =>
+          Effect.scoped(
+            Effect.gen(function* () {
+              const playback = yield* fake.audio.play(file)
+              yield* tick
+              yield* fake.finish
+              yield* playback.finished
+            }),
+          ).pipe(Effect.zipRight(flush))
+        // The microphone isn't open yet.
+        yield* tick
+        expect(fake.played).toEqual([])
+        yield* line("first.wav")
+        expect(fake.played).toEqual(["first.wav"])
+        yield* tick
+        expect(fake.played).toEqual(["first.wav", "tick.wav"])
+        // Playing, it never reads as speaking.
+        expect(seen.at(-1)).toBe("listening")
+        // What's said next takes its place, and still finishes.
+        yield* line("next.wav")
+        expect(fake.played).toEqual(["first.wav", "tick.wav", "next.wav"])
+        // Never over the warm-up, which opens the microphone as it plays.
+        yield* fake.audio.rest
+        yield* fake.audio.warm
+        yield* flush
+        yield* tick
+        expect(fake.played).toEqual(["first.wav", "tick.wav", "next.wav", "silence.wav"])
+        yield* fake.finish
+        yield* flush
+        yield* tick
+        expect(fake.played).toEqual(["first.wav", "tick.wav", "next.wav", "silence.wav", "tick.wav"])
+        // Nor once the helper quit, which it never starts for it.
+        yield* fake.disconnect
+        yield* fake.closed
+        yield* tick
+        expect(fake.played).toEqual(["first.wav", "tick.wav", "next.wav", "silence.wav", "tick.wav"])
+        expect(seen.filter((doing) => doing === "speaking")).toHaveLength(2)
       }),
     ))
 

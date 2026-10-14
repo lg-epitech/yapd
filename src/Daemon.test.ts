@@ -206,6 +206,7 @@ const make = (says?: string, options: {
       echo: () => Effect.sync(() => echoed++ < (options.echoing ?? 0)),
       rest: Effect.sync(() => void rests++),
       warm: Effect.sync(() => void warms++),
+      tick: Effect.void,
     }),
     Layer.succeed(Waiting, waiting === undefined ? {
       open: (session) => Effect.map(Deferred.make<string | undefined>(), (answer) => ({ session, answer })),

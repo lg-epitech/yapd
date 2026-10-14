@@ -115,6 +115,7 @@ const conversation = (
         echo: () => Effect.succeed(false),
         rest: Effect.void,
         warm: Effect.void,
+        tick: Effect.void,
       }),
       // Each frame holds the probability that it's speech.
       Layer.succeed(Vad, { make: Effect.succeed((frame: Float32Array) => Effect.succeed(frame[0]!)) }),
