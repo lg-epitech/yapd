@@ -517,6 +517,30 @@ describe("Brain", () => {
     expect(Brain.fast(given, lines)).toMatchObject({ act: "undo" })
   })
 
+  test("a stop said back to a line saying yapd started work is asked about first, however sure the model is, never done on a no", () => {
+    const start: Ledger.Row = {
+      commandId: "yapd:u0:0",
+      messageId: "yapd:u0:0:m",
+      utterance: "u0",
+      step: 0,
+      kind: "start",
+      machine: "Rosie",
+      thread: tezos.id,
+      body: {},
+      digest: null,
+      state: "sent",
+      how: null,
+      reason: null,
+      at: now - 5_000,
+    }
+    const given = situation("No, stop it.", { acted: Option.some(start), recent: [start] })
+    const replied = { ...given, utterance: { ...given.utterance, via: "reply" as const, afterDone: { change: { what: "acted" as const, utterance: "u0" } } } }
+    const stop = Brain.decision({ act: "stop", target: desk().threads.find(({ thread }) => thread.id === tezos.id)!.handle, sure: "high" })
+    expect(Brain.check(stop, replied, lines)).toMatchObject({ _tag: "Ask", open: { kind: "confirm", asked: "Stop Migrate Tezos Integration, sir?", candidates: [ref(tezos)] } })
+    // Dictated, a stop the model's sure of goes, as ever.
+    expect(Brain.check(stop, given, lines)).toMatchObject({ _tag: "Do" })
+  })
+
   test("a take-back of a tidy said back to a line saying what yapd kept in mind asks first, naming it, never reaching an older tidy on its own", () => {
     const tidy: Ledger.Row = {
       commandId: "yapd:u0:0",

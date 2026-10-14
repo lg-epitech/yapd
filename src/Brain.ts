@@ -2955,7 +2955,8 @@ const checking = (choice: Decision, situation: Situation, lines: Lines): Checked
       return writing(choice, target, candidates, situation, lines, ask)
     }
     case "stop":
-      return writing(choice, target, candidates, situation, lines, ask)
+      // Said back to a line saying yapd started work for him, which can't be taken back, a stop is asked about first, never done on a no.
+      return writing(choice, target, candidates, situation, lines, ask, startedBack(situation))
     case "decide":
     case "reply": {
       // Only a thread still waiting on him, and never on a secret, which only T3 Code takes. Which request it answers, maybe one asked
@@ -3130,8 +3131,10 @@ const checking = (choice: Decision, situation: Situation, lines: Lines): Checked
  * Whether a write goes ahead: on a thread he plainly meant, or fairly surely
  * the one he's on about, which the confirmation names when it isn't. A stop
  * that's only fairly sure is confirmed first, since it can't be taken back
- * mid-thought. Otherwise he's asked which, naming them, or told it couldn't
- * be told with nothing to choose between, as the confidence policy says.
+ * mid-thought, and so is any stop when it's to be asked about first
+ * whatever, `askFirst`. Otherwise he's asked which, naming them, or told it
+ * couldn't be told with nothing to choose between, as the confidence policy
+ * says.
  */
 const writing = (
   choice: Decision,
@@ -3140,6 +3143,7 @@ const writing = (
   situation: Situation,
   lines: Lines,
   ask: (among: ReadonlyArray<Threads.Listed>) => Checked,
+  askFirst = false,
 ): Checked => {
   const { utterance, desk } = situation
   // Said over something, too little speech is talk or noise nearby, never something to do.
@@ -3188,6 +3192,7 @@ const writing = (
       },
     }
   }
+  if (choice.act === "stop" && askFirst) return confirm()
   if (choice.sure === "high") return { _tag: "Do", plan: { decision: choice, target } }
   if (choice.sure === "medium" && on) return choice.act === "stop" ? confirm() : { _tag: "Do", plan: { decision: choice, target } }
   return ask(candidates)
@@ -3322,6 +3327,12 @@ const answeredBack = (choice: Decision, situation: Situation, lines: Lines): Che
   const own = theirs(choice, situation)
   const said = choice.act === "undo" ? choice : { how: "", target: "" }
   return (own === undefined ? undefined : askingBack(own, situation, lines, said)) ?? (reach === undefined ? undefined : askingBack(reach, situation, lines, said))
+}
+
+/** Whether he's replying to a "done" line saying yapd started work for him, which can't be taken back. */
+const startedBack = (situation: Situation) => {
+  const change = situation.utterance.afterDone?.change
+  return change?.what === "acted" && recently(situation).some(({ utterance, kind }) => utterance === change.utterance && kind === "start")
 }
 
 /**
