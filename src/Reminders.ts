@@ -355,6 +355,8 @@ export const lines = (said: Pick<Lines, "address">, now: number) => {
     },
     /** It went off before it could be taken back. */
     over: `It's already gone off${sir}.`,
+    /** It was cancelled before he could, as from the menu meanwhile. */
+    already: `It's already cancelled${sir}.`,
     /** It couldn't be kept. */
     unwritten: `I couldn't write that down${sir}.`,
     /** A time that's already gone, or too far off. */

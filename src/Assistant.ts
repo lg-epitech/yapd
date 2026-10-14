@@ -3684,6 +3684,14 @@ export const make = (options: {
         return remindedOf(line, asked)
       })
 
+    /**
+     * What's said of a reminder he'd cancel, or take back setting, that's no
+     * longer to come, by how it is now: gone off, or else cancelled already,
+     * as from the menu meanwhile.
+     */
+    const noLonger = (reminders: Reminders.Reminders, id: number, told: ReturnType<typeof Reminders.lines>) =>
+      Effect.map(reminders.get(id), (found) => (Option.exists(found, ({ state }) => state === "fired") ? told.over : told.already))
+
     /** Cancels one of what he asked to be told later, as he pointed at it, and says which. */
     const forgetting = (plan: Brain.Plan, thought: Thought, said: Lines) =>
       Effect.gen(function* () {
@@ -3694,7 +3702,7 @@ export const make = (options: {
         const now = yield* Clock.currentTimeMillis
         const told = Reminders.lines(said, now)
         const cancelled = yield* reminders.cancel(found.value.id)
-        if (Option.isNone(cancelled)) return reply(told.over, thought.subject)
+        if (Option.isNone(cancelled)) return reply(yield* noLonger(reminders, found.value.id, told), thought.subject)
         noted = { at: now, kind: "forgot", id: cancelled.value.id, about: Reminders.ref(cancelled.value) }
         const line = told.cancelled(cancelled.value, Reminders.calling(cancelled.value, thought.situation.desk))
         yield* journal.write({ at: now, kind: "action", ...under(cancelled.value), said: line, utterance: thought.utterance.id, detail: { forgot: cancelled.value.id } })
@@ -3730,7 +3738,7 @@ export const make = (options: {
         const now = yield* Clock.currentTimeMillis
         const told = Reminders.lines(said, now)
         const changed = last.kind === "reminder" ? yield* reminders.cancel(last.id) : yield* reminders.restore(last.id)
-        if (Option.isNone(changed)) return reply(last.kind === "reminder" ? told.over : `There's nothing to take back${addressed(said)}.`, thought.subject)
+        if (Option.isNone(changed)) return reply(last.kind === "reminder" ? yield* noLonger(reminders, last.id, told) : `There's nothing to take back${addressed(said)}.`, thought.subject)
         // Taken back, it's a change of its own, so taking that back too puts it as it was.
         noted = { at: now, kind: last.kind === "reminder" ? "forgot" : "reminder", id: changed.value.id, about: Reminders.ref(changed.value) }
         const line = told.cancelled(changed.value, Reminders.calling(changed.value, thought.situation.desk), last.kind === "forgot")

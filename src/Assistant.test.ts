@@ -13136,6 +13136,38 @@ describe("Assistant reminders", () => {
     expect(result.back).toBe(`Kept your reminder at ${Brain.time(soon)}, sir: call the bank.`)
     expect(result.pending).toEqual([result.bank])
   })
+
+  test("cancelling a reminder by voice that's cancelled from the menu as what he said is worked out says it's already cancelled, and one that goes off then that it's gone off", async () => {
+    /** What happens as the model works out what he said. */
+    let meanwhile: Effect.Effect<void> = Effect.void
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(
+          (situation) => {
+            const { heard } = situation.utterance
+            const about = heard.includes("bank") ? "call the bank" : "stretch"
+            if (heard.startsWith("Remind me")) return Brain.decision({ act: "remind", how: "at", when: local(about === "stretch" ? later : soon), text: about })
+            return Brain.decision({ act: "forget", target: Brain.remindedHandle(situation.reminders?.findIndex(({ text }) => text === about) ?? -1) })
+          },
+          undefined,
+          { reminders: true, deciding: Effect.suspend(() => meanwhile) },
+        )
+        const reminders = made.reminders!
+        yield* made.dictate("Remind me at five to call the bank.")
+        yield* made.dictate("Remind me at six to stretch.")
+        const [stretch, bank] = yield* reminders.pending
+        meanwhile = Effect.asVoid(made.cancel(bank!.id))
+        yield* made.dictate("Cancel the bank reminder.")
+        const cancelled = made.spoken().at(-1)
+        meanwhile = Effect.asVoid(reminders.fire(stretch!, { at: now, kind: "notice", said: "You asked me to remind you, sir: stretch." }))
+        yield* made.dictate("Cancel the stretch reminder.")
+        return { cancelled, fired: made.spoken().at(-1), pending: (yield* reminders.pending).length }
+      }),
+    )
+    expect(result.cancelled).toBe("It's already cancelled, sir.")
+    expect(result.fired).toBe("It's already gone off, sir.")
+    expect(result.pending).toBe(0)
+  })
 })
 
 describe("Assistant offers giving way", () => {
