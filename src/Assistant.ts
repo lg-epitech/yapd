@@ -317,6 +317,13 @@ export interface Open {
    * step's command, which his yes takes back alone, never one done since.
    */
   readonly pinned?: string
+  /**
+   * Asked of what may all be yapd's own words said back to a "done" line,
+   * whether to stop a thread or take back a change: a yes does that alone,
+   * never any rest the model gives his answer, which may be what it split off
+   * those words.
+   */
+  readonly alone?: boolean
 }
 
 /** What the user meant, worked out, not yet acted on. */
@@ -732,10 +739,11 @@ const resumed = (from: Queued, open: Pick<Open, "asks">, changes: Omit<Queued, "
  * about: the rest of the request, and a message's words, or failing those the
  * request's own, never the answer's, like "The first." or "Yes.", which
  * aren't for the thread. None when a message's words are left out and the
- * request's may have been yapd's own voice, so there are none to send.
+ * request's may have been yapd's own voice, so there are none to send. To a
+ * question asked of those alone, there's no rest at all.
  */
-const filled = (decision: Brain.Decision, open: Pick<Open, "decision" | "heard" | "echo">): Brain.Decision | undefined => {
-  const rest = decision.rest.trim() || open.decision.rest
+const filled = (decision: Brain.Decision, open: Pick<Open, "decision" | "heard" | "echo" | "alone">): Brain.Decision | undefined => {
+  const rest = open.alone === true ? "" : decision.rest.trim() || open.decision.rest
   if (decision.act !== "send" || decision.text.trim() !== "" || open.decision.act !== "send") return { ...decision, rest }
   const text = open.decision.text.trim() || ownWords(open)
   return text === "" ? undefined : { ...decision, text, rest }
@@ -2524,7 +2532,10 @@ export const make = (options: {
      * like "yes, but once it's done", are still a yes to sending them, at that
      * time, which sending again takes only when it never left yapd. A no
      * with something else instead, like another thread or other words, is
-     * that something else, and what was asked about isn't done.
+     * that something else, and what was asked about isn't done. Asked of what
+     * may all be yapd's own words, whatever the model gave his answer as more
+     * may be what it split off them, so none of it is done: he's told it was
+     * left, to say again.
      */
     const agreeing = (open: Open, thought: Thought, said: Lines) =>
       Effect.gen(function* () {
@@ -2601,7 +2612,7 @@ export const make = (options: {
           twice: open.reminder === undefined,
           ...(agreed && open.pinned !== undefined ? { pinned: open.pinned } : {}),
         })
-      })
+      }).pipe(Effect.map((outcome) => (open.alone === true ? unfinished(outcome, thought.decision.rest, said, thought.situation.desk) : outcome)))
 
     /**
      * His yes to tidying what he was asked about: exactly the threads he

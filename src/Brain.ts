@@ -2889,7 +2889,7 @@ const unechoed = (checked: Checked, utterance: Assistant.Utterance): Checked => 
   const letGo = (decided: Decision): Checked => ({ _tag: "Do", plan: { decision: { ...decided, act: "resume" }, target: Option.none() } })
   if (checked._tag === "Ask" && mayBeOwn(utterance)) {
     const { open } = checked
-    return ownQuestion(open) ? { _tag: "Ask", open: { ...open, decision: { ...open.decision, rest: "" } } } : letGo(open.decision)
+    return ownQuestion(open) ? { _tag: "Ask", open: { ...open, decision: { ...open.decision, rest: "" }, alone: true } } : letGo(open.decision)
   }
   return checked._tag === "Do" &&
     echoedBack(checked.plan.decision, utterance) &&

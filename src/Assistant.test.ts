@@ -4824,6 +4824,37 @@ describe("Assistant", () => {
     expect(result.dispatched).toEqual([["run.interrupt", result.started]])
   })
 
+  test("a yes the model gives the rest it split off what may all be yapd's own words, to its question asked of them, stops it alone and says the rest was left", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, followUp, answer, notices, spoken, dispatched, ledger, becomes } = yield* assistant(
+          (situation) => {
+            const { heard } = situation.utterance
+            if (heard.startsWith("Start")) return Brain.decision({ act: "start", text: heard })
+            if (heard.startsWith("On it")) return Brain.decision({ act: "undo", sure: "high", rest: "tell the Mina one to wait" })
+            // His yes, which the model works out with the rest it split off before copied back in.
+            if (heard.startsWith("Yes")) {
+              const asked = Option.getOrThrow(situation.open)
+              const target = situation.desk.threads.find(({ ref }) => ref.id === asked.candidates[0]?.id)?.handle ?? ""
+              return Brain.decision({ ...asked.decision, target, sure: "high", pending: "answers", rest: "tell the Mina one to wait" })
+            }
+            return Brain.decision({ act: "send", target: handle(situation, mina), text: "Wait.", how: "now" })
+          },
+          () => written({ spoken: "In yapd, on Opus, without a worktree." }),
+        )
+        yield* dictate("Start a thread in yapd to fix the fees.")
+        const started = Option.getOrThrow(yield* ledger.latest("1 hour", { kinds: ["start"] })).thread
+        yield* becomes(thread(started, "Fix the fees", "yapd", { ...begun, updatedAt: new Date(now).toISOString() }))
+        const done = notices().findLast(({ kind }) => kind === "done")
+        yield* followUp("On it, sir. No, tell the Mina one to wait.", 2, done, done?.spoken, undefined, undefined, true)
+        yield* answer("Yes, stop that one.")
+        return { started, said: spoken().at(-1), dispatched: dispatched.map(({ type, threadId }) => [type, threadId]) }
+      }),
+    )
+    expect(result.dispatched).toEqual([["run.interrupt", result.started]])
+    expect(result.said).toBe("Stopped, sir. I left the rest: tell the Mina one to wait.")
+  })
+
   /** Takes each message in behind the turn under way, in a run of its own, as T3 Code queues it, so any can be withdrawn. */
   const queues: Answer = (payload, bounded) =>
     Effect.sync(() => {
