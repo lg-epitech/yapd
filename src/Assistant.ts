@@ -305,6 +305,12 @@ export interface Open {
    * his yes agrees to archive as they are. Any other busy by then is left out.
    */
   readonly tidying?: { readonly called: ReadonlyArray<string>; readonly working: ReadonlyArray<Threads.Ref> }
+  /**
+   * For taking back a step yapd took, asked about by what it did, like a
+   * message said back to a late "On it" after more was sent since: the
+   * step's command, which his yes takes back alone, never one done since.
+   */
+  readonly pinned?: string
 }
 
 /** What the user meant, worked out, not yet acted on. */
@@ -516,6 +522,8 @@ interface Stepping {
   readonly quietly?: boolean
   readonly besides?: string
   readonly working?: ReadonlyArray<Threads.Ref>
+  /** For taking back the step he said yes to taking back, by its command: that step alone. */
+  readonly pinned?: string
 }
 
 const quiet = (subject: Subject): Outcome => ({ say: "", subject, kind: "none" })
@@ -1224,6 +1232,9 @@ export const make = (options: {
         const last = Option.getOrUndefined(Option.filter(acted, ({ kind }) => kind === "tidy"))
         const untidies =
           last === undefined ? undefined : Hands.untidies(yield* ledger.steps(0, { kinds: ["tidy"], utterance: last.utterance, step: last.step }))
+        // Said back to a "done" line, every step taking something back could reach, as far back as letting a stop carry on goes, so it's
+        // worked out as the hands find it, and the line's own steps however much was done since, with the archives that dropped reminders.
+        const reachable = utterance.afterDone === undefined ? undefined : yield* ledger.steps(now - Duration.toMillis(Ledger.resumable))
         // What he hasn't heard, a thread at a time: what was never read out, however much he's spoken since, and what was cut off since
         // he last said something, other than catching up, which he may never have heard the answer to, or something only heard as noise,
         // like a cough taken for "Thank you.". Not what's waiting to be read, like an update his asking cut off: he's told of that as
@@ -1256,6 +1267,7 @@ export const make = (options: {
           asked,
           acted,
           ...(untidies === undefined ? {} : { untidies }),
+          ...(reachable === undefined ? {} : { recent: reachable, dropping: reachable.filter(Hands.dropped).map(({ commandId }) => commandId) }),
           reminders,
           noted: Option.filter(Option.fromNullable(noted), ({ at }) => now - at <= Duration.toMillis(scratchable)),
           memories: { kept, written },
@@ -1958,7 +1970,7 @@ export const make = (options: {
       target: Option.Option<Threads.Listed>,
       utterance: Pick<Utterance, "heard" | "echo">,
       last: Option.Option<Ledger.Row>,
-      at: Pick<Stepping, "step" | "working">,
+      at: Pick<Stepping, "step" | "working" | "pinned">,
       asks?: Asks,
       situation: Pick<Brain.Situation, "desk" | "archived"> = { desk: nowhere },
     ): Hands.Act | undefined => {
@@ -1998,7 +2010,14 @@ export const make = (options: {
             if (only !== "tidy" || among === undefined) return undefined
             return { _tag: "Undo", to: Option.none(), carry: false, only, among: among.map(({ ref }) => ref) }
           }
-          return { _tag: "Undo", to, carry: decision.how === "carry" || (only === undefined && stopped), ...(only === undefined ? {} : { only }) }
+          return {
+            _tag: "Undo",
+            to,
+            carry: decision.how === "carry" || (only === undefined && stopped),
+            ...(only === undefined ? {} : { only }),
+            // The step he said yes to taking back, asked about by what it did, whatever was done since.
+            ...(at.pinned === undefined ? {} : { pinned: at.pinned }),
+          }
         }
         case "tidy": {
           // Exactly the threads it names, each as it's called, never fewer: one not there is nothing done.
@@ -2535,12 +2554,11 @@ export const make = (options: {
         }
         // Tidying, never rebuilt from the first of the threads asked about: exactly those he agreed to.
         if (agreed && open.decision.act === "tidy") return yield* retidying(open, thought, said)
+        // Taking back a step he was asked about, of a thread that isn't on the desk, like one it archived, keeps it as it was named then.
+        const named = handle === "" && open.pinned !== undefined ? open.decision.target : handle
         const decision = !agreed
           ? instead
-          : filled(
-              Brain.decision({ ...open.decision, target: handle, sure: "high", others: "", pending: "answers", rest: thought.decision.rest }),
-              open,
-            )
+          : filled(Brain.decision({ ...open.decision, target: named, sure: "high", others: "", pending: "answers", rest: thought.decision.rest }), open)
         if (decision === undefined) {
           yield* forgo(open, "Its words may have been my own voice.")
           return yield* unworded(open, thought, said)
@@ -2565,7 +2583,12 @@ export const make = (options: {
             ),
           )
         }
-        return yield* follow(checked, { ...thought, decision }, said, { step: 0, twice: open.reminder === undefined })
+        // Taking back a step he was asked about by what it did is that step alone, whatever was done since.
+        return yield* follow(checked, { ...thought, decision }, said, {
+          step: 0,
+          twice: open.reminder === undefined,
+          ...(agreed && open.pinned !== undefined ? { pinned: open.pinned } : {}),
+        })
       })
 
     /**

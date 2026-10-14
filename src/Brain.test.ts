@@ -517,6 +517,38 @@ describe("Brain", () => {
     expect(Brain.fast(given, lines)).toMatchObject({ act: "undo" })
   })
 
+  test("a take-back of a tidy said back to a line saying what yapd kept in mind asks first, naming it, never reaching an older tidy on its own", () => {
+    const tidy: Ledger.Row = {
+      commandId: "yapd:u0:0",
+      messageId: null,
+      utterance: "u0",
+      step: 0,
+      kind: "tidy",
+      machine: "Rosie",
+      thread: mina.id,
+      body: { _tag: "Archive", called: "Open Mina SSV2 Bug Tickets" },
+      digest: null,
+      state: "sent",
+      how: null,
+      reason: null,
+      at: now - 30_000,
+    }
+    // "Noted, sir: rig uses C++.", a moment ago.
+    const noted: Brain.Noted = { at: now - 2_000, kind: "memory", id: 1, about: Option.none() }
+    const given = situation("No, undo that.", { acted: Option.some(tidy), recent: [tidy], untidies: [ref(mina)], noted: Option.some(noted) })
+    const replied = { ...given, utterance: { ...given.utterance, via: "reply" as const, afterDone: { change: { what: "noted" as const, at: noted.at } } } }
+    // Of no thread named, or of the one it tidied, named.
+    for (const target of ["", desk().threads.find(({ thread }) => thread.id === mina.id)!.handle]) {
+      expect(Brain.check(Brain.decision({ act: "undo", how: "tidy", target, sure: "high" }), replied, lines)).toMatchObject({
+        _tag: "Ask",
+        open: { kind: "confirm", asked: "Take back what I just did to Open Mina SSV2 Bug Tickets, sir?", decision: { act: "undo", how: "tidy" }, pinned: "yapd:u0:0" },
+      })
+    }
+    // What the line said, the memory, is taken back as ever.
+    expect(Brain.check(Brain.decision({ act: "undo", how: "memory", sure: "high" }), replied, lines)).toMatchObject({ _tag: "Do" })
+    expect(Brain.check(Brain.decision({ act: "undo", sure: "high" }), replied, lines)).toMatchObject({ _tag: "Do" })
+  })
+
   test("over yapd's first seconds, what he said after a pause isn't taken for nothing on the strength of yapd's own word before it", () => {
     const echo = "For the loader fix, is that yapd or std?"
     const over = (heard: string, afterPause?: string, voiced = 2) => {

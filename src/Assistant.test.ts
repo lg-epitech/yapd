@@ -4740,30 +4740,79 @@ describe("Assistant", () => {
     expect(result.muted).toEqual([`t3:Rosie:${tezos.id}`])
   })
 
-  test("a no after a late word that a reply went never takes back what the dictation that cut it off changed since: he's asked about that", async () => {
-    const said = (heard: string) =>
+  test("a no after a late word that a reply went asks about that reply, never what the dictation that cut it off sent since, and a yes withdraws that reply alone", async () => {
+    // Behind the turn under way, each in a run of its own, as T3 Code queues it, so either can be withdrawn.
+    const queues: Answer = (payload, bounded) =>
+      Effect.sync(() => {
+        if (payload.type === "message.dispatch") {
+          bounded.messages.push({ id: String(payload.messageId), role: "user", text: String(payload.text), createdAt: "x" })
+          bounded.runs.push({ id: `run-${String(payload.messageId)}`, status: "queued", ordinal: 4, userMessageId: String(payload.messageId) })
+        }
+        return { sequence: 2 }
+      })
+    const said = (heard: string, since: T3Live.Thread) =>
       run(
         Effect.gen(function* () {
-          const { dictate, following, wait, flush, questions, dispatched, ledger } = yield* assistant((situation) => {
-            const asked = situation.utterance.heard
-            if (asked.startsWith("Tell the Tesla")) return Brain.decision({ act: "send", target: handle(situation, tezos), text: "Open a PR.", how: "after" })
-            if (asked.startsWith("Tell the Mina")) return Brain.decision({ act: "send", target: handle(situation, mina), text: "Add tests.", how: "after" })
-            return Brain.decision({ act: "undo", sure: "high" })
-          })
-          // The reply that went by yapd's own hand, then what the dictation that cut off word of it changed.
+          const { dictate, following, answer, wait, flush, questions, dispatched, ledger } = yield* assistant(
+            (situation) => {
+              const asked = situation.utterance.heard
+              if (asked.startsWith("Tell the Tesla")) return Brain.decision({ act: "send", target: handle(situation, tezos), text: "Open a PR.", how: "after" })
+              if (asked.startsWith("Then tell")) return Brain.decision({ act: "send", target: handle(situation, since), text: "Add tests.", how: "after" })
+              return Brain.decision({ act: "undo", sure: "high" })
+            },
+            undefined,
+            { answer: () => queues },
+          )
+          // The reply that went by yapd's own hand, then what the dictation that cut off word of it sent since, to another thread or the same.
           yield* dictate("Tell the Tesla's migration to open a PR when it's done.")
           const reply = Option.getOrThrow(yield* ledger.latest("1 minute"))
           yield* wait(5)
-          yield* dictate("Tell the Mina one to add tests when it's done.")
+          yield* dictate("Then tell it to add tests when it's done.")
+          const after = Option.getOrThrow(yield* ledger.latest("1 minute"))
           const taken = yield* following({ machine: "Rosie", id: tezos.id }, "On it, sir.", { change: { what: "acted", utterance: reply.utterance } })(heard, 1)
           if (Option.isSome(taken)) yield* taken.value
           yield* flush
-          return { asked: questions().map(({ spoken }) => spoken), dispatched: dispatched.map(({ type }) => type) }
+          const asked = questions().map(({ spoken }) => spoken)
+          yield* answer("Yes.")
+          return {
+            asked,
+            withdrawn: dispatched.filter(({ type }) => type === "queued-run.cancel").map(({ runId }) => runId),
+            reply: `run-${reply.messageId}`,
+            after: Option.map(yield* ledger.get(after.commandId), ({ state }) => state),
+          }
         }),
       )
-    for (const heard of ["No.", "Scratch that."]) {
-      expect(await said(heard)).toEqual({ asked: ["Take back the message to Open Mina SSV2 Bug Tickets, sir?"], dispatched: ["message.dispatch", "message.dispatch"] })
+    for (const since of [mina, tezos]) {
+      for (const heard of ["No.", "Scratch that."]) {
+        const result = await said(heard, since)
+        expect(result.asked).toEqual(["Take back the message to Migrate Tezos Integration, sir?"])
+        expect(result.withdrawn).toEqual([result.reply])
+        expect(result.after).toEqual(Option.some("sent"))
+      }
     }
+  })
+
+  test("after a mode line, taking back a message he names sent before it asks first, never withdrawing it", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, followUp, notices, wait, questions, dispatched, modes } = yield* assistant(
+          (situation) =>
+            situation.utterance.heard.startsWith("When")
+              ? Brain.decision({ act: "send", target: handle(situation, tezos), text: "Open a PR.", how: "after" })
+              : Brain.decision({ act: "undo", how: "message", target: handle(situation, tezos), sure: "high" }),
+          undefined,
+          { modes: true },
+        )
+        yield* dictate("When it's done, tell the Tesla's migration to open a PR.")
+        yield* wait(40)
+        yield* dictate("Focus for two hours.")
+        yield* followUp("No, the Tezos message.", 2, notices().findLast(({ kind }) => kind === "done"))
+        return { asked: questions().map(({ spoken }) => spoken), dispatched: dispatched.map(({ type }) => type), mode: (yield* modes!.current).mode.mode }
+      }),
+    )
+    expect(result.asked).toEqual(["Take back the message to Migrate Tezos Integration, sir?"])
+    expect(result.dispatched).toEqual(["message.dispatch"])
+    expect(result.mode).toBe("focus")
   })
 
   test("asked which thread a request said over yapd's first seconds is for, the model deciding his answer is told what of it may have been yapd's own voice, in OPEN and in LATELY, even once he's had it said again", async () => {
