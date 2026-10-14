@@ -4115,12 +4115,16 @@ export const make = (options: {
         // He never heard it, so what he said is something new, which takes its place, and he's told what was left for it: what didn't go, and the rest of its request.
         if (opened.said === undefined) {
           if (decision.act === "resume") return quiet(decided.subject)
+          const checked = Brain.check(decision, decided.situation, said)
+          // What may all be yapd's own words take its place only for code's own question about them: let go, or anything else, it's left
+          // waiting its turn as it was, and nothing is said of it, so it's never lost to them, nor told as left since he'd moved on.
+          if (checked._tag !== "Ask" && Brain.mayBeOwn(utterance)) return yield* follow(checked, decided, said)
           yield* close(open, "replaced", utterance.id)
           // What a thread waits on him for is asked after instead, so there's nothing to tell him of it now.
-          if (requestOf(open) !== undefined) return yield* follow(Brain.check(decision, decided.situation, said), decided, said)
+          if (requestOf(open) !== undefined) return yield* follow(checked, decided, said)
           const left = open.news === undefined ? Brain.left(open, said) : `${open.news} ${unaskedAfter(open)}, since you'd moved on.`
           yield* deliver(unfinished(withoutWords(ofRoutines(reply(left, decided.subject), askedRoutines(open)), open), open.decision.rest, said), decided)
-          return yield* follow(Brain.check(decision, decided.situation, said), decided, said)
+          return yield* follow(checked, decided, said)
         }
         // Saying again just what was asked about, like the same message to the same thread, is a yes to it. To sending one again, whatever
         // time the words say: it's asked about at the time it first went, which may not be theirs, like at once to a turn stopped for it.
