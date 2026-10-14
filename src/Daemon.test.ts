@@ -6,6 +6,7 @@ import { Audio, AudioError } from "./Audio.ts"
 import * as Brain from "./Brain.ts"
 import { Waiting, WaitingLive } from "./ClaudeCode.ts"
 import { CondenseError, Condenser, type Turn } from "./Condenser.ts"
+import type * as Conversation from "./Conversation.ts"
 import * as Daemon from "./Daemon.ts"
 import * as Drafts from "./Drafts.ts"
 import { defaults } from "./Endpointer.ts"
@@ -32,6 +33,7 @@ import * as T3CodeServer from "./T3CodeServer.ts"
 import * as T3Live from "./T3Live.ts"
 import * as Threads from "./Threads.ts"
 import { Voice } from "./Voice.ts"
+import type { Line } from "./Words.ts"
 import { Writer } from "./Writer.ts"
 
 /**
@@ -111,10 +113,16 @@ const make = (says?: string, options: {
   readonly ending?: (about: Threads.Ref, stop: Notices.Stop) => Effect.Effect<Reminders.Ending>
   /** Where what's said right after a line said of an update, that can be followed up, goes, with that line, and whether it's said back to what it did, under which request. */
   readonly following?: Array<string>
+  /** What the Responder hands to yapd's assistant, rather than pass on. */
+  readonly handsOver?: (heard: string) => boolean
+  /** Where what's handed over goes, and what's said right after a late line, once the assistant's made, as yapd serves it. */
+  readonly handing?: { over?: Assistant.Assistant["Type"]["over"]; following?: Assistant.Assistant["Type"]["following"] }
 } = {}) => Effect.gen(function* () {
   /** What each rendered file says, and what was played, in order. */
   const rendered = new Map<string, string>()
   const played: Array<string> = []
+  /** How far into each line it was played from, in seconds, in order. */
+  const playedFrom: Array<number> = []
   const stopped: Array<string> = []
   /** What happened to follow-ups and the hooks that wait for them, in order. */
   const followUps: Array<string> = []
@@ -179,11 +187,12 @@ const make = (says?: string, options: {
           : Effect.sleep(`${options.renderSeconds ?? 0} seconds`).pipe(Effect.zipRight(Effect.sync(() => void rendered.set(path, text)))),
     }),
     Layer.succeed(Audio, {
-      play: (path) =>
+      play: (path, from = 0) =>
         Effect.gen(function* () {
           const text = rendered.get(path) ?? path
           if (options.unplayable?.includes(text)) return yield* new AudioError({ message: "The audio helper didn't start playing" })
           played.push(text)
+          playedFrom.push(from)
           yield* Queue.offer(playbacks, text)
           let done = false
           // Closing the scope stops it, as with the helper.
@@ -241,7 +250,9 @@ const make = (says?: string, options: {
               Effect.zipRight(Effect.sleep(`${options.thinking ?? 0} seconds`)),
               Effect.as({
                 reply:
-                  options.dismiss === true
+                  options.handsOver?.(heard) === true
+                    ? { intent: "assistant" as const, spoken: "", message: "" }
+                    : options.dismiss === true
                     ? { intent: "dismiss" as const, spoken: "", message: "" }
                     : options.answer === undefined
                       ? { intent: "send" as const, spoken: "Okay, passed on.", message: heard }
@@ -308,6 +319,19 @@ const make = (says?: string, options: {
         }),
     // This machine is Rosie, as yapd serves it.
     naming,
+    ...(options.handing === undefined
+      ? {}
+      : {
+          over: (update: Conversation.Update, lines: ReadonlyArray<Line>, line: string, given: Assistant.Over) => (heard: string, voiced: number, echo?: string, afterPause?: string, unsaid?: string) =>
+            Effect.suspend(() => options.handing!.over!(update, lines, line, given)(heard, voiced, echo, afterPause, unsaid)),
+          ...(options.following !== undefined
+            ? {}
+            : {
+                following: (update: Conversation.Update, line: string, done?: Brain.Done, own?: Brain.Own) =>
+                  (heard: string, voiced: number, echo?: string, afterPause?: string, unsaid?: string, carried?: boolean) =>
+                    Effect.suspend(() => options.handing!.following!(update, line, done, own)(heard, voiced, echo, afterPause, unsaid, carried)),
+              }),
+        }),
   }).pipe(Effect.provide(context))
   switchOff = made.turn(false)
   handle = made.handle
@@ -433,7 +457,7 @@ const make = (says?: string, options: {
   /** What the user heard lately, newest first, by id. */
   const heard = Effect.map(Stream.runHead(made.state), (state) => Option.getOrThrow(state).heard.map(({ id }) => id))
   const toggle = (on: boolean) => made.turn(on).pipe(Effect.zipRight(flush))
-  return { responded, listened, microphone, made, handle, finish, turn, notice, lastHeard: made.lastHeard, speak, talk, followUps, wait, dictate, record, reading, played, stopped, condensed, projects, logged, warnings, nextEvent, nextPlayback: Queue.take(playbacks), rests: () => rests, warms: () => warms, renders: () => rendered.size, flush, toggle, power: made.turn, heard, replay: made.replay, awaiting: made.awaiting.pipe(Effect.map((arrived) => arrived.pipe(Effect.zipRight(flush)))), journal: Context.get(context, Journal.Journal) }
+  return { responded, listened, microphone, made, handle, finish, turn, notice, lastHeard: made.lastHeard, speak, talk, followUps, wait, dictate, record, reading, played, playedFrom, stopped, condensed, projects, logged, warnings, nextEvent, nextPlayback: Queue.take(playbacks), rests: () => rests, warms: () => warms, renders: () => rendered.size, flush, toggle, power: made.turn, heard, replay: made.replay, awaiting: made.awaiting.pipe(Effect.map((arrived) => arrived.pipe(Effect.zipRight(flush)))), journal: Context.get(context, Journal.Journal) }
 })
 
 const daemon = make()
@@ -512,7 +536,7 @@ const handing = Effect.gen(function* () {
             dispatched.push(payload)
             if (down) return yield* new T3CodeServer.Trouble({ reason: "T3 Code isn't running.", sent: false })
             if (losing) return yield* new T3CodeServer.Trouble({ reason: "T3 Code is taking too long.", sent: true })
-            if (payload.type === "message.dispatch") {
+            if (payload.type === "message.dispatch" && payload.threadId === current.id) {
               const at = new Date(yield* Clock.currentTimeMillis).toISOString()
               const messageId = String(payload.messageId)
               const busy = current.activeRunId !== null
@@ -527,9 +551,11 @@ const handing = Effect.gen(function* () {
     asset: () => Effect.die("not expected"),
   })
   const actions = T3Actions.make(reach)
+  // The Mina tickets too, idle, which a message to goes to as a turn of its own.
+  const others = new Map([["t-mina", thread("t-mina", "Open the Mina SSV2 bug tickets")]])
   const hands = Hands.make({
     threads: {
-      find: (ref) => Effect.sync(() => (ref.id === current.id ? Option.some(current) : Option.none())),
+      find: (ref) => Effect.sync(() => (ref.id === current.id ? Option.some(current) : Option.fromNullable(others.get(ref.id)))),
       actions: (machine) => (machine === "Rosie" ? Option.some(actions) : Option.none()),
       unseen: () => Effect.succeedNone,
     },
@@ -542,6 +568,8 @@ const handing = Effect.gen(function* () {
     sent: () => dispatched.filter(({ type }) => type === "message.dispatch").map(({ threadId, text }) => `${threadId}: ${text}`),
     /** How many commands were sent to T3 Code, whether they got there or not. */
     dispatched: () => dispatched.length,
+    /** Every command T3 Code was sent, by thread and what it was. */
+    commands: () => dispatched.map(({ threadId, type }) => `${String(threadId)}: ${String(type)}`),
     /** How each went in, as the thread says. */
     intents: () => bounded.turnItems.map(({ inputIntent }) => inputIntent),
     /** The thread as T3 Code has it from now on, like once he's typed something into it. */
@@ -562,8 +590,8 @@ const handing = Effect.gen(function* () {
   }
 })
 
-/** A thread T3 Code runs, idle in the yapd project. */
-const thread = (id: string, title: string) =>
+/** A thread T3 Code runs, idle in the yapd project, unless `overrides` says otherwise. */
+const thread = (id: string, title: string, overrides: Record<string, unknown> = {}) =>
   Schema.decodeUnknownSync(T3Live.Thread)({
     id,
     projectId: "yapd",
@@ -574,6 +602,7 @@ const thread = (id: string, title: string) =>
     pendingRuntimeRequest: null,
     createdAt: "2026-10-01T12:00:00.000Z",
     updatedAt: "2026-10-01T20:00:00.000Z",
+    ...overrides,
   })
 
 /**
@@ -583,8 +612,11 @@ const thread = (id: string, title: string) =>
  */
 const assisted = (
   model: (situation: Brain.Situation) => Brain.Decision,
-  /** With what the user `says` over an update, which is meant for its agent, as `make` takes it. */
-  options: Parameters<typeof make>[1] & { readonly says?: string } = {},
+  /**
+   * With what the user `says` over an update, which is meant for its agent, as `make` takes it, and, with `t3`, what the assistant
+   * does to threads and keeps of it, as `handing` gives them.
+   */
+  options: Parameters<typeof make>[1] & { readonly says?: string; readonly t3?: { readonly hands: Hands.Hands["Type"]; readonly ledger: Ledger.Ledger["Type"] } } = {},
   desk: ReadonlyArray<T3Live.Thread> = [],
   /** How long the model takes over what was said, on top of deciding. */
   deciding: (situation: Brain.Situation) => Effect.Effect<void> = () => Effect.void,
@@ -607,18 +639,18 @@ const assisted = (
       journal,
       store,
     })
-    const ledger = Ledger.fromStore(store)
+    const ledger = options.t3?.ledger ?? Ledger.fromStore(store)
     const drafts = yield* Drafts.make({ machines: [], rules: Effect.succeed(Option.none()), recent: Effect.succeed([]) }).pipe(
       Effect.provideService(Writer, { decide: () => Effect.never, prepare: Effect.void }),
       Effect.provide(Persona.Plain),
     )
     const asked: Array<Brain.Situation> = []
     const show = yield* Show.make(threads.detail, () => Effect.void)
-    const assistant = yield* Assistant.make({
+    const making = (given: Partial<Parameters<typeof Assistant.make>[0]> = {}) => Assistant.make({
       threads,
       journal,
       drafts,
-      hands: Hands.make({ threads, ledger }),
+      hands: options.t3?.hands ?? Hands.make({ threads, ledger }),
       ledger,
       show,
       tell: made.tell,
@@ -626,11 +658,14 @@ const assisted = (
       lastHeard: made.lastHeard,
       coming: made.coming,
       awaiting: made.awaiting,
+      awaitingFor: made.awaitingFor,
       queued: made.queued,
       skip: made.skip,
       upcoming: made.upcoming,
       telling: made.telling,
       compose: () => Effect.succeedNone,
+      ...(options.mutes === undefined ? {} : { mutes: options.mutes, ...Option.match(made.controls, { onNone: () => ({}), onSome: (controls) => ({ controls }) }) }),
+      ...given,
     }).pipe(
       Effect.provide(
         Layer.mergeAll(
@@ -647,6 +682,13 @@ const assisted = (
         ),
       ),
     )
+    const assistant = yield* making()
+    if (options.handing !== undefined) {
+      options.handing.over = assistant.over
+      options.handing.following = assistant.following
+    }
+    /** The assistant as yapd restarted would have it, on the same journal, with nothing waiting to be read or being told. */
+    const restarted = making({ upcoming: Effect.succeed([]), telling: Effect.succeed([]) })
     let presses = 0
     /** He presses the shortcut over whatever is being read, says `heard` for a couple of seconds, and lets go. */
     const dictating = (heard: string) =>
@@ -660,7 +702,7 @@ const assisted = (
         yield* assistant.heard({ heard, via: "shortcut", at: yield* Clock.currentTimeMillis, voiced: 2, turns }, press)
         yield* daemon.flush
       })
-    return { ...daemon, assistant, asked, dictating, show }
+    return { ...daemon, assistant, asked, dictating, show, restarted }
   })
 
 describe("Daemon", () => {
@@ -7063,4 +7105,441 @@ describe("Daemon with a thread's subagents", () => {
       "For the Jarvis companion: yapd finished a turn, but I couldn't summarize it.",
     ])
   })
+})
+
+describe("Daemon handing over what's yapd's to do", () => {
+  const minaThread = (overrides: Record<string, unknown> = {}) => thread("t-mina", "Open the Mina SSV2 bug tickets", overrides)
+  /** A thread's handle on the desk the model was shown. */
+  const handleOf = (situation: Brain.Situation, id: string) => situation.desk.threads.find(({ ref }) => ref.id === id)?.handle ?? ""
+  /** The Tezos migration's Stop, tied to its thread, waiting for his reply when it's `hooked`, needing him when it asks. */
+  const tezosStop = (handle: Handle, hooked = false, message = "The migration compiles.") =>
+    handle("claude", { hook_event_name: "Stop", session_id: "s-tezos", cwd: "/code/yapd", last_assistant_message: message }, { project: "yapd", host: hostname() }, hooked)
+
+  test("'tell the Mina one to wait' over a Tezos update goes to the Mina thread, never the Tezos agent", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const t3 = yield* handing
+        const { handle, talk, wait, nextEvent, nextPlayback, played, followUps, responded, asked } = yield* assisted(
+          (situation) => Brain.decision({ act: "send", target: handleOf(situation, "t-mina"), text: "Wait for the Tezos migration before merging.", how: "now" }),
+          {
+            says: "Tell the Mina one to wait.",
+            hands: t3.hands,
+            t3,
+            link: () => Effect.succeedSome({ machine: "Rosie", id: "t-tezos" }),
+            handsOver: () => true,
+            handing: {},
+          },
+          [tezos(), minaThread()],
+        )
+        yield* tezosStop(handle)
+        yield* nextEvent("Ready:")
+        yield* nextPlayback
+        yield* talk
+        for (let second = 0; second < 30; second++) yield* wait(1)
+        return { sent: t3.sent(), relayed: [...followUps], played: [...played], responded: [...responded], asked: asked.length }
+      }),
+    )
+    // The Responder handed it over, and the Brain sent it to the Mina tickets, through T3 Code, once.
+    expect(result.responded).toEqual(["Tell the Mina one to wait."])
+    expect(result.asked).toBe(1)
+    expect(result.sent).toEqual(["t-mina: Wait for the Tezos migration before merging."])
+    expect(result.relayed).toEqual([])
+    expect(result.played).toEqual(["yapd. The migration compiles.", "On it: Open the Mina SSV2 bug tickets."])
+  })
+
+  test.each([
+    ["a hooked update", "hooked"],
+    ["a rig update tied by owner, its thread on the desk", "owner"],
+  ] as const)("over %s, 'tell it to rebase', handed over, goes through its waiting hook; 'tell the Mina one to wait and tell it to rebase' sends Mina's through T3 Code and leaves the rebase, said; nothing reaches the update's own thread through T3 Code", async (_, how) => {
+    const over = (said: string) =>
+      run(
+        Effect.gen(function* () {
+          const t3 = yield* handing
+          const { handle, talk, wait, nextEvent, nextPlayback, played, followUps } = yield* assisted(
+            (situation) =>
+              situation.utterance.heard.toLowerCase().startsWith("tell it to rebase")
+                ? // "It", as the model is shown it: the update's own thread, by its handle.
+                  Brain.decision({ act: "send", target: Option.match(Brain.focused(situation), { onNone: () => "", onSome: ({ handle }) => handle }), text: "Rebase onto master." })
+                : Brain.decision({ act: "send", target: handleOf(situation, "t-mina"), text: "Wait for the Tezos migration.", rest: "tell it to rebase" }),
+            {
+              says: said,
+              hands: t3.hands,
+              t3,
+              // Here, its hook waits for his reply; from rig, it's only known to be from the thread, which is on the desk.
+              ...(how === "hooked"
+                ? { link: () => Effect.succeedSome({ machine: "Rosie", id: "t-tezos" }) }
+                : { owner: () => Effect.succeedSome({ machine: "Rosie", id: "t-tezos" }) }),
+              handsOver: () => true,
+              handing: {},
+            },
+            [tezos(), minaThread()],
+          )
+          yield* handle(
+            "claude",
+            { hook_event_name: "Stop", session_id: "s-tezos", cwd: "/code/yapd", last_assistant_message: "The migration compiles." },
+            { project: "yapd", host: how === "hooked" ? hostname() : "rig.local" },
+            how === "hooked",
+          )
+          yield* nextEvent("Ready:")
+          yield* nextPlayback
+          yield* talk
+          for (let second = 0; second < 30; second++) yield* wait(1)
+          return { sent: t3.sent(), relayed: [...followUps].filter((line) => line.includes("sent:")), played: [...played].slice(1) }
+        }),
+      )
+    const own = await over("Tell it to rebase.")
+    expect(own.relayed).toEqual(["s-tezos sent: Rebase onto master."])
+    expect(own.sent).toEqual([])
+    const both = await over("Tell the Mina one to wait and tell it to rebase.")
+    expect(both.sent).toEqual(["t-mina: Wait for the Tezos migration."])
+    expect(both.relayed).toEqual([])
+    expect(both.played).toEqual(["On it: Open the Mina SSV2 bug tickets. I left that: tell it to rebase."])
+  })
+
+  test("over a hooked Tezos update, 'tell the migration one to wait', asked which, answered 'the Tezos one', sends nothing through T3 Code and says it was left; and a reply to a late 'On it' over a hooked update never reaches its thread through T3 Code", async () => {
+    const asked = await run(
+      Effect.gen(function* () {
+        const t3 = yield* handing
+        const { handle, talk, wait, nextEvent, nextPlayback, played, followUps } = yield* assisted(
+          // Unsure which he meant, the Mina tickets likelier: asked, between the two.
+          (situation) => Brain.decision({ act: "send", target: handleOf(situation, "t-mina"), others: handleOf(situation, "t-tezos"), sure: "low", text: "Wait." }),
+          {
+            says: "Tell the migration one to wait.",
+            transcripts: ["Tell the migration one to wait.", "The Tezos one."],
+            hands: t3.hands,
+            t3,
+            link: () => Effect.succeedSome({ machine: "Rosie", id: "t-tezos" }),
+            handsOver: () => true,
+            handing: {},
+          },
+          [tezos(), minaThread()],
+        )
+        yield* tezosStop(handle, true)
+        yield* nextEvent("Ready:")
+        yield* nextPlayback
+        yield* talk
+        // Asked which, he answers.
+        for (let second = 0; second < 3; second++) yield* wait(1)
+        yield* talk
+        for (let second = 0; second < 30; second++) yield* wait(1)
+        return { sent: t3.sent(), relayed: [...followUps].filter((line) => line.includes("sent:")), played: [...played].slice(1) }
+      }),
+    )
+    expect(asked.played).toEqual(["Open the Mina SSV2 bug tickets or Migrate Tezos Integration?", "I left that: Tell the migration one to wait."])
+    expect(asked.sent).toEqual([])
+    expect(asked.relayed).toEqual([])
+    // Said right after a late "On it" for a reply that went through its hook, "it" is still a thread whose hook waits.
+    const late = await run(
+      Effect.gen(function* () {
+        const t3 = yield* handing
+        const { handle, speak, talk, wait, dictate, nextEvent, nextPlayback, played, followUps } = yield* assisted(
+          (situation) => Brain.decision({ act: "send", target: handleOf(situation, "t-tezos"), text: "Rebase onto master." }),
+          {
+            says: "Use the fee table.",
+            transcripts: ["Use the fee table.", "And tell it to rebase."],
+            hands: t3.hands,
+            t3,
+            link: () => Effect.succeedSome({ machine: "Rosie", id: "t-tezos" }),
+            handing: {},
+          },
+          [tezos(), minaThread()],
+        )
+        yield* tezosStop(handle, true)
+        yield* nextEvent("Ready:")
+        yield* nextPlayback
+        yield* speak
+        yield* wait(1)
+        // Cut off by a dictation before the reply is sent through the hook, it says so later, from its end.
+        yield* Scope.close(yield* dictate, Exit.void)
+        yield* wait(3)
+        yield* wait(10)
+        yield* talk
+        for (let second = 0; second < 20; second++) yield* wait(1)
+        return { sent: t3.sent(), relayed: [...followUps].filter((line) => line.includes("sent:")), played: [...played].slice(1) }
+      }),
+    )
+    expect(late.relayed).toEqual(["s-tezos sent: Use the fee table."])
+    expect(late.sent).toEqual([])
+    expect(late.played).toEqual(["yapd. Okay, passed on.", "I left that: And tell it to rebase."])
+  })
+
+  test("'scratch that' handed over after the 'On it' of a message passed through a hook, with a dictation's message to Mina sent a minute before, takes nothing back without asking, and asks about Mina's by name; after one yapd sent itself, it takes back that message alone", async () => {
+    const scratched = (hooked: boolean) =>
+      run(
+        Effect.gen(function* () {
+          const t3 = yield* handing
+          const { handle, speak, talk, wait, nextEvent, played, dictating } = yield* assisted(
+            (situation) =>
+              situation.utterance.via === "shortcut"
+                ? Brain.decision({ act: "send", target: handleOf(situation, "t-mina"), text: "Wait for the Tezos migration." })
+                : Brain.decision({ act: "undo" }),
+            {
+              says: "Use the fee table.",
+              transcripts: ["Use the fee table.", "Scratch that."],
+              hands: t3.hands,
+              t3,
+              link: () => Effect.succeedSome({ machine: "Rosie", id: "t-tezos" }),
+              handsOver: (heard) => heard === "Scratch that.",
+              handing: {},
+            },
+            [tezos(), minaThread()],
+          )
+          yield* dictating("Tell the Mina one to wait.")
+          yield* wait(10)
+          yield* wait(50)
+          yield* tezosStop(handle, hooked)
+          yield* nextEvent("Ready: yapd.")
+          yield* wait(1)
+          yield* speak
+          // Sent, then said; "scratch that" over its line.
+          for (let second = 0; second < 4; second++) yield* wait(1)
+          yield* talk
+          for (let second = 0; second < 30; second++) yield* wait(1)
+          return { commands: t3.commands(), played: [...played] }
+        }),
+      )
+    // Through its hook, which leaves nothing to take back: Mina's message, a minute before, is asked about by name, never taken back.
+    const hooked = await scratched(true)
+    expect(hooked.commands).toEqual(["t-mina: message.dispatch"])
+    expect(hooked.played.at(-1)).toContain("Open the Mina SSV2 bug tickets")
+    expect(hooked.played.at(-1)).toMatch(/\?$/)
+    // By yapd's own hand, it's that message that's taken back, never Mina's: read already, it can only be told to ignore it, which is asked.
+    const steered = await scratched(false)
+    expect(steered.commands).toEqual(["t-mina: message.dispatch", "t-tezos: message.dispatch"])
+    expect(steered.played.at(-1)).toBe("It's already read it. Shall I tell it to ignore that?")
+  })
+
+  test("a hooked update ended by a handoff leaves its Stop hook waiting as a dismissal does, so a reply to it heard again goes through it; put back after a handoff, its hook still waits, and a reply over it when it's read again goes through it", async () => {
+    const asks = "Should I drop the old fee table, or keep both?"
+    const over = (needsYou: boolean) =>
+      run(
+        Effect.gen(function* () {
+          const t3 = yield* handing
+          const { handle, talk, wait, nextEvent, played, followUps, heard, replay } = yield* assisted(
+            (situation) => Brain.decision({ act: "answer", target: handleOf(situation, "t-mina"), spoken: "The Mina tickets are filed." }),
+            {
+              says: "Use the fee table.",
+              transcripts: ["What's the Mina one doing?", "Use the fee table."],
+              hands: t3.hands,
+              t3,
+              link: () => Effect.succeedSome({ machine: "Rosie", id: "t-tezos" }),
+              handsOver: (said) => said.startsWith("What's"),
+              handing: {},
+              urgentMessages: [asks],
+            },
+            [tezos(), minaThread()],
+          )
+          yield* tezosStop(handle, true, needsYou ? asks : "The migration compiles.")
+          yield* nextEvent("Ready: yapd.")
+          yield* wait(1)
+          yield* talk
+          for (let second = 0; second < 30; second++) yield* wait(1)
+          // Heard to the end, or once it's read again, it's asked for again from the menu.
+          if (!needsYou) {
+            const [id] = yield* heard
+            yield* replay(id!)
+          }
+          yield* wait(1)
+          yield* talk
+          for (let second = 0; second < 30; second++) yield* wait(1)
+          return { sent: t3.sent(), hook: [...followUps], played: [...played] }
+        }),
+      )
+    // Ended by the answer, as by a dismissal, its hook waits on, and a reply to it heard again goes through it.
+    const ended = await over(false)
+    expect(ended.played).toEqual(["yapd. The migration compiles.", "The Mina tickets are filed.", "yapd. The migration compiles.", "Okay, passed on."])
+    expect(ended.hook).toEqual(["s-tezos sent: Use the fee table."])
+    expect(ended.sent).toEqual([])
+    // Put back, read again after the answer, its hook waiting all the while.
+    const putBack = await over(true)
+    expect(putBack.played).toEqual([`yapd. ${asks}`, "The Mina tickets are filed.", `yapd. ${asks}`, "Okay, passed on."])
+    expect(putBack.hook).toEqual(["s-tezos sent: Use the fee table."])
+    expect(putBack.sent).toEqual([])
+  })
+
+  test("a handoff over an update that needs him, cut off before its end, reads it again from where it stopped once the handoff's answer is said, for a look, 'show me its PR' and 'mute the Tezos one' alike, even with a dictation starting just as it's put back; a message to its agent or a dismissal ends it; if yapd restarts first, a catch-up still has it", async () => {
+    const asks = "Should I drop the old fee table, or keep both?"
+    /** He hands `said` over, as the model takes it, over the Tezos update that asks him that, after a dictation, so he's at hand. */
+    const over = (said: string, model: (situation: Brain.Situation) => Brain.Decision, given: { readonly dictating?: boolean } = {}) =>
+      run(
+        Effect.gen(function* () {
+          const t3 = yield* handing
+          const mutes = yield* muting
+          const { handle, talk, wait, nextEvent, played, playedFrom, dictate, dictating, restarted } = yield* assisted(
+            (situation) => (situation.utterance.via === "shortcut" ? Brain.decision({ act: "answer", spoken: "Nothing else needs you." }) : model(situation)),
+            {
+              says: said,
+              hands: t3.hands,
+              t3,
+              mutes,
+              link: () => Effect.succeedSome({ machine: "Rosie", id: "t-tezos" }),
+              handsOver: () => true,
+              handing: {},
+              urgentMessages: [asks],
+            },
+            [tezos(), minaThread()],
+          )
+          yield* dictating("Does anything need me?")
+          for (let second = 0; second < 20; second++) yield* wait(1)
+          yield* tezosStop(handle, false, asks)
+          yield* nextEvent("Ready: yapd.")
+          yield* wait(1)
+          yield* talk
+          // A dictation starting just as it's put back, which the answer and then the update wait behind.
+          if (given.dictating === true) {
+            yield* Scope.close(yield* dictate, Exit.void)
+          }
+          yield* wait(1)
+          // Before it's read again, as when yapd restarts: a catch-up still has it.
+          const missed = (yield* (yield* restarted).missed).groups.flatMap(({ rows }) => rows.map(({ said }) => said))
+          for (let second = 0; second < 40; second++) yield* wait(1)
+          const update = `yapd. ${asks}`
+          const after = played.slice(played.indexOf(update) + 1)
+          return {
+            played: after,
+            again: after.includes(update),
+            from: playedFrom.filter((_, index) => played[index] === update),
+            missed: missed.includes(update),
+            sent: t3.sent(),
+            mutes: (yield* mutes.list).map(({ key }) => key),
+          }
+        }),
+      )
+    const minaHandle = (situation: Brain.Situation) => handleOf(situation, "t-mina")
+    const tezosHandle = (situation: Brain.Situation) => handleOf(situation, "t-tezos")
+    // A look, something shown, a mute: each read again, from a moment before where he cut in, once the answer's said.
+    const looked = await over("What's the Mina one doing?", (situation) => Brain.decision({ act: "answer", target: minaHandle(situation), spoken: "The Mina tickets are filed." }))
+    expect(looked.played.slice(0, 2)).toEqual(["The Mina tickets are filed.", `yapd. ${asks}`])
+    expect(looked.from).toEqual([0, 0.5])
+    expect(looked.missed).toBe(true)
+    const shown = await over("Show me its PR.", (situation) => Brain.decision({ act: "show", how: "pr", target: tezosHandle(situation) }))
+    expect(shown.again).toBe(true)
+    expect(shown.from).toEqual([0, 0.5])
+    const muted = await over("Mute the Tezos one.", (situation) => Brain.decision({ act: "mute", how: "mute", target: tezosHandle(situation) }))
+    expect(muted.mutes).toEqual(["t3:Rosie:t-tezos"])
+    expect(muted.again).toBe(true)
+    expect(muted.from).toEqual([0, 0.5])
+    // Even with a dictation starting just as it's put back.
+    const dictated = await over("What's the Mina one doing?", (situation) => Brain.decision({ act: "answer", target: minaHandle(situation), spoken: "The Mina tickets are filed." }), { dictating: true })
+    expect(dictated.again).toBe(true)
+    expect(dictated.from.at(-1)).toBe(0.5)
+    // A message to its agent, or a dismissal, ends it: never read again, and heard, so no catch-up has it.
+    const passed = await over("Tell it to keep both.", (situation) => Brain.decision({ act: "send", target: tezosHandle(situation), text: "Keep both tables." }))
+    expect(passed.sent).toEqual(["t-tezos: Keep both tables."])
+    expect(passed.again).toBe(false)
+    expect(passed.missed).toBe(false)
+    const dismissed = await over("Thanks, that's all.", () => Brain.decision({ act: "dismiss" }))
+    expect(dismissed.again).toBe(false)
+    expect(dismissed.missed).toBe(false)
+  }, 30_000)
+
+  test("'mute the Tezos one' over an update mutes it in the Brain's one model call, never the Responder's, and nothing about mutes reaches an agent, even when the model makes a message of it", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const t3 = yield* handing
+        const mutes = yield* muting
+        const { finish, talk, wait, played, followUps, responded, asked, dictating } = yield* assisted(
+          (situation) =>
+            situation.utterance.via === "shortcut"
+              ? Brain.decision({ act: "answer", spoken: "Nothing else needs you." })
+              : situation.utterance.heard.startsWith("Mute")
+                ? Brain.decision({ act: "mute", how: "mute", target: handleOf(situation, "t-tezos") })
+                : // A message of it, to the session he's hearing, which nothing about mutes ever is.
+                  Brain.decision({ act: "send", target: "", text: "I'll mute you if you keep logging." }),
+          {
+            says: "Mute the Tezos one.",
+            transcripts: ["Mute the Tezos one.", "Tell it I'll mute it if it keeps logging."],
+            hands: t3.hands,
+            t3,
+            mutes,
+            handsOver: () => true,
+            handing: {},
+          },
+          [tezos(), minaThread()],
+        )
+        yield* dictating("Does anything need me?")
+        for (let second = 0; second < 20; second++) yield* wait(1)
+        yield* finish("noisy", "Still logging.")
+        yield* wait(1)
+        yield* talk
+        for (let second = 0; second < 20; second++) yield* wait(1)
+        const muted = { responded: [...responded], asked: asked.length, mutes: (yield* mutes.list).map(({ key }) => key) }
+        yield* finish("noisy", "Still logging, louder.")
+        yield* wait(1)
+        yield* talk
+        for (let second = 0; second < 20; second++) yield* wait(1)
+        return { muted, responded: [...responded], sent: t3.sent(), relayed: [...followUps].filter((line) => line.includes("sent:")), said: played.at(-1) }
+      }),
+    )
+    // The mute hook handed it over, so only the Brain was asked, once: the dictation needed no model.
+    expect(result.muted).toEqual({ responded: [], asked: 1, mutes: ["t3:Rosie:t-tezos"] })
+    // About mutes in other words, handed over by the Responder, a message the model made of it reaches no one.
+    expect(result.responded).toEqual(["Tell it I'll mute it if it keeps logging."])
+    expect(result.sent).toEqual([])
+    expect(result.relayed).toEqual([])
+    // Said in his words, never the model's.
+    expect(result.said).toBe("I left that: Tell it I'll mute it if it keeps logging.")
+  }, 30_000)
+
+  test("words over an update's first seconds with nothing after a pause, handed over, are never acted on: no send, mute, mode or card, at most code's own question to stop, after which the update is read again from where it stopped, needs him or not", async () => {
+    /** He says `said` over the Tezos update's first seconds, which may all be yapd's own voice, as the model takes it. */
+    const over = (said: string, model: (situation: Brain.Situation) => Brain.Decision) =>
+      run(
+        Effect.gen(function* () {
+          const t3 = yield* handing
+          const mutes = yield* muting
+          const { handle, talk, wait, nextEvent, played, playedFrom, show, dictating, asked } = yield* assisted(
+            (situation) => (situation.utterance.via === "shortcut" ? Brain.decision({ act: "answer", spoken: "Nothing else needs you." }) : model(situation)),
+            {
+              says: said,
+              hands: t3.hands,
+              t3,
+              mutes,
+              link: () => Effect.succeedSome({ machine: "Rosie", id: "t-tezos" }),
+              handsOver: () => true,
+              handing: {},
+              // Its own voice may be in all he says over its first seconds.
+              echoing: 1_000,
+            },
+            [tezos(), minaThread({ status: "running", activeRunId: "run-3", activityRunStatus: "running" })],
+          )
+          yield* dictating("Does anything need me?")
+          for (let second = 0; second < 20; second++) yield* wait(1)
+          yield* tezosStop(handle)
+          yield* nextEvent("Ready: yapd.")
+          yield* talk
+          for (let second = 0; second < 40; second++) yield* wait(1)
+          const update = "yapd. The migration compiles."
+          return {
+            played: played.slice(played.indexOf(update)),
+            from: playedFrom.filter((_, index) => played[index] === update),
+            sent: t3.commands(),
+            mutes: yield* mutes.list,
+            shown: Option.isSome(yield* show.seen),
+            asked: asked.length,
+          }
+        }),
+      )
+    const tezosHandle = (situation: Brain.Situation) => handleOf(situation, "t-tezos")
+    const minaHandle = (situation: Brain.Situation) => handleOf(situation, "t-mina")
+    for (const [said, model] of [
+      ["Show me the PR.", (situation: Brain.Situation) => Brain.decision({ act: "show", how: "pr", target: tezosHandle(situation) })],
+      ["Tell the Mina one to wait.", (situation: Brain.Situation) => Brain.decision({ act: "send", target: minaHandle(situation), text: "Wait." })],
+      ["Mute the Tezos one.", (situation: Brain.Situation) => Brain.decision({ act: "mute", how: "mute", target: tezosHandle(situation) })],
+      ["Let me focus till three.", () => Brain.decision({ act: "mode", how: "focus" })],
+    ] as const) {
+      const result = await over(said, model)
+      // Let go: picked up again a word or two back, nothing done, sent, muted or shown.
+      expect(result.sent).toEqual([])
+      expect(result.mutes).toEqual([])
+      expect(result.shown).toBe(false)
+      expect(result.played.every((line) => line === "yapd. The migration compiles.")).toBe(true)
+      expect(result.from.length).toBeGreaterThan(1)
+    }
+    // A stop is only asked about, in code's own question, and the update, which needed nothing of him, is read again after it.
+    const stopped = await over("Stop the Mina tickets.", (situation) => Brain.decision({ act: "stop", target: minaHandle(situation) }))
+    expect(stopped.sent).toEqual([])
+    expect(stopped.played).toEqual(["yapd. The migration compiles.", "Stop Open the Mina SSV2 bug tickets?", "yapd. The migration compiles."])
+    expect(stopped.from.at(-1)).toBeGreaterThan(0)
+  }, 30_000)
 })
