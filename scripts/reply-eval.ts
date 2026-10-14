@@ -101,7 +101,7 @@ const Route = Schema.Literal("Again", "Hook", "Responder", "Resume", "Dismiss", 
  * path, what it may come to, how it's routed, how it was worked out, what
  * a Pass says was left, whether its rest step was left for the update's own
  * session, what's never done, what a question it asks names, what handed it
- * over, what's never said, and what is.
+ * over, what's never said, what is, and the Brain's "how".
  */
 const Expect = Schema.Struct({
   intent: Schema.optional(Intent),
@@ -125,6 +125,8 @@ const Expect = Schema.Struct({
   neverSpoken: Schema.optional(Schema.Array(Schema.String)),
   /** A piece of what's said back, like the thread a line turning it down names. */
   says: Schema.optional(Schema.String),
+  /** Handed over, the Brain's "how", like which tidy it is: "archive", "settle" or "pin". */
+  how: Schema.optional(Schema.String),
 })
 type Expect = typeof Expect.Type
 
@@ -1066,6 +1068,8 @@ interface Result {
   /** As the Responder's intents are, with "elsewhere" for a send to another thread than the update's own. */
   readonly intent: string
   readonly act?: string
+  /** Handed over, the Brain's "how" for its act, like which tidy it is. */
+  readonly how?: string
   readonly target?: string
   readonly title?: string
   readonly checked?: string
@@ -1074,7 +1078,7 @@ interface Result {
   readonly rest?: string
   readonly failed?: string
   /** The Brain's decision as the model or `fast` gave it, before `check`: only to look into, never scored. */
-  readonly raw?: { readonly act: string; readonly target?: string; readonly spoken?: string; readonly message?: string; readonly rest?: string }
+  readonly raw?: { readonly act: string; readonly how?: string; readonly target?: string; readonly spoken?: string; readonly message?: string; readonly rest?: string }
   /** Which run of the case this is, from 1, when it's worked out more than once. */
   readonly run?: number
   /** Batch 3's: how it was routed, what handed it over, and how the Brain worked it out, with its part of the time and the Responder's. */
@@ -1132,6 +1136,7 @@ const changing = new Set(["send", "elsewhere", "reply", "decide", "stop", "undo"
 /** What the Brain decided, as it's logged beside a result, before `check`. */
 const rawOf = (decision: Brain.Decision) => ({
   act: decision.act,
+  ...(decision.how === "" ? {} : { how: decision.how }),
   ...(decision.target === "" ? {} : { target: decision.target }),
   ...(decision.spoken === "" ? {} : { spoken: decision.spoken }),
   ...(decision.text === "" ? {} : { message: decision.text }),
@@ -1305,10 +1310,10 @@ const run = Effect.gen(function* () {
               : Option.none()
       /** What came of what was handed over, beside what the reading gives back. */
       let handed: Partial<Result> & { readonly brainMs?: number } = {}
-      /** What's said of a first step left, as the assistant says it: tidying a session with no thread, plainly, or anything else, in his words. */
+      /** What's said of a first step left, as the assistant says it: tidying a session with no thread, or a subagent, plainly, or anything else, in his words. */
       const leftSaid = (decision: Brain.Decision, by: Brain.Handed | undefined, heard: string, desk: Threads.Desk) => {
         const said = Brain.handoffLines(lines)
-        if (decision.act === "tidy" && by?.muting !== true) return said.untidied(decision.how)
+        if (decision.act === "tidy" && by?.muting !== true) return said.untidied(decision.how, Brain.headCalled(update, desk))
         return said.left(decision.rest.trim() === "" ? heard : decision.text.trim() || heard, desk)
       }
       let failed: string | undefined
@@ -1385,6 +1390,7 @@ const run = Effect.gen(function* () {
               brainMs,
               route: routed._tag,
               act: plan?.decision.act ?? decision.act,
+              ...((plan?.decision.how ?? decision.how) === "" ? {} : { how: plan?.decision.how ?? decision.how }),
               ...(decision.target === "" ? {} : { target: decision.target }),
               ...(listed === undefined ? {} : { title: listed.thread.title }),
               checked: checked._tag,
@@ -1537,8 +1543,9 @@ const meets = (case_: Case, result: Result): boolean | undefined => {
  * Whether batch 3's path meets a written case: the Responder's intent when it
  * kept it, the Brain's act, thread and rest when it was handed over, what
  * it may come to, how it's routed and worked out, what a Pass left, whether
- * the rest was left, what's never done, what a question names, what handed
- * it over, what's never said and what is; and always, nothing written by
+ * the rest was left, none when there's no rest, what's never done, what a
+ * question names, what handed it over, what's never said and what is, and
+ * the Brain's "how" for it; and always, nothing written by
  * yapd's own hand to an unsteered update's own thread, nor a Pass that loses
  * a negation he said or puts in words nothing said.
  */
@@ -1557,12 +1564,13 @@ const meetsHandoff = (case_: Case, expect: Expect, result: Result): boolean => {
   if (expect.neverRoute !== undefined) checks.push(!expect.neverRoute.includes(result.route as typeof Route.Type))
   if (expect.source !== undefined) checks.push(result.source === expect.source || result.brainSource === expect.source)
   if (expect.left !== undefined) checks.push(lower(result.left).includes(lower(expect.left)))
-  if (expect.restLeft !== undefined) checks.push(result.restLeft === expect.restLeft)
+  if (expect.restLeft !== undefined) checks.push((result.restLeft ?? false) === expect.restLeft)
   if (expect.neverDone !== undefined) checks.push(result.done === undefined || result.leftFirst === true || !expect.neverDone.includes(result.done as Brain.Act))
   if (expect.asking !== undefined) checks.push(result.checked !== "Ask" || lower(result.spoken).includes(lower(expect.asking)))
   if (expect.handedBy !== undefined) checks.push(result.handedBy === expect.handedBy)
   if (expect.neverSpoken !== undefined) checks.push(!expect.neverSpoken.some((words) => lower(result.spoken).includes(lower(words))))
   if (expect.says !== undefined) checks.push(lower(result.spoken).includes(lower(expect.says)))
+  if (expect.how !== undefined) checks.push(handed && result.how === expect.how)
   if (result.route === "Pass") checks.push(!lostNegation(case_, result) && unfounded(case_, result.message ?? "") <= 2)
   return checks.every(Boolean)
 }

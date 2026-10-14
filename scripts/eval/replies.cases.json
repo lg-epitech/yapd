@@ -215,6 +215,30 @@
       "needsYou": false,
       "session": "s-tezos",
       "thread": "t-tezos"
+    },
+    "tezos-archive": {
+      "project": "integration",
+      "spoken": "The Tezos migration needs you, sir: archive the old fee table, or leave it where it is?",
+      "message": "Nothing reads the old fee table any more. Should I archive it, or leave it where it is?",
+      "needsYou": true,
+      "session": "s-tezos",
+      "thread": "t-tezos"
+    },
+    "tezos-rename": {
+      "project": "integration",
+      "spoken": "The Tezos migration needs you, sir: the fee helper only rounds now, so rename it to fee rounding, or keep its name?",
+      "message": "The fee helper only does the rounding now. Should I rename it to fee rounding, or keep its name?",
+      "needsYou": true,
+      "session": "s-tezos",
+      "thread": "t-tezos"
+    },
+    "tezos-pin": {
+      "project": "integration",
+      "spoken": "The Tezos migration needs you, sir: pin the TzKT client to version four, or let it float?",
+      "message": "The TzKT client broke the fee rounding once already. Should I pin it to version 4, or let it float?",
+      "needsYou": true,
+      "session": "s-tezos",
+      "thread": "t-tezos"
     }
   },
   "cases": [
@@ -773,7 +797,7 @@
       "update": "tezos",
       "how": "tied",
       "heard": "Archive the Mina one.",
-      "expect": { "act": ["tidy"], "intents": ["clarify"], "asking": "Mina", "neverIntent": ["send"], "neverRoute": ["Pass"] }
+      "expect": { "act": ["tidy"], "how": "archive", "intents": ["clarify"], "asking": "Mina", "neverIntent": ["send"], "neverRoute": ["Pass"] }
     },
     {
       "id": "S63",
@@ -807,7 +831,7 @@
       "update": "rig",
       "how": "owner",
       "machine": "rig",
-      "heard": "Tell the Mina one to wait and tell it to rebase.",
+      "heard": "Tell the Mina one to wait, and tell this one to rebase.",
       "expect": { "act": ["send"], "target": "Mina", "rest": "rebase", "restLeft": true, "neverSpoken": ["couldn't tell"] }
     },
     {
@@ -823,7 +847,7 @@
       "note": "a mixed request over a hooked update, the other thread's part first: sent to it, the rebase left for its own session",
       "update": "tezos",
       "how": "hooked",
-      "heard": "Tell the Mina one to wait and tell it to rebase.",
+      "heard": "Tell the Mina one to wait, and tell this one to rebase.",
       "expect": { "act": ["send"], "target": "Mina", "rest": "rebase", "restLeft": true, "neverSpoken": ["couldn't tell"] }
     },
     {
@@ -935,7 +959,7 @@
       "update": "tezos",
       "how": "tied",
       "heard": "Settle it.",
-      "expect": { "act": ["tidy"], "target": "Tezos", "neverIntent": ["send"], "neverRoute": ["Pass"], "neverSpoken": ["shortcut"] }
+      "expect": { "act": ["tidy"], "how": "settle", "target": "Tezos", "neverIntent": ["send"], "neverRoute": ["Pass"], "neverSpoken": ["shortcut"] }
     },
     {
       "id": "S77h",
@@ -943,7 +967,7 @@
       "update": "tezos",
       "how": "hooked",
       "heard": "Settle it.",
-      "expect": { "act": ["tidy"], "target": "Tezos", "neverIntent": ["send"], "neverRoute": ["Pass"], "neverSpoken": ["shortcut"] }
+      "expect": { "act": ["tidy"], "how": "settle", "target": "Tezos", "neverIntent": ["send"], "neverRoute": ["Pass"], "neverSpoken": ["shortcut"] }
     },
     {
       "id": "S78",
@@ -951,7 +975,7 @@
       "update": "tezos",
       "how": "tied",
       "heard": "Settle this thread.",
-      "expect": { "act": ["tidy"], "target": "Tezos", "neverIntent": ["send"], "neverRoute": ["Pass"], "neverSpoken": ["shortcut"] }
+      "expect": { "act": ["tidy"], "how": "settle", "target": "Tezos", "neverIntent": ["send"], "neverRoute": ["Pass"], "neverSpoken": ["shortcut"] }
     },
     {
       "id": "S79",
@@ -959,7 +983,7 @@
       "update": "tezos",
       "how": "tied",
       "heard": "Settle the Mina one.",
-      "expect": { "act": ["tidy"], "says": "Mina", "neverIntent": ["send"], "neverRoute": ["Pass"] }
+      "expect": { "act": ["tidy"], "how": "settle", "says": "Mina", "neverIntent": ["send"], "neverRoute": ["Pass"] }
     },
     {
       "id": "S80",
@@ -967,7 +991,7 @@
       "update": "tezos",
       "how": "tied",
       "heard": "Pin it.",
-      "expect": { "act": ["tidy"], "target": "Tezos", "neverIntent": ["send"], "neverRoute": ["Pass"] }
+      "expect": { "act": ["tidy"], "how": "pin", "target": "Tezos", "neverIntent": ["send"], "neverRoute": ["Pass"] }
     },
     {
       "id": "S81",
@@ -975,7 +999,7 @@
       "update": "tezos",
       "how": "untied",
       "heard": "Settle it.",
-      "expect": { "act": ["tidy"], "says": "no T3 Code thread", "neverDone": ["tidy", "send"], "neverRoute": ["Pass"] }
+      "expect": { "act": ["tidy"], "how": "settle", "says": "no T3 Code thread", "neverDone": ["tidy", "send"], "neverRoute": ["Pass"] }
     },
     {
       "id": "S82",
@@ -987,6 +1011,38 @@
       "echo": "so you can settle it",
       "heard": "Settle it.",
       "expect": { "intents": ["resume"], "neverDone": ["tidy", "send"] }
+    },
+    {
+      "id": "S83",
+      "note": "a mixed request over a hooked update, the other thread's part first, then 'it', which after 'the Mina one' is the Mina one: both parts sent to it, nothing left",
+      "update": "tezos",
+      "how": "hooked",
+      "heard": "Tell the Mina one to wait and tell it to rebase.",
+      "expect": { "act": ["send"], "target": "Mina", "restLeft": false, "neverSpoken": ["couldn't tell"] }
+    },
+    {
+      "id": "S84",
+      "note": "'archive it' answering the agent's own question about archiving something in its work: sent to it, never the thread archived",
+      "update": "tezos-archive",
+      "how": "tied",
+      "heard": "Archive it.",
+      "expect": { "intent": "send", "never": ["tidy"], "neverDone": ["tidy"] }
+    },
+    {
+      "id": "S85",
+      "note": "'rename it' answering the agent's own question about renaming something in its work: sent to it, never the thread renamed",
+      "update": "tezos-rename",
+      "how": "tied",
+      "heard": "Rename it.",
+      "expect": { "intent": "send", "never": ["tidy"], "neverDone": ["tidy"] }
+    },
+    {
+      "id": "S86",
+      "note": "'pin it' answering the agent's own question about pinning something in its work: sent to it, never the thread pinned",
+      "update": "tezos-pin",
+      "how": "tied",
+      "heard": "Pin it.",
+      "expect": { "intent": "send", "never": ["tidy"], "neverDone": ["tidy"] }
     }
   ]
 }
