@@ -33,7 +33,9 @@ export type Act =
    * thread it tidied. `only` when he said which he meant: a message, or
    * what was done to a thread by tidying it. `among`, the threads he named
    * of a tidy, when he named several: only those are taken back, never one
-   * of it he didn't name.
+   * of it he didn't name. `pinned`, the command of the very step he said
+   * yes to taking back, asked about by what it did: that step alone, never
+   * one done since, and only while it's one taking back reaches.
    */
   | {
       readonly _tag: "Undo"
@@ -41,6 +43,7 @@ export type Act =
       readonly carry: boolean
       readonly only?: "message" | "tidy"
       readonly among?: ReadonlyArray<Threads.Ref>
+      readonly pinned?: string
     }
   /**
    * Tidies threads in T3 Code, in the order given, each once, as he agreed
@@ -275,10 +278,6 @@ export class Hands extends Context.Tag("yapd/Hands")<
 
 /** The same words to the same thread within this long, with no new turn since, are asked about before they go again. */
 const twins = 10 * 60_000
-/** How long after a message "scratch that" takes it back. */
-const scratch = "2 minutes"
-/** How long after a stop "carry on" lets it carry on. */
-const resumable = "10 minutes"
 /** How long ago a message a restart found didn't get there can be offered to go again. Older than that, it's only said. */
 const recent = 15 * 60_000
 /** Why a step a restart looked for can't be confirmed, when the thread doesn't show it. */
@@ -1269,15 +1268,18 @@ export const make = (options: {
    * Lets a thread yapd stopped carry on: lets go of its queue, then, once
    * that's done, asks it to pick up where it was, while that's still
    * `wanted`; or, told something in place of what it was stopped from that
-   * waits in that queue, only lets go.
+   * waits in that queue, only lets go. The stop he said yes to letting carry
+   * on, `pinned`, when he was asked about it, and no other, as long as it's
+   * still one letting a thread carry on reaches.
    */
-  const carry = (step: Step, to: Option.Option<Threads.Ref>, wanted: Effect.Effect<boolean>) =>
+  const carry = (step: Step, to: Option.Option<Threads.Ref>, wanted: Effect.Effect<boolean>, pinned?: string) =>
     Effect.gen(function* () {
-      const stopped = yield* ledger.latest(resumable, {
-        kinds: ["stop"],
-        states: ["sent", "abandoned"],
-        ...Option.match(to, { onNone: () => ({}), onSome: ({ machine, id }) => ({ machine, thread: id }) }),
-      })
+      const { within, filter } = Ledger.takingBack({ carry: true, to: Option.getOrUndefined(to) })
+      // Pinned, only that stop, while it's still one letting it carry on would reach.
+      const stopped =
+        pinned === undefined
+          ? yield* ledger.latest(within, filter)
+          : Ledger.latestOf(Option.toArray(yield* ledger.get(pinned)), yield* Clock.currentTimeMillis, within, filter)
       if (Option.isSome(stopped) && stopped.value.reason === carried) {
         return yield* failing({ _tag: "Refused", reason: carriedOn } satisfies Outcome, "let it carry on")
       }
@@ -1444,7 +1446,9 @@ export const make = (options: {
    * been read, it can only be told to ignore it. A tidy just done is taken
    * back, every thread of it, or only those he named, `among`, as `untidy`
    * has it. It's only ever the last thing done, never anything before it, of
-   * what he said he meant, `only`.
+   * what he said he meant, `only`; or the step he said yes to taking back,
+   * `pinned`, when he was asked about it, whatever was done since, as long
+   * as it's still one taking back reaches.
    */
   const withdraw = (
     step: Step,
@@ -1452,13 +1456,15 @@ export const make = (options: {
     wanted: Effect.Effect<boolean>,
     only?: "message" | "tidy",
     among?: ReadonlyArray<Threads.Ref>,
+    pinned?: string,
   ) =>
     Effect.gen(function* () {
-      const kinds: ReadonlyArray<Ledger.Kind> = only === "tidy" ? ["tidy"] : only === "message" ? ["message", "stop", "undo", "decide", "reply", "start", "relay"] : []
-      const last = yield* ledger.latest(scratch, {
-        ...Option.match(to, { onNone: () => ({}), onSome: ({ machine, id }) => ({ machine, thread: id }) }),
-        ...(kinds.length === 0 ? {} : { kinds }),
-      })
+      const { within, filter } = Ledger.takingBack({ carry: false, only, to: Option.getOrUndefined(to) })
+      // Pinned, only that step, while it's still one taking back would reach.
+      const last =
+        pinned === undefined
+          ? yield* ledger.latest(within, filter)
+          : Ledger.latestOf(Option.toArray(yield* ledger.get(pinned)), yield* Clock.currentTimeMillis, within, filter)
       const refused = (reason: string) => failing({ _tag: "Refused", reason } satisfies Outcome, "take it back")
       if (Option.isNone(last)) return yield* refused(only === "tidy" ? "I haven't tidied anything in the last couple of minutes." : "I haven't done anything in the last couple of minutes.")
       const row = last.value
@@ -1855,7 +1861,7 @@ export const make = (options: {
         case "Stop":
           return stop(step, act.to, wanted)
         case "Undo":
-          return act.carry ? carry(step, act.to, wanted) : withdraw(step, act.to, wanted, act.only, act.among)
+          return act.carry ? carry(step, act.to, wanted, act.pinned) : withdraw(step, act.to, wanted, act.only, act.among, act.pinned)
         case "Tidy":
           return tidy(step, act, wanted)
       }

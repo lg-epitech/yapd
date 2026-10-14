@@ -92,6 +92,43 @@ export interface Filter {
   readonly step?: number
 }
 
+/** How long after a step "scratch that" takes it back. */
+export const scratch = "2 minutes"
+
+/** How long after a stop letting the thread carry on takes it back. */
+export const resumable = "10 minutes"
+
+/**
+ * Where taking back what was done to a thread looks, as he said what he
+ * meant: to let a stop carry on, the latest stop of the last ten minutes,
+ * carried on since or not; otherwise the latest step of the last two, only a
+ * tidy, or only what wasn't one, when he said which. Of the thread he named,
+ * `to`, when he named one.
+ */
+export const takingBack = (undo: {
+  readonly carry: boolean
+  readonly only?: "message" | "tidy" | undefined
+  readonly to?: { readonly machine: string; readonly id: string } | undefined
+}): { readonly within: Duration.DurationInput; readonly filter: Filter } => {
+  const of = undo.to === undefined ? {} : { machine: undo.to.machine, thread: undo.to.id }
+  if (undo.carry) return { within: resumable, filter: { kinds: ["stop"], states: ["sent", "abandoned"], ...of } }
+  const kinds: ReadonlyArray<Kind> = undo.only === "tidy" ? ["tidy"] : undo.only === "message" ? ["message", "stop", "undo", "decide", "reply", "start", "relay"] : []
+  return { within: scratch, filter: { ...of, ...(kinds.length === 0 ? {} : { kinds }) } }
+}
+
+/** Whether the filter lets a row through, as `latest` and `steps` ask it. */
+const fits = (row: Row, filter: Filter) =>
+  (filter.kinds === undefined || filter.kinds.length === 0 || filter.kinds.includes(row.kind)) &&
+  (filter.states === undefined || filter.states.length === 0 || filter.states.includes(row.state)) &&
+  (filter.machine === undefined || row.machine === filter.machine) &&
+  (filter.thread === undefined || row.thread === filter.thread) &&
+  (filter.utterance === undefined || row.utterance === filter.utterance) &&
+  (filter.step === undefined || row.step === filter.step)
+
+/** Of `rows`, oldest first as `steps` gives them, the one `latest` would find within this long of `now`, of those the filter lets through. */
+export const latestOf = (rows: ReadonlyArray<Row>, now: number, within: Duration.DurationInput, filter: Filter = {}): Option.Option<Row> =>
+  Option.fromNullable(rows.findLast((row) => row.at >= now - Duration.toMillis(Duration.decode(within)) && fits(row, filter)))
+
 /** The steps yapd committed to, each written before it goes out. */
 export class Ledger extends Context.Tag("yapd/Ledger")<
   Ledger,
