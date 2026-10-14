@@ -470,7 +470,7 @@ describe("Brain", () => {
     expect(paused("Sir? Stop it.", false, "Stop it.")).toBe(paused("Sir? Stop it.", false))
   })
 
-  test("run on past the end of a line it said all of, what he said after its last words is told as his reply to it, and a bare no to what it did, run on or not, never as a dismissal", () => {
+  test("run on past the end of a line it said all of, what he said after its last words is told as his reply to it, and a bare no of his to what it did, run on or not, never as a dismissal, nor one that may be its own words", () => {
     const echo = "On it, sir: the Tezos migration."
     const told = (more: Partial<Assistant.Utterance>) => {
       const given = situation("migration. No.", { subject: { _tag: "Answer", said: echo, about: Option.some(ref(tezos)) } })
@@ -478,8 +478,10 @@ describe("Brain", () => {
     }
     const carried = ` You had said all of your line before he went on, so what he said after its last words is his reply to it, however short.`
     // New work can't be taken back, so a no to it only ever asks whether to stop it.
-    const done = `He's replying to your last line, which told him what came of something he asked you to do. When it says you did something for him, like sending a message, nothing but a no to that, like "No.", "No, don't." or "Scratch that.", is never a dismissal: it's "undo" when it plainly takes that back, or else "answer", asking him in a few words whether to take it back; never "dismiss" or "resume". When it says you started work for him, which can't be taken back, nothing but a no to that is "answer", asking him in a few words whether to stop it; never "undo", "dismiss" or "resume". Otherwise, as when it says something didn't go, a no goes as usual.`
-    expect(told({ echo, carried: true, afterDone: true })).toContain(`A question or a dismissal of his goes as usual.${carried}\n\n${done}\n\nWHAT HE SAID`)
+    const done = `He spoke right after your last line, which told him what you just did for him. When it says you did something for him, like sending a message, nothing but a no of his to that, like "No.", "No, don't." or "Scratch that.", is never a dismissal: it's "undo" when it plainly takes that back, or else "answer", asking him in a few words whether to take it back; never "dismiss" or "resume". When it says you started work for him, which can't be taken back, nothing but a no of his to that is "answer", asking him in a few words whether to stop it; never "undo", "dismiss" or "resume". Otherwise, as when it says something didn't go, a no goes as usual.`
+    // With its own voice in what was heard, a no that may be its own words, like its "Noted.", is never his, as the echo rule has it.
+    const own = ` What was heard may hold your own words, as above: only what's surely his can be his no, never words that may be yours, like a "No." that may be your own "Noted.", and if nothing surely his is left, it's "resume".`
+    expect(told({ echo, carried: true, afterDone: true })).toContain(`A question or a dismissal of his goes as usual.${carried}\n\n${done}${own}\n\nWHAT HE SAID`)
     expect(told({ echo, carried: true, afterDone: true, afterPause: "No." })).toContain(`A question or a dismissal of his goes as usual.${carried} What he said after a pause, «No.», is surely his`)
     // Begun once it had ended, with none of its own voice in what he said, the same of a no.
     expect(told({ afterDone: true })).toContain(`${done}\n\nWHAT HE SAID`)

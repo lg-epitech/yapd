@@ -4166,10 +4166,15 @@ export const prompt = (situation: Situation, style: Option.Option<string>) => {
               : ` What he said after a pause, ${fenced(situation.utterance.afterPause, 400)}, is surely his, even where it repeats your words, like naming one of your options; only what came before it may be yours.`
           }`,
         ]),
+    // Said back to what it did, a no only ever of his: with its own voice in what was heard, never one that may be yapd's own words.
     ...(situation.utterance.afterDone !== true
       ? []
       : [
-          `He's replying to your last line, which told him what came of something he asked you to do. When it says you did something for him, like sending a message, nothing but a no to that, like "No.", "No, don't." or "Scratch that.", is never a dismissal: it's "undo" when it plainly takes that back, or else "answer", asking him in a few words whether to take it back; never "dismiss" or "resume". When it says you started work for him, which can't be taken back, nothing but a no to that is "answer", asking him in a few words whether to stop it; never "undo", "dismiss" or "resume". Otherwise, as when it says something didn't go, a no goes as usual.`,
+          `He spoke right after your last line, which told him what you just did for him. When it says you did something for him, like sending a message, nothing but a no of his to that, like "No.", "No, don't." or "Scratch that.", is never a dismissal: it's "undo" when it plainly takes that back, or else "answer", asking him in a few words whether to take it back; never "dismiss" or "resume". When it says you started work for him, which can't be taken back, nothing but a no of his to that is "answer", asking him in a few words whether to stop it; never "undo", "dismiss" or "resume". Otherwise, as when it says something didn't go, a no goes as usual.${
+            situation.utterance.echo === undefined
+              ? ""
+              : ` What was heard may hold your own words, as above: only what's surely his can be his no, never words that may be yours, like a "No." that may be your own "Noted.", and if nothing surely his is left, it's "resume".`
+          }`,
         ]),
     `WHAT HE SAID, ${said(situation)}:\n${situation.utterance.heard}`,
   ].join("\n\n")
