@@ -7311,6 +7311,40 @@ describe("Daemon handing over what's yapd's to do", () => {
     expect(asked.relayed).toEqual([])
   })
 
+  test("'settle it' over a hooked Tezos update settles its thread in T3 Code, sending it nothing, though he isn't at hand; over a session tied to no thread, there's none to settle, and nothing goes", async () => {
+    const settled = (hooked: boolean) =>
+      run(
+        Effect.gen(function* () {
+          const t3 = yield* handing
+          const { handle, talk, wait, nextEvent, played, followUps } = yield* assisted(
+            // "It", as the model is shown it: the update's own thread, by its handle, or none.
+            (situation) => Brain.decision({ act: "tidy", how: "settle", target: Option.match(Brain.focused(situation), { onNone: () => "", onSome: ({ handle }) => handle }) }),
+            {
+              says: "Settle it.",
+              hands: t3.hands,
+              t3,
+              ...(hooked ? { link: () => Effect.succeedSome({ machine: "Rosie", id: "t-tezos" }) } : {}),
+              handsOver: () => true,
+              handing: {},
+            },
+            [tezos(), minaThread()],
+          )
+          yield* tezosStop(handle, hooked)
+          yield* nextEvent("Ready:")
+          yield* talk
+          for (let second = 0; second < 30; second++) yield* wait(1)
+          return { commands: t3.commands(), relayed: [...followUps].filter((line) => line.includes("sent:")), played: [...played].slice(1) }
+        }),
+      )
+    const hooked = await settled(true)
+    expect(hooked.commands).toEqual(["t-tezos: thread.settle"])
+    expect(hooked.relayed).toEqual([])
+    const untied = await settled(false)
+    expect(untied.commands).toEqual([])
+    expect(untied.relayed).toEqual([])
+    expect(untied.played).toEqual(["This session has no T3 Code thread to settle."])
+  })
+
   test("'scratch that' handed over after the 'On it' of a message passed through a hook, with a dictation's message to Mina sent a minute before, takes nothing back without asking, and asks about Mina's by name; after one yapd sent itself, it takes back that message alone", async () => {
     const scratched = (hooked: boolean) =>
       run(

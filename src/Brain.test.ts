@@ -2800,7 +2800,7 @@ describe("handed over from an update", () => {
     expect(route(send(handle(mina)), over("Tell the Mina one to rebase.", "hooked"))).toEqual({ _tag: "Act", aims: false, doubted: false })
   })
 
-  test("`leftOver` leaves a write to 'it' of an unsteered update by its handle, or by \"\" when it has none, and any write while muting", () => {
+  test("`leftOver` leaves a write to 'it' of an unsteered update by its handle, or by \"\" when it has none, and any write while muting; tidying it, only when it has no thread in T3 Code", () => {
     const tezosAt = handle(tezos)
     const left = (decision: Brain.Decision, situated: Brain.Situation) => Brain.leftOver(decision, situated.utterance.own!, situated.utterance.handed, situated)
     // Through its hook, or a rig update's by `owner`: its thread by its handle, a send, a stop or an answer to its question.
@@ -2820,6 +2820,13 @@ describe("handed over from an update", () => {
     // About mutes, no write reaches any thread, steered or not.
     expect(left(send(handle(mina)), over("Tell the Mina one I muted it.", "tied", { muting: true }))).toBe(true)
     expect(left(Brain.decision({ act: "mute", target: tezosAt, how: "mute" }), over("Mute the Tezos one.", "hooked", { muting: true }))).toBe(false)
+    // Tidying its thread changes nothing of its turn, so it's done, through its hook or by `owner` alike, but never while muting; a
+    // session with no thread in T3 Code has nothing to tidy.
+    const settle = (target: string) => Brain.decision({ act: "tidy", how: "settle", target })
+    for (const how of ["hooked", "owner"] as const) expect(left(settle(tezosAt), over("Settle it.", how))).toBe(false)
+    expect(left(settle(tezosAt), over("Settle it, I'm muting it anyway.", "hooked", { muting: true }))).toBe(true)
+    expect(left(settle(""), over("Settle it.", "untied"))).toBe(true)
+    expect(left(settle(handle(mina)), over("Settle the Mina one.", "untied"))).toBe(false)
   })
 
   test("over a TV in an empty room, new work, a reminder, a memory, a mode or a mute handed over is never done", () => {
@@ -2832,12 +2839,16 @@ describe("handed over from an update", () => {
     expect(away(Brain.decision({ act: "mute", how: "mute", target: handle(mina) }), "Mute the Mina one.")).toEqual(shortcut)
     // A message to another thread goes either way, as the Responder's do; while he's at hand, new work is acted on.
     expect(away(send(handle(mina)), "Tell the Mina one to rebase.")._tag).toBe("Act")
+    // Tidying is done as by the shortcut, at hand or not, and answers nothing the update asked, so it's read again when it needs him.
+    expect(away(Brain.decision({ act: "tidy", how: "settle", target: handle(tezos) }), "Settle it.")).toEqual({ _tag: "Act", aims: false, doubted: false })
     expect(Brain.route(Brain.decision({ act: "start", text: "look into the flaky Mina test" }), over("Start a thread to look into the flaky Mina test.", "tied"), lines)._tag).toBe("Act")
   })
 
   test("a handoff over an untied update is told 'it' is that session, target \"\"; over a rig update by `owner`, FOCUS names its handle; a dictation's prompt is unchanged", () => {
     const untied = Brain.prompt(over("Tell it to rebase.", "untied"), Option.none())
-    expect(untied).toContain(`He's speaking over this update, so "it" is that work's own session, not a thread in THREADS: a message for it is "send" with "target" "".`)
+    expect(untied).toContain(
+      `He's speaking over this update, so "it" is that work's own session, not a thread in THREADS: a message for it is "send" with "target" "", and tidying it is "tidy" with "target" "".`,
+    )
     const owned = Brain.prompt(over("Tell it to rebase.", "owner"), Option.none())
     expect(owned).toContain(`${handle(tezos)}. Your update about it, `)
     expect(owned).not.toContain(`He's speaking over this update`)

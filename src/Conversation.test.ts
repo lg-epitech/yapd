@@ -3111,7 +3111,7 @@ describe("more, and how yapd talks, over an update", () => {
     expect(Responder.prompt(over("Thanks."), Option.none())).not.toContain("What you left out")
   })
 
-  test("what's yapd's to do over an update, how it talks and catching up included, is handed to it, never sent; mutes, subagents, memories and tidying keep the shortcut's line; and what's for this agent is never handed over", () => {
+  test("what's yapd's to do over an update, how it talks, catching up and tidying a thread included, is handed to it, never sent; mutes, subagents and memories keep the shortcut's line; and what's for this agent is never handed over", () => {
     const prompt = Responder.prompt(over("Let me focus till three."), Option.none())
     const handed = `- "assistant" if it's for you to do, not this agent: anything about another thread or agent`
     expect(prompt).toContain(handed)
@@ -3121,12 +3121,15 @@ describe("more, and how yapd talks, over an update", () => {
     expect(prompt).not.toContain(`Catching up is for you, never the agent`)
     // Never what's for this agent, even naming another thread for it to use.
     expect(prompt).toContain(`Never what's meant for this agent, even when it names another thread for the agent to use, like "use the Mina fee table": that's "send".`)
-    // The shortcut's lines stay for mutes, subagents, memories and tidying.
+    // Tidying a thread, this one or another, is handed over too, never sent.
+    expect(prompt).toContain(
+      `- Tidying a thread in T3 Code, this one or another, is for you, never the agent: archiving, unarchiving, renaming, snoozing, settling or pinning it, or undoing that, like "settle it", "archive this thread" or "snooze it till tomorrow". Never "send". It's "assistant".`,
+    )
+    // The shortcut's lines stay for mutes, subagents and memories.
     for (const kept of [
       `- Muting or unmuting this thread or any other, like "mute this", "silence it for now" or "unmute the Tezos one", or asking what's muted, is for you, never the agent: never "send". It's "answer", telling them in a few words to ask you that with their shortcut.`,
       `It's "answer", telling them in a few words to ask you that with their shortcut. Asking the agent to use subagents, like "have a subagent review it", is the agent's as usual.`,
       `- What they want you to keep in mind, or forget, is for you, never the agent`,
-      `- Tidying a thread in T3 Code is for you, never the agent`,
     ]) {
       expect(prompt).toContain(kept)
     }

@@ -1289,14 +1289,16 @@ export const subagentLines = (lines: Lines, name: string) => {
 /**
  * What's said of what he handed to yapd over an update that it doesn't do:
  * what only the shortcut does while he isn't at hand, a routine's name, which
- * only the shortcut sends, and a step left for the update's own session, by
- * his words for it, made fit to say.
+ * only the shortcut sends, tidying a session that has no thread in T3 Code,
+ * and a step left for the update's own session, by his words for it, made
+ * fit to say.
  */
 export const handoffLines = (lines: Lines) => {
   const sir = addressed(lines)
   return {
     shortcut: `Ask me that with the shortcut${sir}.`,
     routine: `Say that with your shortcut${sir}.`,
+    untidied: (how: string) => `This session has no T3 Code thread to ${tidyings.has(how) ? how : "tidy"}${sir}.`,
     left: (words: string, desk: Threads.Desk) => {
       const step = speakable(words, desk).replace(/[.!?]+$/, "")
       return step === "" || T3Actions.revealing(words) ? `I left that${sir}.` : `I left that${sir}: ${step}.`
@@ -2939,10 +2941,13 @@ const aimed = (decision: Pick<Decision, "act" | "target">, own: Pick<Own, "ref">
  * it's about mutes, which never reach an agent; and one aimed at the update's
  * own session when that isn't steered, like one whose Stop hook waits, a
  * rig's tied only by `owner`, or one tied to none, which T3 Code reaching
- * would put two processes on one session.
+ * would put two processes on one session. Tidying it changes only how T3
+ * Code keeps its thread, never its turn, so that's left only when it has no
+ * thread there to tidy.
  */
 export const leftOver = (decision: Pick<Decision, "act" | "target">, own: Own, handed: Handed | undefined, situation: Pick<Situation, "subject" | "desk">) =>
-  writes.has(decision.act) && (handed?.muting === true || (!own.steered && aimed(decision, own, situation)))
+  writes.has(decision.act) &&
+  (handed?.muting === true || (aimed(decision, own, situation) && (decision.act === "tidy" ? own.ref === undefined : !own.steered)))
 
 /** Whether it's only done on his word, but isn't a write: new work, a mute, a mode, a reminder, an offer, a memory, clearing the catch-up. */
 export const unattended = (decision: Pick<Decision, "act" | "how">) => ownWord(decision) && !writes.has(decision.act)
@@ -2969,7 +2974,11 @@ export type Routed =
   | { readonly _tag: "Answer"; readonly spoken: string; readonly unattended?: true }
   /** For the update's own session, as the Responder's messages go, with what's said of a rest left. */
   | { readonly _tag: "Pass"; readonly message: string; readonly left?: string }
-  /** Done as a follow-up to an answer is, `aims` when its first step is at the update itself, `doubted` when all of it may be yapd's own words. */
+  /**
+   * Done as a follow-up to an answer is, `aims` when its first step is at
+   * the update itself, never tidying it, which answers nothing it asked,
+   * `doubted` when all of it may be yapd's own words.
+   */
   | { readonly _tag: "Act"; readonly aims: boolean; readonly doubted: boolean }
 
 /**
@@ -3013,7 +3022,7 @@ export const route = (decision: Decision, situation: Situation, lines: Lines): R
   if (handed?.present === false && unattended(decision) && decision.rest.trim() === "") return { _tag: "Answer", spoken: said.shortcut, unattended: true }
   return {
     _tag: "Act",
-    aims: decision.act === "dismiss" || (writes.has(decision.act) && own !== undefined && aimed(decision, own, situation)),
+    aims: decision.act === "dismiss" || (writes.has(decision.act) && decision.act !== "tidy" && own !== undefined && aimed(decision, own, situation)),
     doubted: mayBeOwn(utterance),
   }
 }
@@ -4552,8 +4561,8 @@ const focus = (situation: Situation) => {
           ? []
           : [
               update.subagent !== undefined
-                ? `He's speaking over this update, so "it" is that subagent, ${subagentHandle}, not the thread it's part of: a message for it is "send" with "target" "".`
-                : `He's speaking over this update, so "it" is that work's own session, not a thread in THREADS: a message for it is "send" with "target" "".`,
+                ? `He's speaking over this update, so "it" is that subagent, ${subagentHandle}, not the thread it's part of: a message for it is "send" with "target" "", and tidying it is "tidy" with "target" "".`
+                : `He's speaking over this update, so "it" is that work's own session, not a thread in THREADS: a message for it is "send" with "target" "", and tidying it is "tidy" with "target" "".`,
             ]),
       ].join("\n")
     }
