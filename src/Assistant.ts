@@ -5476,7 +5476,7 @@ export const make = (options: {
           done,
           own,
         ),
-      over: (update, lines, line, given) => (heard, voiced, echo, afterPause, unsaid) =>
+      over: (update: Conversation.Update, lines: ReadonlyArray<Line>, line: string, given: Over) => (heard: string, voiced: number, echo?: string, afterPause?: string, unsaid?: string) =>
         Effect.gen(function* () {
           const began = yield* Clock.currentTimeMillis
           const { turns } = yield* options.power
