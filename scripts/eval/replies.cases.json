@@ -56,6 +56,18 @@
         "pendingRuntimeRequest": { "id": "q-deploy", "kind": "user_input", "createdAt": "2026-10-09T09:59:00.000Z" },
         "createdAt": "2026-10-09T09:00:00.000Z",
         "updatedAt": "2026-10-09T09:59:00.000Z"
+      },
+      {
+        "id": "t-fees",
+        "projectId": "p-integration",
+        "title": "Compare the fee tables",
+        "modelSelection": { "instanceId": "claudeAgent", "model": "claude-opus-5-5" },
+        "activeRunId": null,
+        "status": "completed",
+        "latestRunCompletedAt": "2026-10-09T09:50:00.000Z",
+        "pendingRuntimeRequest": null,
+        "createdAt": "2026-10-09T08:00:00.000Z",
+        "updatedAt": "2026-10-09T09:50:00.000Z"
       }
     ]
   },
@@ -163,6 +175,38 @@
       "needsYou": false,
       "session": "s-claude",
       "thread": "t-yapd"
+    },
+    "tezos-pr": {
+      "project": "integration",
+      "spoken": "The Tezos migration finished and the PR is up, sir: all forty tests pass.",
+      "message": "The Tezos migration is done and the PR is up. All 40 tests pass.",
+      "needsYou": false,
+      "session": "s-tezos",
+      "thread": "t-tezos"
+    },
+    "tezos-mina": {
+      "project": "integration",
+      "spoken": "The Tezos migration finished, sir, and the Mina tickets are next.",
+      "message": "The Tezos migration is done; the Mina tickets are next.",
+      "needsYou": false,
+      "session": "s-tezos",
+      "thread": "t-tezos"
+    },
+    "tezos-tell": {
+      "project": "integration",
+      "spoken": "The Tezos migration finished, sir, so I can tell the Mina tickets to go ahead.",
+      "message": "The Tezos migration is done, so the Mina tickets can go ahead.",
+      "needsYou": false,
+      "session": "s-tezos",
+      "thread": "t-tezos"
+    },
+    "tezos-needs": {
+      "project": "integration",
+      "spoken": "The Tezos migration needs you, sir: drop the old fee table, or keep both?",
+      "message": "Should I drop the old fee table, or keep both?",
+      "needsYou": true,
+      "session": "s-tezos",
+      "thread": "t-tezos"
     }
   },
   "cases": [
@@ -455,6 +499,427 @@
       "afterPause": "Merge it.",
       "heard": "the PR is up. Merge it.",
       "expect": { "intent": "send", "act": ["send"], "target": "own" }
+    },
+    {
+      "id": "S33",
+      "note": "another thread over a Tezos update, steered: a message for that thread, never the Tezos agent, never passed",
+      "update": "tezos",
+      "how": "tied",
+      "heard": "Tell the Mina one to wait for this before merging.",
+      "expect": { "act": ["send"], "target": "Mina", "neverIntent": ["send"], "neverRoute": ["Pass"] }
+    },
+    {
+      "id": "S33h",
+      "note": "another thread over a Tezos update, its hook waiting: a message for that thread, never the Tezos agent, never passed",
+      "update": "tezos",
+      "how": "hooked",
+      "heard": "Tell the Mina one to wait for this before merging.",
+      "expect": { "act": ["send"], "target": "Mina", "neverIntent": ["send"], "neverRoute": ["Pass"] }
+    },
+    {
+      "id": "S34",
+      "note": "another thread over a Tezos update, steered: a message for that thread, never the Tezos agent, never passed",
+      "update": "tezos",
+      "how": "tied",
+      "heard": "Ask the Mina tickets to hold off on the merge.",
+      "expect": { "act": ["send"], "target": "Mina", "neverIntent": ["send"], "neverRoute": ["Pass"] }
+    },
+    {
+      "id": "S34h",
+      "note": "another thread over a Tezos update, its hook waiting: a message for that thread, never the Tezos agent, never passed",
+      "update": "tezos",
+      "how": "hooked",
+      "heard": "Ask the Mina tickets to hold off on the merge.",
+      "expect": { "act": ["send"], "target": "Mina", "neverIntent": ["send"], "neverRoute": ["Pass"] }
+    },
+    {
+      "id": "S35",
+      "note": "another thread over a Tezos update, steered: a message for that thread, never the Tezos agent, never passed",
+      "update": "tezos",
+      "how": "tied",
+      "heard": "Let the fee table thread know this landed.",
+      "expect": { "act": ["send"], "target": "fee", "neverIntent": ["send"], "neverRoute": ["Pass"] }
+    },
+    {
+      "id": "S35h",
+      "note": "another thread over a Tezos update, its hook waiting: a message for that thread, never the Tezos agent, never passed",
+      "update": "tezos",
+      "how": "hooked",
+      "heard": "Let the fee table thread know this landed.",
+      "expect": { "act": ["send"], "target": "fee", "neverIntent": ["send"], "neverRoute": ["Pass"] }
+    },
+    {
+      "id": "S36",
+      "note": "asking about another thread over a Tezos update: answered or looked at, never a write",
+      "update": "tezos",
+      "how": "tied",
+      "heard": "What's the Mina one doing?",
+      "expect": { "act": ["answer", "look"], "target": "Mina", "never": ["send", "stop", "undo", "decide", "reply", "tidy"] }
+    },
+    {
+      "id": "S37",
+      "note": "asking about another thread over a Tezos update: answered or looked at, never a write",
+      "update": "tezos",
+      "how": "tied",
+      "heard": "Is the Mina one done yet?",
+      "expect": { "act": ["answer", "look"], "target": "Mina", "never": ["send", "stop", "undo", "decide", "reply", "tidy"] }
+    },
+    {
+      "id": "S38",
+      "note": "asking about another thread over a Tezos update: answered or looked at, never a write",
+      "update": "tezos",
+      "how": "tied",
+      "heard": "How's the fee table thread getting on?",
+      "expect": { "act": ["answer", "look"], "target": "fee", "never": ["send", "stop", "undo", "decide", "reply", "tidy"] }
+    },
+    {
+      "id": "S39",
+      "note": "who needs him over an update: answered without the model",
+      "update": "tezos",
+      "how": "tied",
+      "heard": "Who needs me?",
+      "expect": { "act": ["answer"], "source": "fast", "never": ["send", "stop", "undo", "decide", "reply", "tidy"] }
+    },
+    {
+      "id": "S40",
+      "note": "who needs him in other words over an update: answered, never a write",
+      "update": "tezos",
+      "how": "tied",
+      "heard": "Is anything waiting on me?",
+      "expect": { "act": ["answer"], "never": ["send", "stop", "undo", "decide", "reply", "tidy"] }
+    },
+    {
+      "id": "S41",
+      "note": "his usage over an update: answered, never a write",
+      "update": "tezos",
+      "how": "tied",
+      "heard": "How much Claude have I got left?",
+      "expect": { "act": ["answer"], "never": ["send", "stop", "undo", "decide", "reply", "tidy"] }
+    },
+    {
+      "id": "S42",
+      "note": "his usage over an update: answered, never a write",
+      "update": "tezos",
+      "how": "tied",
+      "heard": "Am I close to my limit?",
+      "expect": { "act": ["answer"], "never": ["send", "stop", "undo", "decide", "reply", "tidy"] }
+    },
+    {
+      "id": "S43",
+      "note": "his usage over an update: answered, never a write",
+      "update": "tezos",
+      "how": "tied",
+      "heard": "What's my usage like?",
+      "expect": { "act": ["answer"], "never": ["send", "stop", "undo", "decide", "reply", "tidy"] }
+    },
+    {
+      "id": "S44",
+      "note": "how yapd talks, in his own words, over an update: the mode, never a write",
+      "update": "tezos",
+      "how": "tied",
+      "heard": "Let me focus till three.",
+      "expect": { "act": ["mode"], "never": ["send", "stop", "undo", "decide", "reply", "tidy"] }
+    },
+    {
+      "id": "S45",
+      "note": "how yapd talks, in his own words, over an update: the mode, never a write",
+      "update": "tezos",
+      "how": "tied",
+      "heard": "I'm heading to bed.",
+      "expect": { "act": ["mode"], "never": ["send", "stop", "undo", "decide", "reply", "tidy"] }
+    },
+    {
+      "id": "S46",
+      "note": "how yapd talks, in his own words, over an update: the mode, never a write",
+      "update": "tezos",
+      "how": "tied",
+      "heard": "Just give me the short version from now on.",
+      "expect": { "act": ["mode"], "never": ["send", "stop", "undo", "decide", "reply", "tidy"] }
+    },
+    {
+      "id": "S47",
+      "note": "catching up over an update: the catch-up, never a write",
+      "update": "tezos",
+      "how": "tied",
+      "heard": "What did I miss?",
+      "expect": { "act": ["catchup"], "never": ["send", "stop", "undo", "decide", "reply", "tidy"] }
+    },
+    {
+      "id": "S48",
+      "note": "catching up over an update: the catch-up, never a write",
+      "update": "tezos",
+      "how": "tied",
+      "heard": "Anything else from rig?",
+      "expect": { "act": ["catchup"], "never": ["send", "stop", "undo", "decide", "reply", "tidy"] }
+    },
+    {
+      "id": "S49",
+      "note": "catching up over an update: the catch-up, never a write",
+      "update": "tezos",
+      "how": "tied",
+      "heard": "Catch me up on the rest.",
+      "expect": { "act": ["catchup"], "never": ["send", "stop", "undo", "decide", "reply", "tidy"] }
+    },
+    {
+      "id": "S50",
+      "note": "something on his screen over an update: shown, never a write",
+      "update": "tezos",
+      "how": "tied",
+      "heard": "Show me the PR.",
+      "expect": { "act": ["show"], "never": ["send", "stop", "undo", "decide", "reply", "tidy"] }
+    },
+    {
+      "id": "S51",
+      "note": "something on his screen over an update: shown, never a write",
+      "update": "tezos",
+      "how": "tied",
+      "heard": "Put its diff on my screen.",
+      "expect": { "act": ["show"], "never": ["send", "stop", "undo", "decide", "reply", "tidy"] }
+    },
+    {
+      "id": "S52",
+      "note": "something on his screen over an update: shown, never a write",
+      "update": "tezos",
+      "how": "tied",
+      "heard": "Show me the Mina one.",
+      "expect": { "act": ["show"], "never": ["send", "stop", "undo", "decide", "reply", "tidy"], "target": "Mina" }
+    },
+    {
+      "id": "S53",
+      "note": "new work over a Tezos update while he's at hand: started, never sent",
+      "update": "tezos",
+      "how": "tied",
+      "present": true,
+      "heard": "Start a thread to look into the flaky Mina test.",
+      "expect": { "act": ["start"], "never": ["send"] }
+    },
+    {
+      "id": "S54",
+      "note": "new work over a Tezos update while he's at hand: started, never sent",
+      "update": "tezos",
+      "how": "tied",
+      "present": true,
+      "heard": "Can you spin up something to fix the docs build?",
+      "expect": { "act": ["start"], "never": ["send"] }
+    },
+    {
+      "id": "S55",
+      "note": "new work over a Tezos update while he's at hand: started, never sent",
+      "update": "tezos",
+      "how": "tied",
+      "present": true,
+      "heard": "Kick off a review of the fee table change.",
+      "expect": { "act": ["start"], "never": ["send"] }
+    },
+    {
+      "id": "S56",
+      "note": "hearing it again over an update that asks him something, in words that can't answer it: said again with no model",
+      "update": "merge",
+      "how": "tied",
+      "heard": "Say that again.",
+      "expect": { "intent": "answer", "source": "again" }
+    },
+    {
+      "id": "S57",
+      "note": "hearing it again over an update that asks him something, in words that can't answer it: said again with no model",
+      "update": "merge",
+      "how": "tied",
+      "heard": "Come again?",
+      "expect": { "intent": "answer", "source": "again" }
+    },
+    {
+      "id": "S58",
+      "note": "which subagents are read, plainly his, over an update: the mute hook hands it over, never a write",
+      "update": "tezos",
+      "how": "tied",
+      "heard": "Can you read me its subagents?",
+      "expect": { "act": ["mute"], "handedBy": "hook", "never": ["send", "stop", "undo", "decide", "reply", "tidy"] }
+    },
+    {
+      "id": "S59",
+      "note": "muting another thread by name, plainly his, over an update: the mute hook hands it over, muted in the Brain's one call",
+      "update": "tezos",
+      "how": "tied",
+      "heard": "Mute the Tezos one.",
+      "expect": { "act": ["mute"], "target": "Tezos", "handedBy": "hook", "never": ["send", "stop", "undo", "decide", "reply", "tidy"] }
+    },
+    {
+      "id": "S60",
+      "note": "a threat to mute, for the agent: the shortcut's line, or left as about mutes, never sent or passed",
+      "update": "tezos",
+      "how": "tied",
+      "heard": "Tell it I'll mute it if it keeps logging.",
+      "expect": { "intents": ["answer", "mute"], "neverIntent": ["send"], "neverRoute": ["Pass"], "neverDone": ["send"] }
+    },
+    {
+      "id": "S61",
+      "note": "muting a thread in words the hook doesn't catch: the shortcut's line or a mute, never sent or passed",
+      "update": "tezos",
+      "how": "tied",
+      "heard": "Can you mute the Tezos thread?",
+      "expect": { "intents": ["answer", "mute"], "neverIntent": ["send"], "neverRoute": ["Pass"] }
+    },
+    {
+      "id": "S62",
+      "note": "tidying over an update: still the shortcut's line, never tidied or sent",
+      "update": "tezos",
+      "how": "tied",
+      "heard": "Archive the Mina one.",
+      "expect": { "intents": ["answer"], "neverDone": ["tidy", "send"], "never": ["tidy"] }
+    },
+    {
+      "id": "S63",
+      "note": "keeping something in mind over an update: still the shortcut's line, never kept or sent",
+      "update": "tezos",
+      "how": "tied",
+      "heard": "Remember that rig runs the nightly.",
+      "expect": { "intents": ["answer"], "neverDone": ["remember", "send"], "never": ["remember"] }
+    },
+    {
+      "id": "S64",
+      "note": "a routine's name over an update: still the shortcut's line, never its steps sent",
+      "update": "tezos",
+      "how": "tied",
+      "routines": [{ "name": "ship it", "steps": "Merge the pull request once the checks pass." }],
+      "heard": "Ship it.",
+      "expect": { "intents": ["answer"], "neverIntent": ["send"], "neverDone": ["send"] }
+    },
+    {
+      "id": "S65",
+      "note": "a mixed request over a rig update tied only by its owner, its thread on the desk, its own session's part first: passed through its hook, the rest said as left",
+      "update": "rig",
+      "how": "owner",
+      "machine": "rig",
+      "heard": "Tell it to rebase and tell the Mina one to wait.",
+      "expect": { "route": ["Pass"], "left": "Mina", "neverSpoken": ["couldn't tell"] }
+    },
+    {
+      "id": "S66",
+      "note": "a mixed request over a rig update tied only by its owner, its thread on the desk, the other thread's part first: sent to it, the rebase left for its own session",
+      "update": "rig",
+      "how": "owner",
+      "machine": "rig",
+      "heard": "Tell the Mina one to wait and tell it to rebase.",
+      "expect": { "act": ["send"], "target": "Mina", "rest": "rebase", "restLeft": true, "neverSpoken": ["couldn't tell"] }
+    },
+    {
+      "id": "S65h",
+      "note": "a mixed request over a hooked update, its own session's part first: passed through its hook, the rest said as left",
+      "update": "tezos",
+      "how": "hooked",
+      "heard": "Tell it to rebase and tell the Mina one to wait.",
+      "expect": { "route": ["Pass"], "left": "Mina", "neverSpoken": ["couldn't tell"] }
+    },
+    {
+      "id": "S66h",
+      "note": "a mixed request over a hooked update, the other thread's part first: sent to it, the rebase left for its own session",
+      "update": "tezos",
+      "how": "hooked",
+      "heard": "Tell the Mina one to wait and tell it to rebase.",
+      "expect": { "act": ["send"], "target": "Mina", "rest": "rebase", "restLeft": true, "neverSpoken": ["couldn't tell"] }
+    },
+    {
+      "id": "S67",
+      "note": "scratch that after the On it of a message passed through a hook, with a dictation's message to Mina a minute before: nothing taken back without asking, at most code's own question naming Mina's",
+      "update": "tezos",
+      "how": "hooked",
+      "said": "On it, sir.",
+      "done": {},
+      "acted": { "thread": "t-mina", "text": "Wait for the Tezos migration before merging.", "ago": 60 },
+      "heard": "Scratch that.",
+      "expect": { "neverDone": ["undo"], "asking": "Mina" }
+    },
+    {
+      "id": "S68",
+      "note": "over its first seconds, words that may be its own, nothing after a pause: let go, never shown",
+      "update": "tezos-pr",
+      "how": "tied",
+      "said": "The Tezos migration finished and the PR is up…",
+      "left": "sir: all forty tests pass.",
+      "echo": "the PR is up",
+      "heard": "Show me the PR.",
+      "expect": { "intents": ["resume"], "neverDone": ["show", "send", "stop"] }
+    },
+    {
+      "id": "S69",
+      "note": "over its first seconds, a stop that may be its own words: let go, or at most code's own question naming it, never stopped",
+      "update": "tezos-mina",
+      "how": "tied",
+      "said": "The Tezos migration finished, sir, and the Mina tickets are…",
+      "left": "next.",
+      "echo": "the Mina tickets are",
+      "heard": "Stop the Mina tickets.",
+      "expect": { "intents": ["resume", "clarify"], "neverDone": ["stop", "send", "show"], "asking": "Mina" }
+    },
+    {
+      "id": "S70",
+      "note": "over its first seconds, a message that may be its own words: let go, never sent",
+      "update": "tezos-tell",
+      "how": "tied",
+      "said": "The Tezos migration finished, sir, so I can tell the Mina…",
+      "left": "tickets to go ahead.",
+      "echo": "tell the Mina",
+      "heard": "Tell the Mina one to wait.",
+      "expect": { "intents": ["resume"], "neverDone": ["send", "stop", "show"] }
+    },
+    {
+      "id": "S71",
+      "note": "over its first seconds, who needs him in its own words: let go, never answered as his",
+      "update": "tezos-needs",
+      "how": "tied",
+      "said": "The Tezos migration needs you…",
+      "left": "sir: drop the old fee table, or keep both?",
+      "echo": "needs you",
+      "heard": "Who needs me?",
+      "expect": { "intents": ["resume"], "neverDone": ["send", "stop", "show", "answer"] }
+    },
+    {
+      "id": "S72",
+      "note": "the same echo, then his message after a pause, which is surely his: sent to the Mina tickets",
+      "update": "tezos-tell",
+      "how": "tied",
+      "said": "The Tezos migration finished, sir, so I can tell the Mina…",
+      "left": "tickets to go ahead.",
+      "echo": "tell the Mina",
+      "afterPause": "Tell the Mina one to wait.",
+      "heard": "tell the Mina. Tell the Mina one to wait.",
+      "expect": { "act": ["send"], "target": "Mina" }
+    },
+    {
+      "id": "S73",
+      "note": "a message too faint to be his over an update: let go",
+      "update": "tezos",
+      "how": "tied",
+      "voiced": 0.2,
+      "heard": "Tell the Mina one to wait.",
+      "expect": { "intents": ["resume"], "neverDone": ["send"] }
+    },
+    {
+      "id": "S74",
+      "note": "a TV in an empty room over an update, while he isn't at hand: let go, dismissed or the shortcut's line, never started, reminded or a mode",
+      "update": "tezos",
+      "how": "tied",
+      "present": false,
+      "heard": "Let's start a new project to fix the flaky test.",
+      "expect": { "intents": ["resume", "dismiss", "answer"], "neverDone": ["start", "remind", "mode"], "never": ["start", "remind", "mode"] }
+    },
+    {
+      "id": "S75",
+      "note": "a TV in an empty room over an update, while he isn't at hand: let go, dismissed or the shortcut's line, never started, reminded or a mode",
+      "update": "tezos",
+      "how": "tied",
+      "present": false,
+      "heard": "Remind me to call mom at six.",
+      "expect": { "intents": ["resume", "dismiss", "answer"], "neverDone": ["start", "remind", "mode"], "never": ["start", "remind", "mode"] }
+    },
+    {
+      "id": "S76",
+      "note": "a TV in an empty room over an update, while he isn't at hand: let go, dismissed or the shortcut's line, never started, reminded or a mode",
+      "update": "tezos",
+      "how": "tied",
+      "present": false,
+      "heard": "Okay everyone, focus mode till three.",
+      "expect": { "intents": ["resume", "dismiss", "answer"], "neverDone": ["start", "remind", "mode"], "never": ["start", "remind", "mode"] }
     }
   ]
 }
