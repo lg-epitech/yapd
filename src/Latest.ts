@@ -1,4 +1,5 @@
 import { Clock, Effect, Option, Schedule, Stream, SubscriptionRef } from "effect"
+import * as Conversation from "./Conversation.ts"
 import type * as Daemon from "./Daemon.ts"
 import type * as Icons from "./Icons.ts"
 import type { Journal, Kept, Kind } from "./Journal.ts"
@@ -281,8 +282,10 @@ export const menu = (options: {
   readonly mention: (ref: Threads.Ref, said: string) => Effect.Effect<void>
   /** Where what's said again of a row is noted as heard, so a digest or "what did I miss?" doesn't tell of it again. */
   readonly journal?: Pick<Journal["Type"], "markHeard">
+  /** What makes of what he says right after what's said again of a row a follow-up about its thread. Without it, only "Mute." is listened for. */
+  readonly following?: (ref: Threads.Ref, line: string) => Conversation.Answer["followUp"]
 }) => {
-  const { latest, threads, mutes, controls, daemon, mention, journal } = options
+  const { latest, threads, mutes, controls, daemon, mention, journal, following } = options
   return {
     /**
      * Mutes a thread from the menu, by its key: one it lists, one /threads
@@ -324,7 +327,7 @@ export const menu = (options: {
      * Says a thread's latest update again, by its key, all of it, its "more"
      * too: as an update, when it's one he heard, so a reply to it still gets
      * there, otherwise what was kept of it, as an answer that makes "it" the
-     * thread. A session's row, or
+     * thread, which he can follow up from its end. A session's row, or
      * a thread yapd can't reach now, as when it was archived or its machine
      * can't be seen, isn't said again then: "it" would be something nothing
      * he says can act on.
@@ -365,6 +368,7 @@ export const menu = (options: {
             ...(journal === undefined || Option.isNone(entry)
               ? {}
               : { heard: Effect.flatMap(Clock.currentTimeMillis, (at) => journal.markHeard([entry.value.id], at)) }),
+            ...(following === undefined ? {} : { followUp: following(ref, spoken), window: Conversation.answering, after: true }),
           },
           turns,
         )

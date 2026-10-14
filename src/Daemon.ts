@@ -128,6 +128,13 @@ const holding = "20 seconds"
 /** How long a Stop is kept in mind: T3 Code says its thread finished well within it. */
 const forgotten = 60 * 60_000
 
+/**
+ * How long after he last dictated, or something he said back was taken up,
+ * he's taken to be at hand, so a line he didn't ask for, like a failure, can
+ * be answered: past that, who speaks after it may be a TV, or someone else.
+ */
+const nearby = 10 * 60_000
+
 /** How long finding the T3 Code thread a hook came from can take, after which its update goes the old way. */
 const lookup = "3 seconds"
 
@@ -224,6 +231,12 @@ export const make = (
     readonly ending?: (about: Threads.Ref, stop: Notices.Stop) => Effect.Effect<Reminders.Ending>
     /** The names of his routines, as they are now, so one said over an update is never sent to its agent as the bare words. */
     readonly routines?: Effect.Effect<ReadonlyArray<string>>
+    /**
+     * What makes of what he says right after a line said of an update, `line`,
+     * a follow-up about it, as the assistant follows up an answer. Without
+     * it, such a line listens only for "Mute.".
+     */
+    readonly following?: (update: Conversation.Update, line: string) => Conversation.Answer["followUp"]
   } = {},
 ) => Effect.gen(function* () {
   const lifetime = yield* Effect.scope
@@ -482,22 +495,33 @@ export const make = (
     )
   }
 
-  const late = (update: Conversation.Update, spoken: string, failed: boolean) =>
-    Effect.flatMap(Clock.currentTimeMillis, (at) =>
-      tell(
+  /**
+   * Says how a follow-up went once the update it answers was cut off before
+   * yapd could. A plain "On it" or "queued" can be followed up from its end,
+   * as what was said over the update; never a line that `quotes` his message
+   * back, which taken up could send it twice, nor one that says it may not
+   * have gone, which he'd answer with "send it again", words the model could
+   * only send the agent as they are.
+   */
+  const late = (update: Conversation.Update, spoken: string, failed: boolean, quotes = false) =>
+    Effect.flatMap(Clock.currentTimeMillis, (at) => {
+      const line = introduce(update.project, spoken)
+      const { following } = options
+      return tell(
         {
           id: `late:${crypto.randomUUID()}`,
           kind: "notice",
           priority: failed ? "needs-you" : "done",
-          spoken: introduce(update.project, spoken),
+          spoken: line,
           at,
           stale: Effect.succeed(false),
           // Only once it's known to play, so a line for going ahead dropped as yapd was turned off, or that afplay couldn't play, never counts as the last one he heard.
           confirmed: persona.said(spoken),
+          ...(following === undefined || quotes || failed ? {} : { followUp: following(update, line), window: Conversation.linger, after: true }),
         },
         readSince.get(update),
-      ),
-    )
+      )
+    })
 
   /**
    * Whether what the user says over an update goes to its T3 Code thread by
@@ -653,8 +677,8 @@ export const make = (
     }).pipe(events.withPermits(1))
     if (pending === undefined) return
     yield* deliver(pending).pipe(
-      Effect.zipRight(late(pending.followUp.update, `Sent the queued message: ${pending.followUp.message}`, false)),
-      Effect.catchAll(({ reason }) => late(pending.followUp.update, `Couldn't send the queued message "${pending.followUp.message}". ${reason}`, true)),
+      Effect.zipRight(late(pending.followUp.update, `Sent the queued message: ${pending.followUp.message}`, false, true)),
+      Effect.catchAll(({ reason }) => late(pending.followUp.update, `Couldn't send the queued message "${pending.followUp.message}". ${reason}`, true, true)),
     )
   })
 
@@ -664,7 +688,7 @@ export const make = (
     const channel = followed.get(session)
     followed.delete(session)
     for (const queued of channel?.queued ?? []) {
-      yield* Effect.forkIn(late(queued.update, `That work moved on, so I didn't send the queued message "${queued.message}".`, true), lifetime)
+      yield* Effect.forkIn(late(queued.update, `That work moved on, so I didn't send the queued message "${queued.message}".`, true, true), lifetime)
     }
   })
 
@@ -676,6 +700,18 @@ export const make = (
 
   /** Whether what's being said took the pause between lines already, as the moment after it ended once something waited to be said next. */
   let paused = false
+
+  /** When he last started dictating, or something he said back was taken up, by the clock: never yet since yapd started. */
+  let spoke: number | undefined
+  /** Notes he's at hand, as he just started dictating, or something he said back was taken up. */
+  const heardHim = Effect.flatMap(Clock.currentTimeMillis, (now) =>
+    Effect.sync(() => {
+      spoke = now
+    }),
+  )
+  /** Whether he's at hand, as he dictated or was taken up on a reply lately: kept only in memory, so after a restart, not until he speaks. */
+  const present = Effect.map(Clock.currentTimeMillis, (now) => spoke !== undefined && now - spoke < nearby)
+  yield* Effect.forkIn(Effect.forever(Effect.zipRight(dictationStarted, Effect.zipRight(heardHim, dictationOver))), lifetime)
 
   const turnOff = options.off
   const conversation = yield* Conversation.make({
@@ -704,7 +740,7 @@ export const make = (
       return "sent" as const
     }),
     late,
-    replied: PubSub.publish(replied, undefined),
+    replied: Effect.zipRight(heardHim, PubSub.publish(replied, undefined)),
     saying: (update, line) =>
       Effect.flatMap(Clock.currentTimeMillis, (at) =>
         Effect.sync(() => {
@@ -824,6 +860,17 @@ export const make = (
     // Once something waits to be said next, the moment after a line played through for "Mute." alone, like a notice, is over after the
     // pause between lines, so what's next starts then, with no pause of its own.
     queued: STM.commit(STM.flatMap(following, (ready) => (ready === undefined ? STM.retry : STM.void))).pipe(
+      Effect.zipRight(
+        Effect.sync(() => {
+          paused = true
+        }),
+      ),
+    ),
+    // Once an answer he asked for waits to be said next, the wait for a reply after an answer, or after a line listened to from its end,
+    // is over soon after it ended, and the answer follows with no pause of its own.
+    asked: STM.commit(
+      STM.flatMap(TRef.get(inbox), (waiting) => ([...waiting.values()].some((entry) => "notice" in entry && entry.notice.kind === "answer") ? STM.void : STM.retry)),
+    ).pipe(
       Effect.zipRight(
         Effect.sync(() => {
           paused = true
@@ -2020,12 +2067,14 @@ export const make = (
   /**
    * Says a notice. Only a question, or an answer that can be followed up, is
    * listened to: whatever else they'd say to it has nowhere to go, so over
-   * anything else only "Mute." is heard. What can't be played was never
+   * anything else only "Mute." is heard. One said unasked, like a failure, is
+   * followed up only while he's at hand. What can't be played was never
    * said, so it isn't what the user heard last; and a question that can't be
    * asked in full, even one that breaks off midway, counts as never said and
    * goes unanswered, to be asked again later or let go, rather than left open.
+   * `ended` runs once it's been said to the end.
    */
-  const say = (said: Inbox.Said, dealtWith: Effect.Effect<void>, listening = true) =>
+  const say = (said: Inbox.Said, dealtWith: Effect.Effect<void>, listening = true, ended: Effect.Effect<void> = Effect.void) =>
     Effect.gen(function* () {
       const { question, followUp } = said.notice
       if (yield* said.notice.stale) return yield* dealtWith
@@ -2053,16 +2102,30 @@ export const make = (
         if (question !== undefined) yield* question.unanswered
         return
       }
-      if (question === undefined && followUp !== undefined) {
+      // Said unasked, like a failure, while he isn't at hand, who speaks after it may well not be him: only "Mute." is listened for.
+      const hand = said.notice.unasked !== true || (yield* present)
+      if (question === undefined && followUp !== undefined && hand) {
         let through = false
         /** Once, as soon as it's said to the end, even with the microphone still open for a follow-up. */
         const heard = Effect.suspend(() => {
           if (through) return Effect.void
           through = true
-          return Effect.zipRight(said.notice.heard ?? Effect.void, dealtWith)
+          return Effect.zipRight(Effect.zipRight(said.notice.heard ?? Effect.void, dealtWith), ended)
         }).pipe(Effect.uninterruptible)
-        // Listened to like an update, so he can follow up what he asked about, which only one said to the end lingers for.
-        yield* conversation.answer({ audio: played, spoken, saying, confirmed, followUp, through: heard })
+        // Listened to like an update, so he can follow up what he asked about, which only one said to the end lingers for, or one
+        // followed up only from its end, which plays through what's said over it as a notice does.
+        const followed = yield* conversation.answer({
+          audio: played,
+          spoken,
+          saying,
+          confirmed,
+          followUp,
+          through: heard,
+          ...(said.notice.window === undefined ? {} : { wait: said.notice.window }),
+          ...(said.notice.after === true ? { after: true } : {}),
+          ...(said.notice.withheld === true ? { withheld: true } : {}),
+        })
+        if (followed) yield* heardHim
         // Cut off by a follow-up, a thanks or a stop, it's dealt with, never said again, but not heard: what he missed that it
         // was telling him, he didn't hear all of, so it's still his to catch up on, as when a dictation cuts it off.
         if (!through) yield* Effect.uninterruptible(dealtWith)
@@ -2072,7 +2135,7 @@ export const make = (
         // Nothing else he'd say over it has anywhere to go, so it plays through all he says, never turned down, but "Mute.", which it
         // listens for a moment after it too, only as long as the pause between lines once something waits to be said next, which hears
         // it itself: heard as soon as it's said to the end, so a dictation then neither puts it back nor finds it missed.
-        const heard = Effect.zipRight(said.notice.heard ?? Effect.void, dealtWith).pipe(Effect.uninterruptible)
+        const heard = Effect.zipRight(Effect.zipRight(said.notice.heard ?? Effect.void, dealtWith), ended).pipe(Effect.uninterruptible)
         return yield* conversation.tell({ audio: played, spoken, saying, confirmed, through: heard })
       }
       const answer = (heard: string, voiced: number, echo?: string, afterPause?: string, unsaid?: string) =>
@@ -2083,7 +2146,7 @@ export const make = (
         saying,
         confirmed,
         answer,
-        ...(question.through === undefined ? {} : { through: question.through }),
+        through: Effect.zipRight(question.through ?? Effect.void, ended),
         ...(question.terms === undefined ? {} : { terms: question.terms }),
       }
       const answered = yield* conversation.ask(asked).pipe(
@@ -2091,6 +2154,7 @@ export const make = (
           Cause.isInterruptedOnly(cause) ? Effect.void : dealtWith.pipe(Effect.zipRight(question.unsaid), Effect.zipRight(question.unanswered)),
         ),
       )
+      if (answered) yield* heardHim
       // Answered, or asked in full.
       yield* said.notice.heard ?? Effect.void
       if (!answered) yield* Effect.uninterruptible(Effect.zipRight(dealtWith, question.unanswered))
@@ -2351,6 +2415,13 @@ export const make = (
     let dealtWith = false
     /** An update read to the end, or answered: the user heard it. */
     let through = false
+    /** When it was said to the end, by the clock, and what waited to be said next then, for how long the microphone stayed open after it. */
+    let ending: { readonly at: number; readonly waiting: string } | undefined
+    const ended = Effect.gen(function* () {
+      const at = yield* Clock.currentTimeMillis
+      const next = Inbox.next(yield* STM.commit(TRef.get(inbox)))
+      ending = { at, waiting: next === undefined ? "nothing" : "update" in next ? "update" : next.notice.kind }
+    })
     /**
      * Noted at once, even while the microphone stays open for a reply, so a
      * dictation then neither puts it back nor finds it missed. Heard, it
@@ -2367,20 +2438,27 @@ export const make = (
         const row = rows.get(update)
         // What he asked to hear of its finishing, which led it, is heard with it.
         const led = leading.get(update) ?? []
-        if (row === undefined) return led.length === 0 ? Effect.void : Effect.flatMap(Clock.currentTimeMillis, (at) => journal.markHeard(led, at))
-        return Effect.flatMap(Clock.currentTimeMillis, (at) =>
-          Effect.zipRight(journal.markHeard([row, ...led], at), journal.outdated(row, update.session, update.about ?? update.owner ?? update.subagent?.child, at)),
+        if (row === undefined) return Effect.zipRight(ended, led.length === 0 ? Effect.void : Effect.flatMap(Clock.currentTimeMillis, (at) => journal.markHeard(led, at)))
+        return Effect.zipRight(
+          ended,
+          Effect.flatMap(Clock.currentTimeMillis, (at) =>
+            Effect.zipRight(journal.markHeard([row, ...led], at), journal.outdated(row, update.session, update.about ?? update.owner ?? update.subagent?.child, at)),
+          ),
         )
       }).pipe(Effect.uninterruptible)
     const reading =
       "update" in ready
-        ? conversation.converse(ready.update, heard(ready.update)).pipe(Effect.flatMap((heardIt) => (heardIt ? heard(ready.update) : Effect.void)))
+        ? conversation
+            // Longer after one that asks him something while he's at hand, or one heard again, which he asked for.
+            .converse(ready.update, heard(ready.update), { replay: ready.replay !== undefined, present: yield* present })
+            .pipe(Effect.flatMap((heardIt) => (heardIt ? heard(ready.update) : Effect.void)))
         : say(
             ready,
             Effect.sync(() => {
               dealtWith = true
             }),
             on,
+            ended,
           )
     /** Whether turning yapd off or on cut it off. */
     let cut = false
@@ -2450,6 +2528,16 @@ export const make = (
         }),
       ),
     )
+    // How long the microphone stayed open after it, against how long it would have before lines could be answered from their end and
+    // waits grew, with what waited behind it, so what that costs can be counted from the log.
+    if (ending !== undefined) {
+      const notice = "notice" in ready ? ready.notice : undefined
+      const kind = notice === undefined ? "update" : `${notice.kind}${notice.after === true && notice.followUp !== undefined ? ", from its end" : ""}`
+      const before =
+        notice === undefined ? 3 : notice.question !== undefined ? 8 : notice.followUp !== undefined && notice.after !== true ? 3 : ending.waiting === "nothing" ? 3 : 0.5
+      const open = ((yield* Clock.currentTimeMillis) - ending.at) / 1000
+      yield* Effect.logInfo(`Window: ${kind}, open ${open.toFixed(1)} s, ${before} s by today's rule, waiting: ${ending.waiting}`)
+    }
     // The pause between lines, unless the moment after this one was it already.
     if (!paused) yield* Effect.sleep("400 millis")
   })

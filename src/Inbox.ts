@@ -1,4 +1,4 @@
-import type { Effect } from "effect"
+import type { Duration, Effect } from "effect"
 import type { Ticket } from "./ClaudeCode.ts"
 import type { Priority } from "./Condenser.ts"
 import type { Answer, Question, Update } from "./Conversation.ts"
@@ -86,6 +86,20 @@ export interface Notice {
    * update, like a follow-up about the thread it was about.
    */
   readonly followUp?: Answer["followUp"]
+  /** With `followUp`, how long the microphone stays open for it once it's been said to the end: as after any answer, unless said. */
+  readonly window?: Duration.DurationInput
+  /**
+   * With `followUp`, whether it's followed up only from its end: it plays
+   * through whatever's said over it, listening only for "Mute.", as a notice
+   * does, and only what he says once it's ended is a follow-up.
+   */
+  readonly after?: true
+  /**
+   * With `followUp`, whether it's said unasked, like a failure: it's followed
+   * up only while he's at hand, and otherwise listens only for "Mute.", as a
+   * notice does, since who's in the room then may not be him.
+   */
+  readonly unasked?: true
 }
 
 /** A notice that is rendered, and waiting for its turn like updates do. */

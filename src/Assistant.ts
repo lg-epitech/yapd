@@ -1,7 +1,7 @@
 import { Cause, Clock, Context, Duration, Effect, Either, Exit, Fiber, FiberSet, Option } from "effect"
 import { hostname } from "node:os"
 import * as Brain from "./Brain.ts"
-import type * as Conversation from "./Conversation.ts"
+import * as Conversation from "./Conversation.ts"
 import type * as Drafts from "./Drafts.ts"
 import * as Hands from "./Hands.ts"
 import type { Notice } from "./Inbox.ts"
@@ -333,6 +333,13 @@ export interface Outcome {
   readonly onIt?: string
   /** Run once what's said is known to be playing, like noting the line for going ahead it starts with as the one he heard last. */
   readonly confirmed?: Effect.Effect<void>
+  /**
+   * Whether it says a message of his may not have gone without saying its
+   * words, like what a restart couldn't confirm: "send it again" is his
+   * likely reply, which the model could only send the agent as it is, so
+   * nothing said after it is listened for.
+   */
+  readonly unsent?: true
 }
 
 /** What the user says to yapd itself, worked out and acted on. */
@@ -376,6 +383,12 @@ export class Assistant extends Context.Tag("yapd/Assistant")<
     readonly back: Effect.Effect<void>
     /** yapd starts saying something of its own accord about a thread, like that it failed, which "it" then means. */
     readonly mention: (ref: Threads.Ref, said: string) => Effect.Effect<void>
+    /**
+     * What makes of what he says right after `line`, said of a thread or an
+     * update, a follow-up about it, with "it" that thread or update, as he
+     * follows up an answer.
+     */
+    readonly following: (about: Threads.Ref | Conversation.Update, line: string) => Conversation.Answer["followUp"]
     /**
      * What a thread waits on him for, to ask once nothing else is asked and
      * he isn't dictating, while it still waits on it: once, ever, and once
@@ -2195,7 +2208,13 @@ export const make = (options: {
                 question,
               })
             }
-            return unfinished({ say: line, subject: { ...subject, said: line }, kind: "done", ...(withheld ? { withheld } : {}) }, decision.rest, said, situation.desk)
+            // A message that didn't go, with nothing offered, is said without its words, so nothing said after it is listened for.
+            return unfinished(
+              { say: line, subject: { ...subject, said: line }, kind: "done", ...(withheld ? { withheld } : {}), ...(act._tag === "Message" ? { unsent: true as const } : {}) },
+              decision.rest,
+              said,
+              situation.desk,
+            )
           }
         }
       })
@@ -4133,17 +4152,34 @@ export const make = (options: {
      * stopped, as what he dictates is. Talk that wasn't meant for yapd, or a
      * change to a thread with too little speech to be his, isn't taken: the
      * answer carries on, or the microphone closes. `line` is what he heard of
-     * it, which can be its words for no app to show its card.
+     * it, which can be its words for no app to show its card, cut to what
+     * he'd heard of it when he spoke over it, by what it hadn't said yet,
+     * `unsaid`. Begun over its first word, before he could know what it's
+     * about, it's most likely a late reply to the line before: then no
+     * thread is "it".
      */
     const followUp =
       (about: Subject, line: Effect.Effect<string>) =>
-      (heard: string, voiced: number, echo?: string, afterPause?: string): Effect.Effect<Option.Option<Effect.Effect<void>>> =>
+      (heard: string, voiced: number, echo?: string, afterPause?: string, unsaid?: string): Effect.Effect<Option.Option<Effect.Effect<void>>> =>
         Effect.gen(function* () {
           const at = yield* Clock.currentTimeMillis
           const { turns } = yield* options.power
+          const said = yield* line
+          const left = unsaid === undefined || unsaid === "" ? undefined : unsaid
+          const barely = left !== undefined && said.endsWith(left) && said.slice(0, said.length - left.length).trim().split(/\s+/).length <= 1
+          const it: Subject = barely ? { _tag: "Answer", said, about: Option.none(), ...routinesOf(about) } : about
           // What he began over holding one of his routines' steps, a model is only told of it by the routine's name.
-          const utterance: Utterance = { id: mint(at, "u"), heard, via: "reply", at, voiced, turns, ...overItself({ echo, afterPause, echoRoutines: routinesOf(about).routines }) }
-          const thought = yield* think(utterance, about, [{ speaker: "yapd", text: yield* line, ...routinesOf(about) }])
+          const utterance: Utterance = {
+            id: mint(at, "u"),
+            heard,
+            via: "reply",
+            at,
+            voiced,
+            turns,
+            ...overItself({ echo, afterPause, echoRoutines: routinesOf(about).routines }),
+            ...(left === undefined ? {} : { unsaid: left }),
+          }
+          const thought = yield* think(utterance, it, [{ speaker: "yapd", text: heardOf(said, left), ...routinesOf(about) }])
           if (thought.decision.act === "resume") return Option.none()
           if (Brain.murmured(thought.decision, utterance)) {
             yield* Effect.logInfo(`Not taking ${quoted(heard)} as a follow-up, with only ${voiced.toFixed(2)} s of speech`)
@@ -4322,8 +4358,18 @@ export const make = (options: {
                   }),
                 }),
             ...(outcome.confirmed === undefined ? {} : { confirmed: outcome.confirmed }),
-            // An answer can be followed up about what it was about, in the words he heard it in.
-            ...(kind === "answer" ? { followUp: followUp(subject, Effect.sync(() => (reworded && instead !== undefined ? instead : outcome.say))) } : {}),
+            // An answer can be followed up about what it was about, in the words he heard it in, and what came of something he asked to be
+            // done, like "scratch that" right after "On it", from its end only: never one saying a message of his may not have gone, whose
+            // "send it again" the model could only send as it is.
+            ...(kind === "answer"
+              ? { followUp: followUp(subject, Effect.sync(() => (reworded && instead !== undefined ? instead : outcome.say))) }
+              : kind === "done" && outcome.unsent !== true
+                ? {
+                    followUp: followUp(subject, Effect.sync(() => (reworded && instead !== undefined ? instead : outcome.say))),
+                    window: Conversation.linger,
+                    after: true as const,
+                  }
+                : {}),
             ...(open === undefined
               ? { stale: Effect.succeed(false) }
               : {
@@ -4711,7 +4757,7 @@ export const make = (options: {
               utterance: row.utterance,
               detail: { commandId: row.commandId, act: row.kind === "message" ? "Message" : row.kind, outcome: row.state === "failed" ? "NotSent" : "Unknown", reason },
             })
-            yield* deliver({ say: line, subject: { _tag: "Answer", said: line, about: Option.some(ref) }, kind: "done" }, { id: row.utterance, turns: power.turns })
+            yield* deliver({ say: line, subject: { _tag: "Answer", said: line, about: Option.some(ref) }, kind: "done", unsent: true }, { id: row.utterance, turns: power.turns })
           })
         if (!offer) {
           const reason = row.reason ?? Hands.unconfirmable
@@ -4984,6 +5030,8 @@ export const make = (options: {
             answered = { subject: { _tag: "Answer", said, about: Option.some(ref) }, at, turns }
           }),
         ),
+      following: (about, line) =>
+        followUp("session" in about ? { _tag: "Session", update: about, said: line } : { _tag: "Answer", said: line, about: Option.some(about) }, Effect.succeed(line)),
       ask: (waiting) =>
         Effect.suspend(() => {
           const { requestId } = waiting.asks
@@ -5053,6 +5101,7 @@ export const make = (options: {
               heard: Effect.flatMap(Clock.currentTimeMillis, (at) => journal.markHeard([...covered, ...Option.toArray(entry ?? Option.none())], at)),
               telling: Effect.succeed(covered),
               followUp: followUp(subject, Effect.succeed(spoken)),
+              window: Conversation.linger,
             },
             power.turns,
           )

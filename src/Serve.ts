@@ -151,6 +151,8 @@ export const serve = Effect.gen(function* () {
   const persona = yield* Persona.Persona
   /** What tells him what was held once he says he's back over an update, which the assistant does, once it's made. */
   const welcome = yield* Deferred.make<Effect.Effect<void>>()
+  /** What makes a follow-up of what he says right after a line said of an update, as the assistant follows up an answer, once it's made. */
+  const following = yield* Deferred.make<Assistant.Assistant["Type"]["following"]>()
   /**
    * Turning yapd on or off as the menu does, once that's made, for "Mute."
    * said to it, and "unmute" by the shortcut while it's off, by the dictation
@@ -240,6 +242,9 @@ export const serve = Effect.gen(function* () {
     routines: Effect.map(Effect.all([memories.list, routines]), ([kept, written]) =>
       inMind({ memories: { kept, written } }).flatMap(({ name }) => (name === undefined ? [] : [name])),
     ),
+    // A late "On it" can be followed up as what was said over its update, which only the assistant works out.
+    following: (update, line) => (heard, voiced, echo, afterPause, unsaid) =>
+      Effect.flatMap(Deferred.await(following), (follow) => follow(update, line)(heard, voiced, echo, afterPause, unsaid)),
   })
   const icons = yield* Icons.make({ actions: threads.actions })
   /** What he hasn't heard, as the assistant gathers it for a catch-up, once it's made. */
@@ -305,6 +310,7 @@ export const serve = Effect.gen(function* () {
     routines,
   })
   yield* Deferred.succeed(welcome, assistant.welcome)
+  yield* Deferred.succeed(following, assistant.following)
   missing = Effect.map(assistant.missed, ({ groups }) => groups)
   // What threads need him for, what failed and what finished with no hook, each said once, ever.
   const notices = yield* Notices.make({
@@ -327,6 +333,8 @@ export const serve = Effect.gen(function* () {
     offered: assistant.offered,
     holding: modes.holding,
     archiving: hands.archiving,
+    // A failure, a limit hit or a reminder about a thread can be followed up about it, while he's at hand.
+    following: assistant.following,
   })
   yield* Deferred.succeed(noticing, notices)
   yield* Effect.forkScoped(notices.follow)
@@ -451,7 +459,7 @@ export const serve = Effect.gen(function* () {
     rundown: assistant.rundown,
   })
   // What the menu does to a thread it lists: mute it, have its subagents read or not, or hear it again.
-  const { mute, subagents, replayThread } = Latest.menu({ latest, threads, mutes, controls, daemon, mention: assistant.mention, journal })
+  const { mute, subagents, replayThread } = Latest.menu({ latest, threads, mutes, controls, daemon, mention: assistant.mention, journal, following: assistant.following })
   // Every thread it can see, not only the likeliest, in the order the desk puts them.
   const served = Show.served(
     show,

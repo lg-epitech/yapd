@@ -795,9 +795,9 @@ describe("Daemon", () => {
         yield* speak
         yield* wait(1)
         const answering = yield* lastHeard
-        // Said to the end, and nothing more said over it.
+        // Said to the end, and nothing more said over it, for as long as it's listened to after.
         yield* wait(10)
-        yield* wait(3)
+        yield* wait(6)
         return { reading, answering, after: yield* lastHeard, played: [...played] }
       }),
     )
@@ -2969,7 +2969,7 @@ describe("Daemon", () => {
     expect(result.unheard).toBe(0)
   })
 
-  test.each(["a follow-up", "silence"])("an answer said to the end is listened to as an update is, and what's next waits for %s", async (after) => {
+  test.each(["a follow-up", "silence"])("an answer said to the end is listened to after, longer than an update is, and what's next waits for %s", async (after) => {
     const followed = after === "a follow-up"
     const result = await run(
       Effect.gen(function* () {
@@ -2981,7 +2981,7 @@ describe("Daemon", () => {
         yield* wait(10)
         // Heard as soon as it's said to the end, with the microphone still open.
         const through = [...heard]
-        yield* wait(2)
+        yield* wait(5)
         const lingering = [...played]
         if (followed) yield* speak
         else yield* wait(1)
@@ -3015,7 +3015,7 @@ describe("Daemon", () => {
         const cut = [...played]
         yield* wait(10)
         const lingering = [...played]
-        yield* wait(3)
+        yield* wait(6)
         return { cut, lingering, played: [...played] }
       }),
     )

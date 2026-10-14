@@ -9881,8 +9881,10 @@ describe("Assistant", () => {
         return {
           followed,
           spoken: spoken(),
-          // Only the answer is listened to after: not the line said while it's looked up, nor what came of the message.
-          listened: notices().filter(({ followUp }) => followUp !== undefined).map(({ spoken }) => spoken),
+          // Only the answer is listened to over it and after, and what came of the message only from its end: never the line said while
+          // it's looked up.
+          listened: notices().filter(({ followUp, after }) => followUp !== undefined && after !== true).map(({ spoken }) => spoken),
+          fromEnd: notices().filter(({ followUp, after }) => followUp !== undefined && after === true).map(({ spoken }) => spoken),
           sent: dispatched.map(({ type, threadId, text }) => [type, threadId, text]),
           via: asked.utterance.via,
           lines: asked.lines,
@@ -9894,6 +9896,7 @@ describe("Assistant", () => {
     // The thread goes unnamed, since it's the one he was just told about.
     expect(result.spoken).toEqual(["One moment.", "It's comparing fee tables: three of eight networks done, sir.", "On it, sir."])
     expect(result.listened).toEqual(["It's comparing fee tables: three of eight networks done, sir."])
+    expect(result.fromEnd).toEqual(["On it, sir."])
     expect(result.sent).toEqual([["message.dispatch", tezos.id, "Use the Mina fee table."]])
     expect(result.via).toBe("reply")
     expect(result.lines).toEqual([{ speaker: "yapd", text: "It's comparing fee tables: three of eight networks done, sir." }])
