@@ -49,6 +49,8 @@ export interface State {
   }>
   /** The threads with the latest updates, newest first. */
   readonly recent?: ReadonlyArray<Recent>
+  /** His reminders still to come: those at a time, the soonest first, then those on a thread, the newest first. */
+  readonly reminders?: ReadonlyArray<Reminder>
   /** The card yapd is showing, or null. */
   readonly showing?: Showing | null
   /**
@@ -97,6 +99,16 @@ export interface Recent {
   readonly subagents?: boolean
   /** For a row of a thread's subagents, the thread they're part of, which their Read Subagents acts on. */
   readonly head?: Head
+}
+
+/** One of his reminders still to come, as `/state` lists it in `reminders`, worded as yapd says it. */
+export interface Reminder {
+  /** What it's cancelled by. */
+  readonly id: string
+  /** What it's to tell him, or offer to send a thread, as yapd says it: "" when it's only that a thread did what he asked to hear of. */
+  readonly text: string
+  /** When, as yapd says it by its clock, or the thread and what it's to do. */
+  readonly when: string
 }
 
 /** The thread a subagent is part of, by its key and title, and whether it's muted. */
@@ -276,6 +288,13 @@ export interface Api {
   readonly icon: (machine: string, project: string) => Effect.Effect<Option.Option<Icons.Image>>
   /** Sets aside, unheard, all a catch-up would tell him now, as `unheard` counts it, without saying any of it, while yapd is off too: how many. */
   readonly clearCatchup: Effect.Effect<number>
+  /**
+   * Cancels one of his reminders by its id, as "cancel the bank reminder"
+   * does, with nothing said, while yapd is off too: fired when it went off
+   * already, cancelled when it was cancelled before, and unknown when there's
+   * none.
+   */
+  readonly cancelReminder: (id: number) => Effect.Effect<"done" | "fired" | "cancelled" | "unknown">
 }
 
 const decodeChange = Schema.decodeUnknownOption(
@@ -450,6 +469,20 @@ export const serve = (port: number, api: Api) =>
         }
         // Only marks what a catch-up would tell as heard, so it's done while yapd is off too.
         if (route === "POST /catchup/clear") return Response.json({ cleared: yield* api.clearCatchup })
+        // Cancelling one of his reminders, as "cancel the bank reminder" does, which only changes what yapd would say: while it's off too.
+        const reminder = request.method === "DELETE" ? /^\/reminders\/([^/]+)$/.exec(url.pathname) : null
+        if (reminder !== null) {
+          const id = Option.filter(decoded(reminder[1]!), (id) => /^[1-9]\d*$/.test(id) && Number.isSafeInteger(Number(id)))
+          if (Option.isNone(id)) return new Response("No such reminder.", { status: 404 })
+          const cancelled = yield* api.cancelReminder(Number(id.value))
+          return cancelled === "done"
+            ? new Response(null, { status: 204 })
+            : cancelled === "fired"
+              ? new Response("It's already gone off.", { status: 409 })
+              : cancelled === "cancelled"
+                ? new Response("It's already cancelled.", { status: 409 })
+                : new Response("No such reminder.", { status: 404 })
+        }
         if (route === "GET /threads") return Response.json(yield* api.threads)
         if (route === "GET /journal") {
           const asked = paging(url.searchParams)

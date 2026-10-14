@@ -1,4 +1,4 @@
-import { Clock, Context, Deferred, Effect, Layer, Logger, Option, Schedule, Stream } from "effect"
+import { Clock, Context, Deferred, Effect, Layer, Logger, Option, PubSub, Schedule, Stream } from "effect"
 import { hostname } from "node:os"
 import * as Assistant from "./Assistant.ts"
 import { Activity, DeviceAudio } from "./Audio.ts"
@@ -111,8 +111,10 @@ export const serve = Effect.gen(function* () {
   const journal = yield* Journal.Journal
   const ledger = yield* Ledger.Ledger
   const store = yield* Store.Store
-  // What he asked to be told later, fired through the journal, in the same database.
-  const reminders = Reminders.make(store, journal)
+  // What he asked to be told later, fired through the journal, in the same database, which the menu lists again as any is set,
+  // cancelled or goes off.
+  const remindersChanged = yield* PubSub.unbounded<void>()
+  const reminders = Reminders.make(store, journal, PubSub.publish(remindersChanged, undefined))
   // What he asked yapd to keep in mind, which every prompt reads: never a routine kept by voice that one in his preferences is called the same as.
   const memories = Memory.make(store, routines)
   yield* Effect.forkScoped(
@@ -265,6 +267,7 @@ export const serve = Effect.gen(function* () {
     desk: threads.desk(Option.none(), [], Number.MAX_SAFE_INTEGER),
     // What he hasn't heard, to count by thread and in all.
     missed,
+    reminders: { pending: reminders.pending, changes: Stream.fromPubSub(remindersChanged) },
   })
   // Muting from the menu or by voice: never anything that reaches an agent. A thread the menu shows muted by its session is unmuted by it too.
   const controls = Mutes.widened(
@@ -431,8 +434,8 @@ export const serve = Effect.gen(function* () {
   const heard = (text: string, via: Assistant.Utterance["via"], voiced: number, turns: number, press?: number, at?: number) =>
     Effect.flatMap(at === undefined ? Clock.currentTimeMillis : Effect.succeed(at), (at) => assistant.heard({ heard: text, via, at, voiced, turns }, press))
 
-  const state = Stream.zipLatestAll(daemon.state, (yield* Activity).changes, latest.rows, modes.changes, latest.waiting, latest.unheard).pipe(
-    Stream.map(([state, activity, recent, { mode }, waiting, unheard]) => ({
+  const state = Stream.zipLatestAll(daemon.state, (yield* Activity).changes, latest.rows, modes.changes, latest.waiting, latest.unheard, latest.reminders).pipe(
+    Stream.map(([state, activity, recent, { mode }, waiting, unheard, reminders]) => ({
       on: state.on,
       activity,
       mode: mode.mode,
@@ -446,6 +449,7 @@ export const serve = Effect.gen(function* () {
         at: new Date(update.at).toISOString(),
       })),
       recent,
+      reminders,
     })),
   )
 
@@ -487,6 +491,7 @@ export const serve = Effect.gen(function* () {
     subagents,
     replayThread,
     clearCatchup: assistant.clear,
+    cancelReminder: assistant.cancel,
     // What a panel beside a row shows of its thread, what it's doing and its pull request as /threads has them, and what he hasn't heard as
     // its row counts it.
     details: Latest.details({ latest, threads, mutes, journal, listing: served.threads, missed }),

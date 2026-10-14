@@ -3,11 +3,13 @@ import { Clock, Effect, Option, PubSub, Queue, Schema, type Scope, Stream, TestC
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import * as Brain from "./Brain.ts"
 import * as Icons from "./Icons.ts"
 import * as Journal from "./Journal.ts"
 import * as Latest from "./Latest.ts"
 import * as Missed from "./Missed.ts"
 import * as Mutes from "./Mutes.ts"
+import * as Reminders from "./Reminders.ts"
 import type * as Server from "./Server.ts"
 import * as Store from "./Store.ts"
 import * as T3Live from "./T3Live.ts"
@@ -44,8 +46,8 @@ const integration: Threads.Placed = { id: "p-int", title: "integration", workspa
 const listing = (
   shown: Readonly<Record<string, ReadonlyArray<T3Live.Thread>>>,
   path = ":memory:",
-  /** What he heard, and each time that changes. */
-  hearing: Pick<Parameters<typeof Latest.make>[0], "heard" | "hearing" | "desk"> = {},
+  /** What he heard, and each time that changes, and his reminders. */
+  hearing: Pick<Parameters<typeof Latest.make>[0], "heard" | "hearing" | "desk" | "reminders"> = {},
   /** Whether what he hasn't heard is counted, as a catch-up gathers it. */
   counting = false,
 ) =>
@@ -441,6 +443,56 @@ describe("Latest", () => {
     } finally {
       await rm(root, { recursive: true, force: true })
     }
+  })
+
+  test('lists his reminders still to come, at a time soonest first then on a thread, as yapd words them, a rig thread\'s with "on rig", an offer whose message can\'t be read aloud never by its words, and again a moment after one is set or cancelled, not at the minute', async () => {
+    const at = (day: number, hour: number) => new Date(2026, 9, day, hour, 0).getTime()
+    const result = await run(
+      Effect.gen(function* () {
+        yield* TestClock.setTime(at(14, 9))
+        const store = yield* Store.make(":memory:")
+        const changed = yield* PubSub.unbounded<void>()
+        const reminders = Reminders.make(store, Journal.fromStore(store), PubSub.publish(changed, undefined))
+        const desk = Effect.succeed({
+          threads: [
+            { ref: { machine: "Rosie", id: "t-tezos" }, here: true, called: "the Tezos migration" },
+            { ref: { machine: "rig", id: "t-mina" }, here: false, called: "the Mina tickets" },
+            { ref: { machine: "Rosie", id: "t-std" }, here: true, called: "the std fix" },
+          ],
+          away: [],
+        } as unknown as Threads.Desk)
+        const std = { machine: "Rosie", thread: "t-std", called: "the std fix" }
+        const set = (asked: Omit<Reminders.Asked, "heard">) => reminders.add({ heard: "Remind me.", ...asked })
+        const bank = yield* set({ at: at(14, 6), text: "call the bank", due: at(14, 15) })
+        yield* set({ at: at(14, 6), text: "Water the plants.", due: at(15, 9) })
+        yield* set({ at: at(14, 6), text: "", propose: "Ship it.", due: at(14, 17), ...std })
+        yield* set({ at: at(14, 6), text: "", propose: "Run /Users/laurent/projects/std/scripts/release.sh now.", due: at(14, 16), ...std })
+        yield* set({ at: at(14, 7), text: "check the fixtures", event: "finished", machine: "Rosie", thread: "t-tezos", called: "the Tezos migration" })
+        yield* set({ at: at(14, 8), text: "", event: "asked", machine: "rig", thread: "t-mina", called: "the Mina tickets on rig" })
+        const { latest } = yield* listing({ Rosie: [], rig: [] }, ":memory:", { desk, reminders: { pending: reminders.pending, changes: Stream.fromPubSub(changed) } })
+        const seen: Array<ReadonlyArray<Server.Reminder>> = []
+        yield* Effect.forkScoped(Stream.runForEach(latest.reminders, (listed) => Effect.sync(() => void seen.push(listed))))
+        yield* flush
+        const settle = Effect.zipRight(TestClock.adjust("250 millis"), flush)
+        yield* set({ at: at(14, 9), text: "call mum", due: at(14, 12) })
+        yield* settle
+        yield* reminders.cancel(bank.id)
+        yield* settle
+        return { seen: seen.map((listed) => listed.map(({ text, when }) => [text, when])), bank: { id: String(bank.id), listed: seen[0]?.[0]?.id } }
+      }),
+    )
+    const time = (day: number, hour: number) => Brain.time(at(day, hour))
+    const first = [
+      ["Call the bank", `At ${time(14, 15)}`],
+      ["Offer to send the std fix what you said", `At ${time(14, 16)}`],
+      ["Offer to tell the std fix: ship it", `At ${time(14, 17)}`],
+      ["Water the plants", `Tomorrow at ${time(15, 9)}`],
+      ["", "When the Mina tickets on rig asks you something"],
+      ["Check the fixtures", "When the Tezos migration finishes"],
+    ]
+    expect(result.seen).toEqual([first, [["Call mum", `At ${time(14, 12)}`], ...first], [["Call mum", `At ${time(14, 12)}`], ...first.slice(1)]])
+    // Cancelled by the id it's listed by.
+    expect(result.bank.listed).toBe(result.bank.id)
   })
 
   describe("menu", () => {

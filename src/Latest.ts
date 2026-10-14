@@ -18,7 +18,7 @@ import * as Threads from "./Threads.ts"
 // he has read to him are listed as one, by the newest of them. It's built from
 // the journal, so a restart keeps it, and built again whenever any of it
 // changes. What's said aloud of a thread lives elsewhere: this is only what's
-// shown.
+// shown. Beside them, his reminders still to come, worded as yapd says them.
 
 /** How far back a thread's latest counts. */
 const week = 7 * 24 * 60 * 60_000
@@ -53,6 +53,8 @@ export interface Latest {
   readonly waiting: Stream.Stream<number>
   /** How many updates and notices a catch-up would tell him of now, muted threads aside, then each time that changes. */
   readonly unheard: Stream.Stream<number>
+  /** His reminders still to come, as a menu lists them, then each time that changes: none without them. */
+  readonly reminders: Stream.Stream<ReadonlyArray<Server.Reminder>>
   /** The threads as listed now. */
   readonly current: Effect.Effect<ReadonlyArray<Server.Recent>>
   /**
@@ -90,9 +92,11 @@ const blindly = "5 seconds"
 
 /**
  * The threads with the latest updates on every machine yapd follows, `here`
- * being this one, built again a moment after anything in it changes: what's
- * kept in the journal, what's muted, an icon, a thread's title or whether it
- * waits, and once a minute, for mutes that end on their own.
+ * being this one, and his reminders, built again a moment after anything in
+ * them changes: what's kept in the journal, what's muted, an icon, a thread's
+ * title or whether it waits, a reminder set, cancelled or gone off, and once a
+ * minute, for mutes that end on their own and a reminder's "tomorrow" that's
+ * today.
  */
 export const make = (options: {
   readonly here: string
@@ -111,13 +115,23 @@ export const make = (options: {
   readonly desk?: Effect.Effect<Threads.Desk>
   /** What he hasn't heard, as a catch-up would gather it, a thread at a time, to count: nothing without it. */
   readonly missed?: Effect.Effect<ReadonlyArray<Missed.Group>>
+  /** His reminders still to come, named by `desk`, to list, and each time any is set, cancelled or goes off: none without them. */
+  readonly reminders?: { readonly pending: Effect.Effect<ReadonlyArray<Reminders.Reminder>>; readonly changes: Stream.Stream<unknown> }
 }) =>
   Effect.gen(function* () {
     const { here, journal, mutes, icons, threads } = options
     const heard = options.heard ?? (() => Effect.succeedNone)
 
     /** Nothing listed yet, and the keys nothing is muted under. */
-    const none = { rows: [] as ReadonlyArray<Server.Recent>, under: new Map<string, ReadonlyArray<string>>(), entries: new Map<string, Shown>(), waiting: 0, unheard: 0, blind: false }
+    const none = {
+      rows: [] as ReadonlyArray<Server.Recent>,
+      under: new Map<string, ReadonlyArray<string>>(),
+      entries: new Map<string, Shown>(),
+      waiting: 0,
+      unheard: 0,
+      reminders: [] as ReadonlyArray<Server.Reminder>,
+      blind: false,
+    }
 
     const compute = Effect.gen(function* () {
       const now = yield* Clock.currentTimeMillis
@@ -230,13 +244,17 @@ export const make = (options: {
       const waiting = desk === undefined ? 0 : desk.threads.filter(({ state }) => state === "approval" || state === "question").length
       // What a catch-up of everything would tell him of: what was kept quiet as he muted its thread aside.
       const unheard = missed.reduce((sum, group) => sum + group.rows.filter((kept) => !Missed.muted(kept)).length, 0)
-      return { rows: listed, under, entries, waiting, unheard, blind }
+      // Each thread named as yapd says it now, or as it was when he asked, when it can't be seen.
+      const reminders: ReadonlyArray<Server.Reminder> =
+        options.reminders === undefined ? [] : Reminders.listing(yield* options.reminders.pending, desk ?? { threads: [], away: [] }, now)
+      return { rows: listed, under, entries, waiting, unheard, reminders, blind }
     }).pipe(Effect.catchAllCause((cause) => Effect.as(Effect.logWarning("Could not list the latest threads", cause), none)))
 
     const first = yield* compute
     const ref = yield* SubscriptionRef.make(first.rows)
     const waiting = yield* SubscriptionRef.make(first.waiting)
     const unheard = yield* SubscriptionRef.make(first.unheard)
+    const reminders = yield* SubscriptionRef.make(first.reminders)
     let { under, entries, blind } = first
     /** Built again, and kept only when it changed, so nothing that follows the state hears of what didn't. */
     const refresh = Effect.flatMap(compute, (built) =>
@@ -247,7 +265,11 @@ export const make = (options: {
           blind = built.blind
         }),
         SubscriptionRef.update(ref, (before) => (JSON.stringify(before) === JSON.stringify(built.rows) ? before : built.rows)),
-      ).pipe(Effect.zipRight(SubscriptionRef.set(waiting, built.waiting)), Effect.zipRight(SubscriptionRef.set(unheard, built.unheard))),
+      ).pipe(
+        Effect.zipRight(SubscriptionRef.set(waiting, built.waiting)),
+        Effect.zipRight(SubscriptionRef.set(unheard, built.unheard)),
+        Effect.zipRight(SubscriptionRef.update(reminders, (before) => (JSON.stringify(before) === JSON.stringify(built.reminders) ? before : built.reminders))),
+      ),
     )
     const shows = new Set(["Renamed", "Asked", "Answered", "Removed"])
     yield* Stream.mergeAll(
@@ -259,6 +281,7 @@ export const make = (options: {
         icons.changes,
         Stream.filter(threads.changes, ({ change }) => shows.has(change._tag)).pipe(Stream.map(() => undefined)),
         Stream.map(options.hearing ?? Stream.never, () => undefined),
+        Stream.map(options.reminders?.changes ?? Stream.never, () => undefined),
         Stream.fromSchedule(Schedule.spaced("1 minute")).pipe(Stream.map(() => undefined)),
         // T3 Code tells of no change as it catches up, here or on another machine, so while one's threads can't be seen it's looked at again.
         Stream.fromSchedule(Schedule.spaced(blindly)).pipe(
@@ -272,6 +295,7 @@ export const make = (options: {
       rows: Stream.changesWith(ref.changes, (one, other) => one === other),
       waiting: Stream.changes(waiting.changes),
       unheard: Stream.changes(unheard.changes),
+      reminders: Stream.changesWith(reminders.changes, (one, other) => one === other),
       current: SubscriptionRef.get(ref),
       under: (key) => Effect.sync(() => under.get(key) ?? []),
       row: (key) => Effect.sync(() => Option.fromNullable(entries.get(key))),

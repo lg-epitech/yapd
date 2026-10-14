@@ -45,6 +45,10 @@ There's no authentication: anything that can reach the port can use it, as hooks
       "unheard": 2
     }
   ],
+  "reminders": [
+    { "id": "42", "text": "Call the bank", "when": "Tomorrow at 9:00 AM" },
+    { "id": "41", "text": "", "when": "When the Tezos migration finishes" }
+  ],
   "showing": {
     "id": "cmgi3k2xa4f1",
     "kind": "pr",
@@ -64,6 +68,7 @@ There's no authentication: anything that can reach the port can use it, as hooks
 - `unheard`: how many updates and notices a [catch-up](#catching-up) would tell you of now, muted threads aside, not counting what yapd is reading you or is about to. It drops as soon as you've heard one through, and to `0` once you [clear the catch-up](#clearing-the-catch-up). A yapd from before it doesn't send it: take that as `0`.
 - `updates`: the last five updates you heard, newest first, to [hear again](#hearing-an-update-again). `text` is what yapd said and `at` when the agent's turn ended. They're kept through a restart, under the same `id`s. Treat an `id` as a name. A yapd from before that forgets them when it restarts, and its ids change then.
 - `recent`: the threads with the latest updates, one row each, newest first: up to eight, from the last seven days, whether or not yapd said them, so muted threads are there too. It's kept through a restart. A yapd from before it doesn't send it. See [Recent threads](#recent-threads).
+- `reminders`: what you asked yapd, by voice, to tell you later that's still to come, as yapd says it, and there while it's off too. See [Reminders](#reminders). A yapd from before it doesn't send it.
 - `showing`: the [card](#cards) yapd is showing, or `null`. `kind` and `title` are the card's, and `at` is when yapd put it up. Fetch the card itself from `/cards/{id}`. A yapd from before cards doesn't send it at all.
 - `revision` in `showing`: the `revision` the card went up at, this time. It stays the same while the card stays up, even as the state's own moves on, and a card put back up is up anew, at a later one. Send it to [take the card down](#cards) only as it went up then. A yapd from before it doesn't send it.
 - `revision`: goes up by one each time yapd puts a card up or takes one down, or is asked to take one down and doesn't, like one that's down already. It starts from `0` when yapd starts. Send it to [put a card back up](#cards) only if nothing came since. A yapd from before it doesn't send it.
@@ -138,6 +143,28 @@ curl -X POST http://127.0.0.1:4747/catchup/clear
 A yapd from before it answers `404`.
 
 By voice it's the model's to tell, however you put it: "clear the catch-up", "skip the catch-up", "mark everything as heard" or "I don't need the catch-up" gets "Cleared, sir: fifty-three updates set aside.", or "There's nothing to catch up on, sir." It's all of it or nothing: "I can only clear the whole catch-up, sir." Like any change, it needs your own word, so nothing faint over something yapd says clears it. "Scratch that" or "undo that" within two minutes, by voice, of either way of clearing it, brings back what it set aside that you haven't heard since: "Brought them back, sir." The [journal](#journal) has an `action` entry for each.
+
+## Reminders
+
+Each of `reminders` in the [state](#state) is something you asked yapd to tell you later, at a time or when a thread finishes or asks you something, or an offer to send a thread a message then, which only your yes sends. Those at a time come first, soonest first, then those waiting on a thread, newest first. You set them by voice; here you can only see them and cancel them.
+
+- `id`: what to cancel it by. Treat it as a name.
+- `text`: what yapd is to tell you then, or offer to send, in its words, like "Call the bank" or "Offer to tell the std fix: ship it". An offer whose message can't be read aloud, like one with a path or a link in it, is "Offer to send the std fix what you said". It's empty when yapd is only to tell you the thread did what you asked to hear of.
+- `when`: when, as yapd says it by its clock, like "At 3:00 PM", "Tomorrow at 9:00 AM" or "On Friday at 9:00 AM", or the thread and what it's to do, like "When the Tezos migration finishes", with "on rig" after a thread on another machine.
+
+A reminder leaves the list once it goes off (said, or kept for you while yapd is off), once it's cancelled, and when its thread is archived or deleted, which drops it.
+
+`DELETE /reminders/{id}` cancels one, as "cancel the bank reminder" does, but without a word. "Scratch that" by voice within two minutes keeps it again, as it does after cancelling by voice: "Kept your reminder at 3:00 PM, sir: call the bank." The [journal](#journal) has an `action` entry for each. It works while yapd is off too, since it only changes what yapd would tell you, and nothing reaches an agent: cancelling an offer sends nothing.
+
+```sh
+curl -X DELETE http://127.0.0.1:4747/reminders/42
+```
+
+| Status | |
+| --- | --- |
+| `204` | It's cancelled. |
+| `404` | No such reminder: it was never set, or it went off or was cancelled more than thirty days ago. A yapd from before it answers this too. |
+| `409` | It's no longer to come: it already went off, or it was already cancelled, by voice, from a menu or with its thread. The body says which. Nothing changes. |
 
 ## Hearing an update again
 

@@ -62,6 +62,7 @@ const hooks = (handle: Server.Handle): Server.Api => ({
   details: () => Effect.succeedNone,
   icon: () => Effect.succeedNone,
   clearCatchup: Effect.succeed(0),
+  cancelReminder: () => Effect.succeed("unknown"),
 })
 
 /**
@@ -146,6 +147,7 @@ const stateful = Effect.gen(function* () {
         () => Effect.sync(() => void watching--),
       ),
       clearCatchup: Effect.succeed(0),
+      cancelReminder: (id) => Effect.succeed(id === 42 ? "done" : "unknown"),
     } satisfies Server.Api,
   }
 })
@@ -434,6 +436,7 @@ describe("Server", () => {
         back: (id, revision) => noting("back", api.back(id, revision)),
         threads: noting("threads", api.threads),
         journal: (page) => noting("journal", api.journal(page)),
+        cancelReminder: (id) => noting("cancelReminder", api.cancelReminder(id)),
       })
       const url = `http://127.0.0.1:${server.port}`
       const routes: ReadonlyArray<readonly [string, RequestInit]> = [
@@ -444,6 +447,7 @@ describe("Server", () => {
         ["/cards/current", { method: "PUT", headers: { "content-type": "text/plain" }, body: '{"id": "c1"}' }],
         ["/threads", {}],
         ["/journal?limit=200", {}],
+        ["/reminders/42", { method: "DELETE" }],
         ["/state/stream?cards", {}],
       ]
       const status = (path: string, init: RequestInit, headers: Record<string, string>) =>
@@ -463,10 +467,10 @@ describe("Server", () => {
       return { fromPages, turnedAway, app, done }
     }))).then((result) => {
       expect(result).toEqual({
-        fromPages: Array.from({ length: 4 }, () => [403, 403, 403, 403, 403, 403, 403]),
+        fromPages: Array.from({ length: 4 }, () => [403, 403, 403, 403, 403, 403, 403, 403]),
         turnedAway: { done: [], pages: [], watching: 0, showing: "c1" },
-        app: [200, 204, 204, 204, 200, 200],
-        done: ["card", "hide", "hide", "back", "threads", "journal"],
+        app: [200, 204, 204, 204, 200, 200, 204],
+        done: ["card", "hide", "hide", "back", "threads", "journal", "cancelReminder"],
       })
     })
   })
@@ -563,6 +567,52 @@ describe("Server", () => {
       expect(readThen).toEqual(["t3:Rosie:850299f8"])
       expect(off).toEqual([204, 204])
       expect([...reading]).toEqual([])
+    })))
+  })
+
+  test("cancels a reminder by its id, says why one that's no longer to come can't be, and never asks about what's no reminder's id", async () => {
+    await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
+      // Gone off, cancelled before, or never set.
+      const asked: Array<number> = []
+      const server = yield* Server.serve(0, {
+        ...hooks(() => Effect.succeed(undefined)),
+        cancelReminder: (id) =>
+          Effect.sync(() => {
+            asked.push(id)
+            return id === 42 ? "done" : id === 41 ? "fired" : id === 40 ? "cancelled" : "unknown"
+          }),
+      })
+      const cancel = (id: string, method = "DELETE") =>
+        Effect.promise(async () => {
+          const response = await fetch(`http://127.0.0.1:${server.port}/reminders/${id}`, { method })
+          return [response.status, await response.text()]
+        })
+      const statuses = {
+        done: yield* cancel("42"),
+        fired: yield* cancel("41"),
+        cancelled: yield* cancel("40"),
+        unknown: yield* cancel("7"),
+        letters: yield* cancel("abc"),
+        zero: yield* cancel("0"),
+        fraction: yield* cancel("1.5"),
+        huge: yield* cancel("9007199254740993"),
+        undecodable: yield* cancel("%E0%A4%A"),
+        // Only ever cancelled.
+        read: yield* cancel("42", "GET"),
+      }
+      expect(statuses).toEqual({
+        done: [204, ""],
+        fired: [409, "It's already gone off."],
+        cancelled: [409, "It's already cancelled."],
+        unknown: [404, "No such reminder."],
+        letters: [404, "No such reminder."],
+        zero: [404, "No such reminder."],
+        fraction: [404, "No such reminder."],
+        huge: [404, "No such reminder."],
+        undecodable: [404, "No such reminder."],
+        read: [404, ""],
+      })
+      expect(asked).toEqual([42, 41, 40, 7])
     })))
   })
 

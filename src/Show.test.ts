@@ -120,7 +120,7 @@ const situation = (threads: ReadonlyArray<Threads.Listed>, away: Threads.Desk["a
 
 /** yapd's API serving `show`'s cards and nothing else, and how an app asks it what revision it's at and to put a card back up. */
 /** What the API does with threads' mutes, details and icons, here nothing: no thread is known. */
-const unmuted: Pick<Server.Api, "mute" | "unmute" | "replayThread" | "subagents" | "details" | "icon" | "mode" | "clearCatchup"> = {
+const unmuted: Pick<Server.Api, "mute" | "unmute" | "replayThread" | "subagents" | "details" | "icon" | "mode" | "clearCatchup" | "cancelReminder"> = {
   mode: () => Effect.void,
   mute: () => Effect.succeed("unknown"),
   unmute: () => Effect.void,
@@ -129,6 +129,7 @@ const unmuted: Pick<Server.Api, "mute" | "unmute" | "replayThread" | "subagents"
   details: () => Effect.succeedNone,
   icon: () => Effect.succeedNone,
   clearCatchup: Effect.succeed(0),
+  cancelReminder: () => Effect.succeed("unknown"),
 }
 
 const serving = (show: Show.Show["Type"]) =>

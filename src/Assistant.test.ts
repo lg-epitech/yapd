@@ -13092,6 +13092,50 @@ describe("Assistant reminders", () => {
       ["call the bank", later],
     ])
   })
+
+  test('cancelling a reminder from the menu says nothing and notes it as cancelling it by voice does, refuses one that went off or is cancelled already, and "scratch that" keeps it again', async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(
+          (situation) => (situation.utterance.heard.startsWith("Remind me") ? Brain.decision({ act: "remind", how: "at", when: local(soon), text: "call the bank" }) : undefined),
+          undefined,
+          { reminders: true },
+        )
+        const reminders = made.reminders!
+        yield* made.dictate("Remind me in a couple of hours to call the bank.")
+        const [bank] = yield* reminders.pending
+        const watched = yield* reminders.add({ at: now, heard: "Let me know when the Tezos one finishes.", text: "", event: "finished", machine: "Rosie", thread: tezos.id, called: "Migrate Tezos Integration" })
+        const gone = yield* reminders.add({ at: now, heard: "Remind me at three to stretch.", text: "stretch", due: soon })
+        yield* reminders.fire(gone, { at: now, kind: "notice", said: "You asked me to remind you, sir: stretch." })
+        const said = made.spoken().length
+        const cancelled = {
+          watched: yield* made.cancel(watched.id),
+          again: yield* made.cancel(watched.id),
+          fired: yield* made.cancel(gone.id),
+          unknown: yield* made.cancel(watched.id + 100),
+          bank: yield* made.cancel(bank!.id),
+        }
+        const quiet = made.spoken().length === said
+        const noted = (yield* made.journal.since(0, { kinds: ["action"] }))
+          .filter(({ said }) => said === undefined)
+          .map(({ machine, thread, utterance, detail }) => ({ machine, thread, utterance, detail }))
+        const left = (yield* reminders.pending).length
+        yield* made.dictate("Scratch that.")
+        return { bank: bank!.id, watched: watched.id, cancelled, quiet, noted, left, back: made.spoken().at(-1), pending: (yield* reminders.pending).map(({ id }) => id) }
+      }),
+    )
+    expect(result.cancelled).toEqual({ watched: "done", again: "cancelled", fired: "fired", unknown: "unknown", bank: "done" })
+    expect(result.quiet).toBe(true)
+    // Under its thread, as by voice, with no words of his or yapd's.
+    expect(result.noted).toEqual([
+      { machine: "Rosie", thread: tezos.id, utterance: undefined, detail: { forgot: result.watched } },
+      { machine: undefined, thread: undefined, utterance: undefined, detail: { forgot: result.bank } },
+    ])
+    expect(result.left).toBe(0)
+    // The last one cancelled is kept again, as after cancelling it by voice.
+    expect(result.back).toBe(`Kept your reminder at ${Brain.time(soon)}, sir: call the bank.`)
+    expect(result.pending).toEqual([result.bank])
+  })
 })
 
 describe("Assistant offers giving way", () => {

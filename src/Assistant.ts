@@ -494,6 +494,15 @@ export class Assistant extends Context.Tag("yapd/Assistant")<
      */
     readonly clear: Effect.Effect<number>
     /**
+     * Cancels one of his reminders, as from the menu: as cancelling it by voice
+     * does, noted in the journal under its thread and as the change he made
+     * last, which "scratch that" takes back, but with nothing said, as the
+     * catch-up cleared from the menu is. While yapd is off too. Why not, when
+     * it's no longer to come: it went off, it was cancelled already, or there's
+     * none.
+     */
+    readonly cancel: (id: number) => Effect.Effect<"done" | "fired" | "cancelled" | "unknown">
+    /**
      * An offer he set came due, handed over to be said, with the entry it was
      * kept under: asked once nothing else is asked and he isn't dictating,
      * never in place of a question open, and sent only on his yes.
@@ -3692,6 +3701,27 @@ export const make = (options: {
         return remindedOf(line, cancelled.value)
       })
 
+    /**
+     * Cancels one of his reminders by its id, as from the menu, as forgetting
+     * it does, but with nothing said, as clearing the catch-up from the menu:
+     * noted with no words of his or yapd's. Why not, when it's no longer to
+     * come, by how it is now.
+     */
+    const cancelling = (id: number) =>
+      Effect.gen(function* () {
+        const { reminders } = options
+        if (reminders === undefined) return "unknown" as const
+        const now = yield* Clock.currentTimeMillis
+        const cancelled = yield* reminders.cancel(id)
+        if (Option.isNone(cancelled)) {
+          const was = Option.getOrUndefined(Option.map(yield* reminders.get(id), ({ state }) => state))
+          return was === "fired" || was === "cancelled" ? was : ("unknown" as const)
+        }
+        noted = { at: now, kind: "forgot", id: cancelled.value.id, about: Reminders.ref(cancelled.value) }
+        yield* journal.write({ at: now, kind: "action", ...under(cancelled.value), detail: { forgot: cancelled.value.id } })
+        return "done" as const
+      })
+
     /** Takes back the reminder he just set, or brings back the one he just cancelled, and says so, naming it. */
     const retracting = (last: Brain.Noted, thought: Thought, said: Lines) =>
       Effect.gen(function* () {
@@ -5410,6 +5440,7 @@ export const make = (options: {
         return yield* Missed.gather(journal, { now, spoke: yield* lastSpoke(now), coming: yield* beingTold, desk: nowhere })
       }),
       clear: Effect.flatMap(Clock.currentTimeMillis, (now) => clearing(now)),
+      cancel: cancelling,
       offered: (reminder, kept) =>
         Effect.suspend(() => {
           proposed.push({ reminder, kept })

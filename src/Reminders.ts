@@ -152,8 +152,12 @@ const reading = <A>(effect: Effect.Effect<ReadonlyArray<A>, Store.StoreError>) =
 const one = (effect: Effect.Effect<Option.Option<Reminder>, Store.StoreError>) =>
   effect.pipe(Effect.catchAll((error) => Effect.logWarning("Could not change your reminders", error).pipe(Effect.as(Option.none<Reminder>()))))
 
-/** The reminders kept in `store`, fired through `journal`, which keeps its entries in the same store. */
-export const make = (store: Store.Store["Type"], journal: Pick<Journal["Type"], "claim">): Reminders => {
+/**
+ * The reminders kept in `store`, fired through `journal`, which keeps its
+ * entries in the same store, running `changed` once those still to come may
+ * have changed: one kept, cancelled, brought back or fired.
+ */
+export const make = (store: Store.Store["Type"], journal: Pick<Journal["Type"], "claim">, changed: Effect.Effect<void> = Effect.void): Reminders => {
   const find = (database: Database, id: number) => Option.map(Option.fromNullable(database.query<Row, [number]>("select * from reminders where id = ?").get(id)), reminder)
   /** Moves one from one state to another, giving it back as it is then, or none when it wasn't in `from`. */
   const move = (id: number, from: Reminder["state"], to: Reminder["state"]) =>
@@ -161,7 +165,7 @@ export const make = (store: Store.Store["Type"], journal: Pick<Journal["Type"], 
       store.transaction((database: Database) =>
         database.query("update reminders set state = ? where id = ? and state = ?").run(to, id, from).changes === 0 ? Option.none<Reminder>() : find(database, id),
       ),
-    )
+    ).pipe(Effect.tap((moved) => (Option.isSome(moved) ? changed : Effect.void)))
   return {
     add: (asked) =>
       store.transaction((database: Database) => {
@@ -185,7 +189,7 @@ export const make = (store: Store.Store["Type"], journal: Pick<Journal["Type"], 
             ).lastInsertRowid,
         )
         return Option.getOrThrow(find(database, id))
-      }),
+      }).pipe(Effect.tap(() => changed)),
     pending: reading(
       store.transaction((database: Database) => database.query<Row, []>("select * from reminders where state = 'pending' order by at desc, id desc").all().map(reminder)),
     ),
@@ -212,7 +216,7 @@ export const make = (store: Store.Store["Type"], journal: Pick<Journal["Type"], 
       journal.claim({ ...entry, key: key(id) }, (database) =>
         // Noted fired even when its key was claimed already, as by a yapd that stopped right after: a restart tells that again.
         database.query("update reminders set state = 'fired', fired_at = ? where id = ? and state = 'pending'").run(entry.at, id).changes > 0,
-      ),
+      ).pipe(Effect.tap(() => changed)),
     prune: (before) =>
       store
         .transaction((database: Database) => {
@@ -269,6 +273,9 @@ export const named = (listed: Pick<Threads.Listed, "called" | "here" | "ref">) =
 /** What an offer would send, as it's said, or how it's told when it can't be read out. */
 const message = (propose: string, to: string) => (Brain.readable(propose) && words(propose) !== "" ? `tell ${to}: ${words(propose)}` : `send ${to} what you said`)
 
+/** What a thread he watches is to do that he asked to hear of, as it's said. */
+const doing = (event: Event | undefined) => (event === "asked" ? "asks you something" : "finishes")
+
 /**
  * What's said of reminders, in fixed words, `called` being how the thread
  * it's about is said, as it's on the desk now, or else as it was when he
@@ -278,7 +285,6 @@ export const lines = (said: Pick<Lines, "address">, now: number) => {
   const sir = addressed(said)
   /** What he asked to be told then, after a colon, when there's anything. */
   const then = (text: string) => (words(text) === "" ? "" : `: ${words(text)}`)
-  const doing = (event: Event | undefined) => (event === "asked" ? "asks you something" : "finishes")
   /** What he asked to be reminded of as a thread did what he wanted to hear of, said after it: "" when it's only that it did. */
   const also = (reminder: Pick<Reminder, "text">) => (then(reminder.text) === "" ? "" : `You asked me to remind you then${then(reminder.text)}.`)
   return {
@@ -362,6 +368,28 @@ export const calling = (reminder: Pick<Reminder, "called" | "machine" | "thread"
   const on = Option.flatMap(ref(reminder), (about) => Option.fromNullable(desk.threads.find((listed) => Threads.same(listed.ref, about))))
   return Option.match(on, { onNone: () => reminder.called ?? "that thread", onSome: named })
 }
+
+/**
+ * A reminder as a menu lists it, in fixed words, as they're said, `called`
+ * being how its thread is said: what it's to tell him, or offer to send, and
+ * when, by yapd's clock, or the thread and what it's to do. Never "sir", nor
+ * an id, and numbers only as times.
+ */
+export const listed = (reminder: Reminder, called: string, now: number) => ({
+  text: reminder.propose === undefined ? capital(words(reminder.text)) : capital(`offer to ${message(reminder.propose, called)}`),
+  when: capital(reminder.event === undefined ? ahead(reminder.due ?? now, now) : `when ${called} ${doing(reminder.event)}`),
+})
+
+/**
+ * Those still to come, `pending`, as a menu lists them, each by its id, its
+ * thread named as on `desk`: those at a time first, the soonest first, then
+ * those on a thread, the newest first.
+ */
+export const listing = (pending: ReadonlyArray<Reminder>, desk: Threads.Desk, now: number) =>
+  [
+    ...pending.filter(({ event }) => event === undefined).toSorted((one, other) => (one.due ?? now) - (other.due ?? now) || one.id - other.id),
+    ...pending.filter(({ event }) => event !== undefined).toSorted((one, other) => other.at - one.at || other.id - one.id),
+  ].map((reminder) => ({ id: String(reminder.id), ...listed(reminder, calling(reminder, desk), now) }))
 
 /**
  * The reminders to tell him of as a thread he watched finishes, with what's
