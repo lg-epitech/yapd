@@ -101,7 +101,7 @@ const Route = Schema.Literal("Again", "Hook", "Responder", "Resume", "Dismiss", 
  * path, what it may come to, how it's routed, how it was worked out, what
  * a Pass says was left, whether its rest step was left for the update's own
  * session, what's never done, what a question it asks names, what handed it
- * over, and what's never said.
+ * over, what's never said, and what is.
  */
 const Expect = Schema.Struct({
   intent: Schema.optional(Intent),
@@ -123,6 +123,8 @@ const Expect = Schema.Struct({
   asking: Schema.optional(Schema.String),
   handedBy: Schema.optional(Schema.Literal("hook", "responder")),
   neverSpoken: Schema.optional(Schema.Array(Schema.String)),
+  /** A piece of what's said back, like the thread a line turning it down names. */
+  says: Schema.optional(Schema.String),
 })
 type Expect = typeof Expect.Type
 
@@ -1302,6 +1304,12 @@ const run = Effect.gen(function* () {
               : Option.none()
       /** What came of what was handed over, beside what the reading gives back. */
       let handed: Partial<Result> & { readonly brainMs?: number } = {}
+      /** What's said of a first step left, as the assistant says it: tidying a session with no thread, plainly, or anything else, in his words. */
+      const leftSaid = (decision: Brain.Decision, by: Brain.Handed | undefined, heard: string, desk: Threads.Desk) => {
+        const said = Brain.handoffLines(lines)
+        if (decision.act === "tidy" && by?.muting !== true) return said.untidied(decision.how)
+        return said.left(decision.rest.trim() === "" ? heard : decision.text.trim() || heard, desk)
+      }
       let failed: string | undefined
       let responderMs: number | undefined
       const over =
@@ -1331,9 +1339,13 @@ const run = Effect.gen(function* () {
             const leftFirst = Brain.leftOver(decision, own, utterance.handed, handedOver)
             // While he isn't at hand, a first step only his word does, with more after it, is acted on only to be turned down.
             const turnedDown = routed._tag === "Act" && !leftFirst && !present && Brain.unattended(decision)
-            /** Whether a checked write is to the update's own thread, by thread, over an unsteered update: one with none, by none. */
+            /**
+             * Whether a checked write is to the update's own thread, by thread, over an unsteered update: one with none, by none. Never
+             * tidying it, which changes nothing of its turn.
+             */
             const ownWrite = (plan: Brain.Plan) =>
               writes.has(plan.decision.act) &&
+              plan.decision.act !== "tidy" &&
               !steered &&
               (ref === undefined
                 ? plan.decision.target.trim() === "" && plan.decision.act !== "undo"
@@ -1374,7 +1386,9 @@ const run = Effect.gen(function* () {
               ...(decision.target === "" ? {} : { target: decision.target }),
               ...(listed === undefined ? {} : { title: listed.thread.title }),
               checked: checked._tag,
-              ...(turnedDown
+              ...(leftFirst
+                ? { spoken: leftSaid(decision, utterance.handed, heard, handedOver.desk) }
+                : turnedDown
                 ? { spoken: Brain.handoffLines(lines).shortcut }
                 : checked._tag === "Ask"
                   ? { spoken: checked.open.asked }
@@ -1522,9 +1536,9 @@ const meets = (case_: Case, result: Result): boolean | undefined => {
  * kept it, the Brain's act, thread and rest when it was handed over, what
  * it may come to, how it's routed and worked out, what a Pass left, whether
  * the rest was left, what's never done, what a question names, what handed
- * it over and what's never said; and always, nothing written by yapd's own
- * hand to an unsteered update's own thread, nor a Pass that loses a
- * negation he said or puts in words nothing said.
+ * it over, what's never said and what is; and always, nothing written by
+ * yapd's own hand to an unsteered update's own thread, nor a Pass that loses
+ * a negation he said or puts in words nothing said.
  */
 const meetsHandoff = (case_: Case, expect: Expect, result: Result): boolean => {
   const handed = result.route !== undefined && !["Again", "Hook", "Responder"].includes(result.route)
@@ -1546,6 +1560,7 @@ const meetsHandoff = (case_: Case, expect: Expect, result: Result): boolean => {
   if (expect.asking !== undefined) checks.push(result.checked !== "Ask" || lower(result.spoken).includes(lower(expect.asking)))
   if (expect.handedBy !== undefined) checks.push(result.handedBy === expect.handedBy)
   if (expect.neverSpoken !== undefined) checks.push(!expect.neverSpoken.some((words) => lower(result.spoken).includes(lower(words))))
+  if (expect.says !== undefined) checks.push(lower(result.spoken).includes(lower(expect.says)))
   if (result.route === "Pass") checks.push(!lostNegation(case_, result) && unfounded(case_, result.message ?? "") <= 2)
   return checks.every(Boolean)
 }
@@ -1586,7 +1601,8 @@ const meetsMost = (case_: Case, runs: ReadonlyArray<Result>): boolean | undefine
  * own thread, a Pass that's faint, about mutes, over what may be yapd's own
  * words or a routine's name, and on a written case, one that loses a
  * negation he said. A logged "ask me that with the shortcut" that came to
- * the mode, mute or catch-up it named is listed for his verdict instead.
+ * the mode, mute, catch-up or tidying it named is listed for his verdict
+ * instead.
  */
 const hardFail = (case_: Case, result: Result, labels: typeof Labels.Type) => {
   if (case_.by !== "responder") return false
@@ -1606,9 +1622,9 @@ const hardFail = (case_: Case, result: Result, labels: typeof Labels.Type) => {
   )
 }
 
-/** A logged "ask me that with the shortcut" that batch 3 turned into the mode, mute or catch-up it named, for his verdict. */
+/** A logged "ask me that with the shortcut" that batch 3 turned into the mode, mute, catch-up or tidying it named, for his verdict. */
 const verdictOnly = (case_: Case, result: Result) =>
-  case_.logged.intent === "answer" && /shortcut/i.test(case_.logged.spoken ?? "") && (["mode", "mute"].includes(result.intent) || result.act === "catchup")
+  case_.logged.intent === "answer" && /shortcut/i.test(case_.logged.spoken ?? "") && (["mode", "mute", "tidy"].includes(result.intent) || result.act === "catchup")
 
 /** Each case run again, by path: what each run came to, and how many of them disagree with what's expected or are hard fails. */
 const reruns = (cases: ReadonlyArray<Case>, done: ReadonlyArray<Result>, paths: ReadonlyArray<string>, labels: typeof Labels.Type) =>

@@ -207,6 +207,14 @@
       "needsYou": true,
       "session": "s-tezos",
       "thread": "t-tezos"
+    },
+    "tezos-settle": {
+      "project": "integration",
+      "spoken": "The Tezos migration is merged, sir, so you can settle it now.",
+      "message": "The Tezos migration is merged and nothing else is left on this thread, so it can be settled.",
+      "needsYou": false,
+      "session": "s-tezos",
+      "thread": "t-tezos"
     }
   },
   "cases": [
@@ -761,11 +769,11 @@
     },
     {
       "id": "S62",
-      "note": "tidying over an update: still the shortcut's line, never tidied or sent",
+      "note": "tidying another thread over an update: handed over and done as by the shortcut, the Mina one, busy, asked first; never sent",
       "update": "tezos",
       "how": "tied",
       "heard": "Archive the Mina one.",
-      "expect": { "intents": ["answer"], "neverDone": ["tidy", "send"], "never": ["tidy"] }
+      "expect": { "act": ["tidy"], "intents": ["clarify"], "asking": "Mina", "neverIntent": ["send"], "neverRoute": ["Pass"] }
     },
     {
       "id": "S63",
@@ -920,6 +928,65 @@
       "present": false,
       "heard": "Okay everyone, focus mode till three.",
       "expect": { "intents": ["resume", "dismiss", "answer"], "neverDone": ["start", "remind", "mode"] }
+    },
+    {
+      "id": "S77",
+      "note": "settling the update's own thread, steered: handed over and settled, never sent or passed",
+      "update": "tezos",
+      "how": "tied",
+      "heard": "Settle it.",
+      "expect": { "act": ["tidy"], "target": "Tezos", "neverIntent": ["send"], "neverRoute": ["Pass"], "neverSpoken": ["shortcut"] }
+    },
+    {
+      "id": "S77h",
+      "note": "settling the update's own thread while its hook waits: tidying changes nothing of its turn, so it's settled all the same, never sent or passed",
+      "update": "tezos",
+      "how": "hooked",
+      "heard": "Settle it.",
+      "expect": { "act": ["tidy"], "target": "Tezos", "neverIntent": ["send"], "neverRoute": ["Pass"], "neverSpoken": ["shortcut"] }
+    },
+    {
+      "id": "S78",
+      "note": "settling the update's own thread, by its name for it: settled, never sent or passed",
+      "update": "tezos",
+      "how": "tied",
+      "heard": "Settle this thread.",
+      "expect": { "act": ["tidy"], "target": "Tezos", "neverIntent": ["send"], "neverRoute": ["Pass"], "neverSpoken": ["shortcut"] }
+    },
+    {
+      "id": "S79",
+      "note": "settling another thread over an update: the Mina one, which is working, so it says it can't be settled yet; never the Tezos one, never sent",
+      "update": "tezos",
+      "how": "tied",
+      "heard": "Settle the Mina one.",
+      "expect": { "act": ["tidy"], "says": "Mina", "neverIntent": ["send"], "neverRoute": ["Pass"] }
+    },
+    {
+      "id": "S80",
+      "note": "pinning the update's own thread: pinned, never sent or passed",
+      "update": "tezos",
+      "how": "tied",
+      "heard": "Pin it.",
+      "expect": { "act": ["tidy"], "target": "Tezos", "neverIntent": ["send"], "neverRoute": ["Pass"] }
+    },
+    {
+      "id": "S81",
+      "note": "settling a terminal session tied to no thread: there's no T3 Code thread to settle, said plainly; nothing tidied, never another thread",
+      "update": "tezos",
+      "how": "untied",
+      "heard": "Settle it.",
+      "expect": { "act": ["tidy"], "says": "no T3 Code thread", "neverDone": ["tidy", "send"], "neverRoute": ["Pass"] }
+    },
+    {
+      "id": "S82",
+      "note": "over its first seconds, 'settle it' that may be its own words, nothing after a pause: let go, never settled",
+      "update": "tezos-settle",
+      "how": "tied",
+      "said": "The Tezos migration is merged, sir, so you can settle it…",
+      "left": "now.",
+      "echo": "so you can settle it",
+      "heard": "Settle it.",
+      "expect": { "intents": ["resume"], "route": ["Resume"], "neverDone": ["tidy", "send"] }
     }
   ]
 }
