@@ -711,7 +711,7 @@ describe("Brain", () => {
     expect(Brain.check(stop, rest, lines)).toMatchObject({ _tag: "Do", plan: { decision: { act: "stop" } } })
   })
 
-  test("of what may be yapd's own words said back to a done line, only code's own question to stop a thread or take back a change is asked, without the rest of the request; any other is let go", () => {
+  test("of what may be yapd's own words said back to a done line, only code's own question to stop a thread or take back a change is asked, without the rest of the request; any other, or a write turned down in words, is let go", () => {
     const handleOf = (of: T3Live.Thread) => desk().threads.find(({ thread }) => thread.id === of.id)!.handle
     const resumed = { _tag: "Do", plan: { decision: { act: "resume" } } }
     const sent: Ledger.Row = {
@@ -743,10 +743,14 @@ describe("Brain", () => {
     // Nor is he asked whether to tidy a thread.
     const archive = Brain.decision({ act: "tidy", how: "archive", target: handleOf(mina), sure: "medium" })
     expect(Brain.check(archive, over, lines)).toMatchObject(resumed)
-    // Surely his, each is asked as ever.
+    // Nor is a message to no thread turned down in words, which would answer yapd's own voice and read the rest out as left.
+    const unaimed = Brain.decision({ act: "send", text: "Wait.", how: "now", rest: "tell the Mina one to wait" })
+    expect(Brain.check(unaimed, over, lines)).toMatchObject(resumed)
+    // Surely his, each is asked or turned down as ever.
     const his = { ...over, utterance: { ...over.utterance, afterPause: "Stop it, and tell the Mina one to wait." } }
     expect(Brain.check(which, his, lines)).toMatchObject({ _tag: "Ask", open: { kind: "which" } })
     expect(Brain.check(archive, his, lines)).toMatchObject({ _tag: "Ask", open: { kind: "confirm", decision: { act: "tidy" } } })
+    expect(Brain.check(unaimed, his, lines)).toEqual({ _tag: "Say", spoken: lines.cantTell })
   })
 
   test("a reminder taken back after a done line that said something else is asked about, of another thread named or one filled in, never cancelled on its own", () => {

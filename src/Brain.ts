@@ -2870,32 +2870,34 @@ const handles = (text: string) => text.split(/[\s,]+/).filter((handle) => /^t\d+
 export const check = (given: Decision, situation: Situation, lines: Lines): Checked => {
   if (!enabled.has(given.act)) return { _tag: "Say", spoken: notYet(lines) }
   return Option.match(routining(given, situation), {
-    onNone: () => ({ _tag: "Say", spoken: lines.cantTell }),
-    onSome: ({ decision, routine }) => unechoed(routined(checking(decision, situation, lines), routine), situation.utterance),
+    onNone: () => unechoed({ _tag: "Say", spoken: lines.cantTell }, given, situation.utterance),
+    onSome: ({ decision, routine }) => unechoed(routined(checking(decision, situation, lines), routine), decision, situation.utterance),
   })
 }
 
 /**
- * Nothing he'd only do on his word is done on what may all be yapd's own
- * words said back to a "done" line: it's let go. All but what he'd keep in
- * mind that may give a secret away, which goes on to be refused as one,
- * since only that keeps his words out of the journal. Nor is he asked
- * anything of them but code's own question whether to stop a thread or take
- * back a change, which his yes does alone, never the rest of the request the
- * model split off, which a yes would bring back as his: any other question,
- * like which thread or whether to tidy one, is let go too.
+ * Nothing he'd only do on his word, `given`, is done on what may all be
+ * yapd's own words said back to a "done" line: it's let go. All but what he'd
+ * keep in mind that may give a secret away, which goes on to be refused as
+ * one, since only that keeps his words out of the journal. Nor is anything
+ * said back to them that turns one down, like which thread it couldn't tell,
+ * which would answer yapd's own voice and read the rest of them out as left:
+ * that's let go too. Nor is he asked anything of them but code's own question
+ * whether to stop a thread or take back a change, which his yes does alone,
+ * never the rest of the request the model split off, which a yes would bring
+ * back as his: any other question, like which thread or whether to tidy one,
+ * is let go too.
  */
-const unechoed = (checked: Checked, utterance: Assistant.Utterance): Checked => {
+const unechoed = (checked: Checked, given: Decision, utterance: Assistant.Utterance): Checked => {
   const letGo = (decided: Decision): Checked => ({ _tag: "Do", plan: { decision: { ...decided, act: "resume" }, target: Option.none() } })
   if (checked._tag === "Ask" && mayBeOwn(utterance)) {
     const { open } = checked
     return ownQuestion(open) ? { _tag: "Ask", open: { ...open, decision: { ...open.decision, rest: "" }, alone: true } } : letGo(open.decision)
   }
-  return checked._tag === "Do" &&
-    echoedBack(checked.plan.decision, utterance) &&
-    !(checked.plan.decision.act === "remember" && secretive(checked.plan.decision, utterance))
-    ? letGo(checked.plan.decision)
-    : checked
+  if (checked._tag === "Ask") return checked
+  // What it does, or, turned down, what it would have done.
+  const done = checked._tag === "Do" ? checked.plan.decision : given
+  return echoedBack(done, utterance) && !(done.act === "remember" && secretive(done, utterance)) ? letGo(done) : checked
 }
 
 /**
