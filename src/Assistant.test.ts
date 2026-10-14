@@ -11373,6 +11373,37 @@ describe("Assistant muting", () => {
     expect(await said(true)).toEqual({ asked: ["Turn focus off, sir?"], said: "That's changed since, sir.", mode: "focus", detail: "full" })
   })
 
+  test("a yes to taking back a mode, asked by what it did, takes back nothing once the menu has set it since, even back just as it was", async () => {
+    const said = (menu: boolean) =>
+      run(
+        Effect.gen(function* () {
+          const { dictate, followUp, answer, notices, questions, spoken, modes, wait } = yield* assistant(
+            (situation) =>
+              situation.utterance.heard.startsWith("Quiet")
+                ? Brain.decision({ act: "mode", how: "quiet" })
+                : // Its own "Quiet until …" heard as "No.", which the model takes for taking it back.
+                  Brain.decision({ act: "mode", how: "undo", sure: "high" }),
+            undefined,
+            { modes: true },
+          )
+          yield* dictate("Quiet until morning.")
+          const done = notices().findLast(({ kind }) => kind === "done")
+          yield* followUp("No.", 1, done, done?.spoken, undefined, undefined, true)
+          const asked = questions().map(({ spoken }) => spoken)
+          yield* wait(10)
+          // Normal from the menu, then quiet until morning again, until the same morning.
+          if (menu) {
+            yield* modes!.set("normal")
+            yield* modes!.set("quiet")
+          }
+          yield* answer("Yes.")
+          return { asked, said: spoken().at(-1), mode: (yield* modes!.current).mode.mode }
+        }),
+      )
+    expect(await said(false)).toEqual({ asked: ["Turn quiet off, sir?"], said: "Back to normal, sir.", mode: "normal" })
+    expect(await said(true)).toEqual({ asked: ["Turn quiet off, sir?"], said: "That's changed since, sir.", mode: "quiet" })
+  })
+
   test("what he missed of a muted thread is one line for the model, left out of a catch-up of everything and left unheard, and told when he asks about it by name", async () => {
     const result = await run(
       Effect.gen(function* () {

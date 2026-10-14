@@ -99,13 +99,20 @@ describe("Modes", () => {
         yield* modes.set("focus", undefined, true)
         yield* modes.set("normal")
         const menu = yield* modes.undo
+        // Nor once the menu has set it since just as he'd set it, after something else.
+        yield* modes.set("quiet", undefined, true)
+        yield* modes.set("normal")
+        yield* modes.set("quiet")
+        const again = yield* modes.undo
+        const quiet = (yield* modes.current).mode.mode
         yield* modes.set("focus", undefined, true)
         yield* wait("3 minutes")
-        return { back, menu, late: yield* modes.undo, now: (yield* modes.current).mode.mode }
+        return { back, menu, again, quiet, late: yield* modes.undo, now: (yield* modes.current).mode.mode }
       }),
     )
     expect(result.back).toEqual(Option.some({ mode: "focus", until: day + 2 * 60 * minute, since: day }))
     expect(result.menu).toEqual(Option.none())
+    expect([result.again, result.quiet]).toEqual([Option.none(), "quiet"])
     expect([result.late, result.now]).toEqual([Option.none(), "focus"])
   })
 

@@ -104,12 +104,19 @@ export interface Modes {
   /** The last change he asked for, in the last two minutes: kept in memory only, so a restart forgets it. */
   readonly last: Effect.Effect<Option.Option<Change>>
   /**
+   * Whether the last change he asked for still stands, as one does when
+   * there's none: nothing has set what it set since, the menu, its time
+   * running out or he himself, even just as it was.
+   */
+  readonly standing: Effect.Effect<boolean>
+  /**
    * Takes back the last change he asked for, in the last two minutes, while
-   * it's still what's set: never one the menu, or its time running out, has
-   * changed since. Puts back the mode it replaced, or normal once that would
-   * have ended by now, or how much of an update was said. Taken back, it's a
-   * change of its own, so taking that back too puts it as it was. Gives back
-   * that change, or none when there's nothing to take back.
+   * it still stands: never once the menu, or its time running out, has set
+   * what it set since, even just as it was. Puts back the mode it replaced,
+   * or normal once that would have ended by now, or how much of an update
+   * was said. Taken back, it's a change of its own, so taking that back too
+   * puts it as it was. Gives back that change, or none when there's nothing
+   * to take back.
    */
   readonly undo: Effect.Effect<Option.Option<Change>>
   /** When he was last briefed on what was held, which the digest counts from. */
@@ -132,9 +139,12 @@ export const make = (options: { readonly settings: Settings.Settings["Type"]; re
     let briefedAt = Option.getOrElse(number(yield* read("briefedAt")), () => 0)
     const state = yield* SubscriptionRef.make<State>({ mode, detail })
     const current = SubscriptionRef.get(state)
-    /** The last change he asked for, which "scratch that" takes back. */
-    let last: Change | undefined
-    const lately = Effect.map(Clock.currentTimeMillis, (now) => Option.filter(Option.fromNullable(last), ({ at }) => now - at <= takeBack))
+    /** How many times the mode, and how much of an update is said, have each been set, from anywhere, even just as they were. */
+    const revisions: Record<Change["what"], number> = { mode: 0, detail: 0 }
+    /** The last change he asked for, which "scratch that" takes back, and how many times what it set had been set once it was. */
+    let last: { readonly change: Change; readonly revision: number } | undefined
+    const lately = Effect.map(Clock.currentTimeMillis, (now) => Option.filter(Option.fromNullable(last?.change), ({ at }) => now - at <= takeBack))
+    const stands = () => last === undefined || revisions[last.change.what] === last.revision
     const set: Modes["set"] = (mode, until, asked) =>
       Effect.gen(function* () {
         const now = yield* Clock.currentTimeMillis
@@ -142,10 +152,11 @@ export const make = (options: { readonly settings: Settings.Settings["Type"]; re
         // Going from focus to quiet, what was held during focus is still held, for the rundown once quiet ends.
         const next: Mode = mode === "normal" ? { mode } : { mode, until: ending(mode, until, now), since: Option.isSome(holds(was, now)) ? (was.since ?? now) : now }
         yield* SubscriptionRef.update(state, (before) => ({ ...before, mode: next }))
+        const revision = ++revisions.mode
         yield* keep("mode", JSON.stringify(next))
         yield* journal.write({ at: now, kind: "action", detail: { mode: next.mode, ...(next.until === undefined ? {} : { until: next.until }) } })
         yield* Effect.logInfo(next.mode === "normal" ? "Back to normal" : `${next.mode === "focus" ? "Focus" : "Quiet"} until ${new Date(next.until ?? now).toISOString()}`)
-        if (asked === true) last = { at: now, what: "mode", was, set: next }
+        if (asked === true) last = { change: { at: now, what: "mode", was, set: next }, revision }
         return { was, now: next }
       })
     const setDetail: Modes["setDetail"] = (detail, asked) =>
@@ -153,9 +164,10 @@ export const make = (options: { readonly settings: Settings.Settings["Type"]; re
         const now = yield* Clock.currentTimeMillis
         const was = (yield* current).detail
         yield* SubscriptionRef.update(state, (before) => ({ ...before, detail }))
+        const revision = ++revisions.detail
         yield* keep("detail", detail)
         yield* journal.write({ at: now, kind: "action", detail: { detail } })
-        if (asked === true && was !== detail) last = { at: now, what: "detail", was, set: detail }
+        if (asked === true && was !== detail) last = { change: { at: now, what: "detail", was, set: detail }, revision }
       })
     const modes: Modes = {
       current,
@@ -165,20 +177,19 @@ export const make = (options: { readonly settings: Settings.Settings["Type"]; re
       set,
       setDetail,
       last: lately,
+      standing: Effect.sync(stands),
       undo: Effect.gen(function* () {
         const change = Option.getOrUndefined(yield* lately)
-        if (change === undefined) return Option.none()
-        const { mode, detail } = yield* current
+        // Set since, from the menu or as its time ran out, even just as it was, it's no longer his to take back.
+        if (change === undefined || !stands()) return Option.none()
         if (change.what === "detail") {
-          if (detail !== change.set) return Option.none()
           yield* setDetail(change.was, true)
-          return Option.fromNullable(last)
+          return Option.fromNullable(last?.change)
         }
-        if (mode.mode !== change.set.mode || mode.until !== change.set.until) return Option.none()
         // What it replaced, unless that would have ended on its own by now.
         const back: Mode = Option.isSome(holds(change.was, yield* Clock.currentTimeMillis)) ? change.was : { mode: "normal" }
         yield* set(back.mode, back.until, true)
-        return Option.fromNullable(last)
+        return Option.fromNullable(last?.change)
       }),
       briefedAt: Effect.sync(() => briefedAt),
       briefed: (at) =>

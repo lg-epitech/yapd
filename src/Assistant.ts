@@ -3228,8 +3228,9 @@ export const make = (options: {
      * on now. "It" stays what it was. Never anything sent to a thread. Each
      * is what "scratch that" takes back next. Taking back the change he said
      * yes to taking back, or the one the "done" line said, `pinned`, is that
-     * change alone, while it's still the last he asked for: once another is
-     * made since, nothing is, and he's told it changed.
+     * change alone, while it's still the last he asked for and still stands:
+     * once another is made since, or the menu or its time running out has
+     * set it since, even just as it was, nothing is, and he's told it changed.
      */
     const moding = (plan: Brain.Plan, thought: Thought, said: Lines, pinned?: Brain.Made) =>
       Effect.gen(function* () {
@@ -3262,7 +3263,8 @@ export const make = (options: {
           }
           case "undo": {
             const last = yield* modes.last
-            if (pinned !== undefined && (pinned.what !== "mode" || Option.exists(last, ({ at }) => at !== pinned.at))) return reply(Brain.changedSince(said), thought.subject)
+            const since = Option.exists(last, ({ at }) => at !== pinned?.at) || !(yield* modes.standing)
+            if (pinned !== undefined && (pinned.what !== "mode" || since)) return reply(Brain.changedSince(said), thought.subject)
             const undone = yield* modes.undo
             return yield* stays(Brain.modeTakenBack(said, undone, now), Option.isSome(undone))
           }
