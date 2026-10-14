@@ -680,11 +680,11 @@ const assistant = (
       unanswered: (to = questions().at(-1)) => to!.question!.unanswered.pipe(Effect.zipRight(flush)),
       /**
        * Said over or right after the answer, with so many seconds of speech, as the conversation takes it: worked out, then acted on,
-       * unless it isn't taken. Said over it, with what it hadn't said yet.
+       * unless it isn't taken. Said over it, with what it hadn't said yet, or run on past its end, `carried`.
        */
-      followUp: (heard: string, voiced = 2, to = said.findLast(({ kind }) => kind === "answer"), echo?: string, afterPause?: string, unsaid?: string) =>
+      followUp: (heard: string, voiced = 2, to = said.findLast(({ kind }) => kind === "answer"), echo?: string, afterPause?: string, unsaid?: string, carried?: boolean) =>
         Effect.gen(function* () {
-          const taken = yield* to!.followUp!(heard, voiced, echo, afterPause, unsaid)
+          const taken = yield* to!.followUp!(heard, voiced, echo, afterPause, unsaid, carried)
           if (Option.isSome(taken)) yield* taken.value
           yield* flush
           return Option.isSome(taken)
@@ -4590,6 +4590,37 @@ describe("Assistant", () => {
       "Tezos. Mina. over Open Mina SSV2 Bug Tickets or Migrate Tezos Integration, sir?, then Mina.",
       "Tezos. Mina. over nothing",
     ])
+  })
+
+  test("run on past the end of an answer from over its last words, the model is told it's his reply to all of it, only with what yapd was saying, and never for the rest of his request", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const told: Array<string> = []
+        const { dictate, followUp } = yield* assistant((situation) => {
+          const { heard, carried } = situation.utterance
+          told.push(`${heard}${carried === true ? ", run on" : ""}`)
+          if (heard.startsWith("Who")) return Brain.decision({ act: "answer", spoken: "Two threads need you, sir." })
+          if (heard.startsWith("sir")) return Brain.decision({ act: "send", target: handle(situation, mina), text: "Add tests.", how: "now", rest: "tell the Tezos one to wait" })
+          if (heard.startsWith("tell")) return Brain.decision({ act: "send", target: handle(situation, tezos), text: "Wait.", how: "now" })
+          return Brain.decision({ act: "resume" })
+        })
+        yield* dictate("Who needs me?")
+        // Without the note on its own voice, there's none of it to tell his reply apart from.
+        yield* followUp("What about the docs?", 2, undefined, undefined, undefined, undefined, true)
+        // Its own last word heard first, then his request, which carries on.
+        yield* followUp(
+          "sir. Tell the Mina one to add tests, then tell the Tezos one to wait.",
+          3,
+          undefined,
+          "Two threads need you, sir.",
+          "Tell the Mina one to add tests, then tell the Tezos one to wait.",
+          undefined,
+          true,
+        )
+        return told
+      }),
+    )
+    expect(result).toEqual(["What about the docs?", "sir. Tell the Mina one to add tests, then tell the Tezos one to wait., run on", "tell the Tezos one to wait"])
   })
 
   test("asked which thread a request said over yapd's first seconds is for, the model deciding his answer is told what of it may have been yapd's own voice, in OPEN and in LATELY, even once he's had it said again", async () => {

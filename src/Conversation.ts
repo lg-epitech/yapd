@@ -358,9 +358,11 @@ export interface Question {
    * what they said as it ended.
    * Said over it, `unsaid` is what yapd hadn't said of it yet a moment
    * before they began, as far as where it had got to tells, like its
-   * options: none when all of it was said.
+   * options: none when all of it was said. `carried` when they began over
+   * its last words, all of it said, and ran on past its end: what they said
+   * after them is their reply to it, however short.
    */
-  readonly answer: (heard: string, voiced: number, echo?: string, afterPause?: string, unsaid?: string) => Effect.Effect<Option.Option<Effect.Effect<void>>>
+  readonly answer: (heard: string, voiced: number, echo?: string, afterPause?: string, unsaid?: string, carried?: boolean) => Effect.Effect<Option.Option<Effect.Effect<void>>>
 }
 
 /** An answer to what the user asked yapd, rendered and ready to be said, which they can follow up as they can an update. */
@@ -1651,7 +1653,7 @@ export const make = (options: {
                     const his = worded(rest) === "" ? afterPause : rest
                     return halt
                       ? Effect.succeed(Option.none<Effect.Effect<void>>())
-                      : respond(heard, voiced, echo, echo === undefined || his === "" ? undefined : his, left === "" ? undefined : left)
+                      : respond(heard, voiced, echo, echo === undefined || his === "" ? undefined : his, left === "" ? undefined : left, outcome.carried)
                   },
                   own,
                 )

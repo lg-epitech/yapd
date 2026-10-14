@@ -49,6 +49,12 @@ export interface Utterance {
   /** With `echo`, what he said once he carried on after a pause, which is surely his, as yapd had stopped by then. */
   readonly afterPause?: string
   /**
+   * With `echo`, whether yapd had said all of the line he began over, and he
+   * ran on past its end: what he said after its last words is his reply to
+   * it, however short, like the "No." of "the Tezos migration. No.".
+   */
+  readonly carried?: true
+  /**
    * With `echo`, the routines whose steps what yapd was saying holds, as code
    * put them in, like an offer of one read as it comes due: a model is only
    * ever told of what it was saying by their names.
@@ -2258,7 +2264,7 @@ export const make = (options: {
     const rest = (thought: Thought, first: Outcome, on: Option.Option<Threads.Ref>, step: number, said: Lines): Effect.Effect<Outcome> =>
       Effect.gen(function* () {
         // What he went on to say after, which yapd's own voice was never in.
-        const { echo: _, afterPause: __, echoRoutines: ___, ...before } = thought.utterance
+        const { echo: _, afterPause: __, echoRoutines: ___, carried: ____, ...before } = thought.utterance
         const utterance: Utterance = { ...before, heard: thought.decision.rest, whole: thought.utterance.whole ?? ownWords(thought.utterance) }
         yield* Effect.logInfo(`Then: ${logged(utterance.heard)}`)
         // Working it out has no effect, so it carries on whether or not what's said waits for it, until yapd is turned off, which stops it like the rest of the request.
@@ -4182,11 +4188,12 @@ export const make = (options: {
      * he'd heard of it when he spoke over it, by what it hadn't said yet,
      * `unsaid`. Begun over its first word, before he could know what it's
      * about, it's most likely a late reply to the line before: then no
-     * thread is "it".
+     * thread is "it". Run on past its end from over its last words,
+     * `carried`, the model is told it's his reply to all of it.
      */
     const followUp =
       (about: Subject, line: Effect.Effect<string>) =>
-      (heard: string, voiced: number, echo?: string, afterPause?: string, unsaid?: string): Effect.Effect<Option.Option<Effect.Effect<void>>> =>
+      (heard: string, voiced: number, echo?: string, afterPause?: string, unsaid?: string, carried?: boolean): Effect.Effect<Option.Option<Effect.Effect<void>>> =>
         Effect.gen(function* () {
           const at = yield* Clock.currentTimeMillis
           const { turns } = yield* options.power
@@ -4203,6 +4210,7 @@ export const make = (options: {
             voiced,
             turns,
             ...overItself({ echo, afterPause, echoRoutines: routinesOf(about).routines }),
+            ...(echo === undefined || carried !== true ? {} : { carried }),
             ...(left === undefined ? {} : { unsaid: left }),
           }
           const thought = yield* think(utterance, it, [{ speaker: "yapd", text: heardOf(said, left), ...routinesOf(about) }])

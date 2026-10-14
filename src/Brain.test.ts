@@ -470,6 +470,20 @@ describe("Brain", () => {
     expect(paused("Sir? Stop it.", false, "Stop it.")).toBe(paused("Sir? Stop it.", false))
   })
 
+  test("run on past the end of a line it said all of, what he said after its last words is told as his reply to it, and a bare no to what it did never as a dismissal", () => {
+    const echo = "On it, sir: the Tezos migration."
+    const told = (more: Partial<Assistant.Utterance>) => {
+      const given = situation("migration. No.", { subject: { _tag: "Answer", said: echo, about: Option.some(ref(tezos)) } })
+      return Brain.prompt({ ...given, utterance: { ...given.utterance, via: "reply", ...more } }, Option.none())
+    }
+    const carried = ` You had said all of your line before he went on, so what he said after its last words is his reply to it, however short. When your line says you did something for him, like sending a message or starting work, nothing but a no to that, like "No.", "No, don't." or "Scratch that.", is never a dismissal: it's "undo" when it plainly takes that back, or else "answer", asking him in a few words whether to take it back; never "dismiss" or "resume". A no to any other line goes as usual.`
+    expect(told({ echo, carried: true })).toContain(`A question or a dismissal of his goes as usual.${carried}\n\nWHAT HE SAID`)
+    expect(told({ echo, carried: true, afterPause: "No." })).toContain(`A question or a dismissal of his goes as usual.${carried} What he said after a pause, «No.», is surely his`)
+    // Over it, or without its own voice in what he said, as ever.
+    expect(told({ echo })).not.toContain("all of your line")
+    expect(told({ carried: true })).not.toContain("all of your line")
+  })
+
   test("over yapd's first seconds, what he said after a pause isn't taken for nothing on the strength of yapd's own word before it", () => {
     const echo = "For the loader fix, is that yapd or std?"
     const over = (heard: string, afterPause?: string, voiced = 2) => {

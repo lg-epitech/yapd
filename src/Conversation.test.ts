@@ -883,7 +883,8 @@ const first = "Over in yapd, the tests pass now and the pull request is ready"
  * says back in `rendered`. With `answer`, it says an answer of yapd's in the
  * same words instead, which takes anything said for a follow-up, kept in
  * `followed`, unless `follow` says otherwise, and all it's offered, with
- * what yapd was saying around then when it's told that, in `offered`, and
+ * what yapd was saying around then when it's told that, and whether it ran
+ * on past the line's end, in `offered`, and
  * what it hadn't said yet then, when it's told that, in `unheard`. Its
  * fiber ends with whether the update was heard, or the answer followed up.
  */
@@ -940,7 +941,7 @@ const overHelper = (
     /** What yapd says back, in order. */
     const rendered: Array<string> = []
     const followed: Array<string> = []
-    const offered: Array<{ readonly heard: string; readonly echo?: string; readonly afterPause?: string }> = []
+    const offered: Array<{ readonly heard: string; readonly echo?: string; readonly afterPause?: string; readonly carried?: true }> = []
     const unheard: Array<string | undefined> = []
     let first: number | undefined
     let connection: Socket<Helper.Decoder> | undefined
@@ -1090,9 +1091,9 @@ const overHelper = (
           )
         : frames(value, count)
     const spoken = options.spoken ?? long.spoken
-    const respond = (heard: string, _: number, echo?: string, afterPause?: string, unsaid?: string) =>
+    const respond = (heard: string, _: number, echo?: string, afterPause?: string, unsaid?: string, carried?: boolean) =>
       Effect.sync(() => {
-        offered.push({ heard, ...(echo === undefined ? {} : { echo }), ...(afterPause === undefined ? {} : { afterPause }) })
+        offered.push({ heard, ...(echo === undefined ? {} : { echo }), ...(afterPause === undefined ? {} : { afterPause }), ...(carried === true ? { carried } : {}) })
         unheard.push(unsaid)
       }).pipe(
         Effect.zipRight(Effect.sleep(`${options.responding ?? 0} seconds`)),
@@ -2617,7 +2618,7 @@ describe("A line listened to from its end", () => {
     })
   })
 
-  test("yapd's own last words alone are dropped with no model call; 'No.' merged into them goes to the model with the line's words as the echo note, and what's after them as surely his", async () => {
+  test("yapd's own last words alone are dropped with no model call; 'No.' merged into them goes to the model with the line's words as the echo note, what's after them as surely his, and as run on past its end", async () => {
     const spoken = "On it, sir: the Tezos migration."
     const after = (own: string, no: boolean, line = spoken) =>
       overHelperScoped(
@@ -2641,14 +2642,14 @@ describe("A line listened to from its end", () => {
     expect(await after("the Tezos migration.", false)).toEqual({ transcribed: ["the Tezos migration."], offered: [], done: true })
     expect(await after("the Tezos migration.", true)).toEqual({
       transcribed: ["the Tezos migration. No."],
-      offered: [{ heard: "the Tezos migration. No.", echo: spoken, afterPause: "No." }],
+      offered: [{ heard: "the Tezos migration. No.", echo: spoken, afterPause: "No.", carried: true }],
       done: true,
     })
-    // Misheard, with its last word said earlier in the line too, none of it is told as his: it may all be its own.
+    // Misheard, with its last word said earlier in the line too, none of it is told as his: it may all be its own, though it ran on as well.
     const runsOn = "On it, sir: fixing what Rosie runs on."
     expect(await after("On it, sir. Fixing what Rosy runs on.", false, runsOn)).toEqual({
       transcribed: ["On it, sir. Fixing what Rosy runs on."],
-      offered: [{ heard: "On it, sir. Fixing what Rosy runs on.", echo: runsOn }],
+      offered: [{ heard: "On it, sir. Fixing what Rosy runs on.", echo: runsOn, carried: true }],
       done: true,
     })
   })
