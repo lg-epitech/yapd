@@ -2525,6 +2525,41 @@ describe("Assistant", () => {
     expect(result).toEqual({ over: [], stale: false, open: Option.some(`${choices}, sir?`), sent: 1 })
   })
 
+  test("what may all be yapd's own words said back to a done line, let go, leave the offer of what he missed waiting its turn behind it to be asked, never let go for them", async () => {
+    const offer = "You missed one, sir. Want the rundown?"
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(
+          (situation) => {
+            const { heard } = situation.utterance
+            if (heard.startsWith("Tell the Tesla")) return tezosMessage("high")(situation)
+            // Its own "On it." heard ahead of a thanks, which the model takes for one.
+            return Brain.decision({ act: "dismiss" })
+          },
+          undefined,
+          { waiting: true, briefs: () => "Distribox migrated, sir." },
+        )
+        yield* made.journal.write({ at: now - 120 * 60_000, kind: "action", detail: { on: false } })
+        yield* made.journal.write({ at: now - 90 * 60_000, kind: "update", machine: "Rosie", thread: tezos.id, said: "Distribox migrated.", detail: { priority: "done", held: "off" } })
+        yield* made.dictate("Tell the Tesla's migration to use the fee table from the Mina work.")
+        const sent = made.notices().findLast(({ kind }) => kind === "done")
+        // What he missed is offered behind the done line, which he hears first.
+        yield* made.back
+        yield* made.flush
+        yield* made.play(sent)
+        const before = made.spoken().length
+        yield* made.followUp("On it. Thanks.", 2, sent, sent?.spoken)
+        const over = made.spoken().slice(before)
+        const stale = yield* made.questions().at(-1)!.stale
+        const open = Option.map(yield* made.open, ({ asked }) => asked)
+        yield* made.play(made.questions().at(-1))
+        yield* made.answer("Yes.")
+        return { over, stale, open, said: made.spoken().at(-1) }
+      }),
+    )
+    expect(result).toEqual({ over: [], stale: false, open: Option.some(offer), said: "Distribox migrated, sir." })
+  })
+
   test("an answer the model makes of what may all be yapd's own words said back to a done line is never said, and a question waiting its turn stays as it was, but words surely his get it", async () => {
     const choices = "Migrate Tezos Integration or Open Mina SSV2 Bug Tickets"
     const status = "The Tezos migration is still on the fee table, sir."

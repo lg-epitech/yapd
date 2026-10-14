@@ -1636,11 +1636,15 @@ export const make = (options: {
     /**
      * What was being said has been dealt with, and left the open question
      * open, so as far as that goes it came to nothing: once nothing else
-     * being said holds it, it's taken up again as `resume` has it.
+     * being said holds it, it's taken up again as `resume` has it. Unless
+     * all of it may have been yapd's own words, `own`, let go as never said:
+     * then it's left as it was, like an offer of what he missed still
+     * waiting its turn, and only one he'd begun to hear is waited on again.
      */
-    const release = (key: string) =>
+    const release = (key: string, own = false) =>
       Effect.suspend(() => {
         if (asking === undefined || !asking.held.delete(key) || asking.held.size > 0) return Effect.void
+        if (own) return asking.said === undefined ? Effect.void : later(asking.open.id)
         return resume(asking.open.id)
       })
 
@@ -4457,7 +4461,8 @@ export const make = (options: {
      * back to is `moot` by then, like a question dealt with in T3 Code
      * meanwhile: then only what's `late` is done. Whatever held the open
      * question for it, `holding`, lets go once it's dealt with, however that
-     * ends.
+     * ends; when all of it may have been yapd's own words, the question it
+     * held, still open since nothing was asked in its place, is left as it was.
      */
     const takeUp = (
       thought: Thought,
@@ -4476,7 +4481,7 @@ export const make = (options: {
             }),
           ).pipe(
             Effect.ensuring(arrived),
-            Effect.ensuring(given.holding === undefined ? Effect.void : release(given.holding)),
+            Effect.ensuring(given.holding === undefined ? Effect.void : release(given.holding, Brain.mayBeOwn(thought.utterance))),
             Effect.annotateLogs({ utterance: thought.utterance.id }),
           ),
           thought.utterance.turns,
