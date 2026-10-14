@@ -541,7 +541,15 @@ describe("Brain", () => {
     const asked = { _tag: "Ask", open: { kind: "confirm", asked: "Stop Migrate Tezos Integration, sir?", decision: { act: "stop", target: handle }, candidates: [ref(tezos)] } }
     expect(Brain.check(stop, replied, lines)).toMatchObject(asked)
     // Over its own voice, the same question, never more.
-    expect(Brain.check(stop, { ...replied, utterance: { ...replied.utterance, echo: "On it, sir: the Tezos migration.", carried: true } }, lines)).toMatchObject(asked)
+    const over = { ...replied, utterance: { ...replied.utterance, echo: "On it, sir: the Tezos migration.", carried: true as const } }
+    expect(Brain.check(stop, over, lines)).toMatchObject(asked)
+    // Taken for a take-back, which new work refuses, the same question, however sure the model is, over its own voice or not.
+    for (const sure of ["high", "low"] as const) {
+      for (const how of ["", "message"]) {
+        expect(Brain.check(Brain.decision({ act: "undo", how, sure }), replied, lines)).toMatchObject(asked)
+        expect(Brain.check(Brain.decision({ act: "undo", how, sure }), over, lines)).toMatchObject(asked)
+      }
+    }
     // Dictated, a stop the model's sure of goes, as ever.
     expect(Brain.check(stop, given, lines)).toMatchObject({ _tag: "Do" })
   })

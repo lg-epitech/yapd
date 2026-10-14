@@ -3378,15 +3378,20 @@ const theirs = (choice: Decision, situation: Situation): Reach | undefined => {
  * taken back. A no the model isn't sure takes it back, or that may be yapd's
  * own words, like its "Noted." heard as "No.", is asked about here, never in
  * words of the model's own, which nothing would hold his yes to; and with
- * nothing to ask about, what may be yapd's own words is nothing of his.
+ * nothing to ask about, what may be yapd's own words is nothing of his. New
+ * work the line said yapd started can't be taken back: what reaches it is
+ * a stop of the thread it started, asked about as one said back to it is.
  */
 const answeredBack = (choice: Decision, situation: Situation, lines: Lines, going: () => Checked): Checked => {
   if (situation.utterance.afterDone === undefined) return going()
   const reach = reaching(choice, situation)
+  const own = theirs(choice, situation)
+  const started = startedBy(situation).find(({ commandId }) => commandId === own?.row?.commandId || commandId === reach?.row?.commandId)
+  const stopping = started === undefined ? undefined : stopFirst(started, choice, situation, lines)
+  if (stopping !== undefined) return stopping
   const ours = reach !== undefined && owned(situation, reach.change) ? reach : undefined
   const his = surelyHis(situation.utterance)
   if (ours !== undefined && choice.sure === "high" && his) return pinning(going(), ours)
-  const own = theirs(choice, situation)
   const said = choice.act === "undo" ? choice : { how: "", target: "" }
   return (
     (own === undefined ? undefined : askingBack(own, situation, lines, said)) ??
@@ -3406,6 +3411,19 @@ const startedBack = (situation: Situation) => startedBy(situation).length > 0
 const startedBy = (situation: Pick<Situation, "utterance" | "recent" | "acted">) => {
   const change = situation.utterance.afterDone?.change
   return change?.what !== "acted" ? [] : recently(situation).filter(({ utterance, kind }) => utterance === change.utterance && kind === "start")
+}
+
+/**
+ * Asks him whether to stop the thread a step of new work started, as a stop
+ * said back to the line saying so is asked about first, his yes held to
+ * that thread: none when it isn't on the desk.
+ */
+const stopFirst = (row: Ledger.Row, choice: Decision, situation: Situation, lines: Lines): Checked | undefined => {
+  const handle = handleOf(situation.desk, row.machine, row.thread)
+  const listed = situation.desk.threads.find((one) => one.handle === handle)
+  if (handle === undefined || listed === undefined) return undefined
+  const cantTell = (): Checked => ({ _tag: "Say", spoken: lines.cantTell })
+  return writing({ ...choice, act: "stop", how: "", target: handle, others: "" }, Option.some(listed), [listed], situation, lines, cantTell, true)
 }
 
 /** The threads the "done" line he's replying to started, by their handles in THREADS, for the model to name what it means to stop. */
