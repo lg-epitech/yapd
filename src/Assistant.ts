@@ -4102,10 +4102,11 @@ export const make = (options: {
         // Told to stop the update he was hearing, it isn't read again once the dictation that cut it off is dealt with.
         if (decision.act === "dismiss" && decided.subject._tag === "Session" && hushed(utterance.heard)) yield* options.skip(decided.subject.update)
         const said = yield* persona.lines
-        // Nothing was made of it, so that's all that's said, and what he missed isn't marked heard. Still, he said something after the question he heard, which closes it.
+        // Nothing was made of it, so that's all that's said, and what he missed isn't marked heard. Still, he said something after the question he heard, which closes it,
+        // unless all he said may be yapd's own words, which leave it open as it was, with nothing said of it.
         if (decided.source === "failed") {
           const heard = before(utterance)
-          if (heard?.said === undefined) return reply(decision.spoken, decided.subject)
+          if (heard?.said === undefined || Brain.mayBeOwn(utterance)) return reply(decision.spoken, decided.subject)
           const { open } = heard
           yield* close(open, utterance.via === "reply" ? "dropped: unclear" : "replaced", utterance.id)
           return ahead(reply(decision.spoken, decided.subject), open.decision.rest, said)

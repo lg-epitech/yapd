@@ -2525,6 +2525,31 @@ describe("Assistant", () => {
     expect(result).toEqual({ over: [], stale: false, open: Option.some(`${choices}, sir?`), sent: 1 })
   })
 
+  test("a failed model call on what may all be yapd's own words said back to a done line leaves a question he's heard open as it was, with only the failure said", async () => {
+    const choices = "Migrate Tezos Integration or Open Mina SSV2 Bug Tickets"
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant((situation) => {
+          const { heard } = situation.utterance
+          if (heard.startsWith("Tell the Tesla")) return tezosMessage("high")(situation)
+          // Which thread his message is for, with more of his request after it.
+          if (heard.startsWith("Tell the migration")) {
+            return Brain.decision({ act: "send", target: handle(situation, tezos), sure: "low", others: handle(situation, mina), text: "Add tests.", how: "now", rest: "Tell the Mina one to rebase." })
+          }
+          // The model can't be asked about its own "On it." heard ahead of more.
+          return undefined
+        })
+        yield* made.dictate("Tell the Tesla's migration to use the fee table from the Mina work.")
+        const sent = made.notices().findLast(({ kind }) => kind === "done")
+        yield* made.dictate("Tell the migration one to add tests, and the Mina one to rebase.")
+        const before = made.spoken().length
+        yield* made.followUp("On it. Tell the Mina one to wait.", 2, sent, sent?.spoken, undefined, undefined, true)
+        return { over: made.spoken().slice(before), open: Option.map(yield* made.open, ({ asked }) => asked) }
+      }),
+    )
+    expect(result).toEqual({ over: ["I couldn't work that out just now, sir. What you said is in my log."], open: Option.some(`${choices}, sir?`) })
+  })
+
   test("a message said over a question that can't go as its answer, to a form that takes only its options or as T3 Code takes a message, goes in the queue behind it, and the question is asked again after", async () => {
     const cloud = waitingOn({ id: "q1", kind: "user_input" })
     const telling = (items: ReadonlyArray<Record<string, unknown>>, text: string) =>
