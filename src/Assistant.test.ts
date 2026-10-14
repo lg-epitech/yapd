@@ -9991,6 +9991,37 @@ describe("Assistant", () => {
     expect(letGo).toEqual({ spoken: "I didn't hear back about whether to send that to Migrate Tezos Integration again, so I left it, sir.", listened: false })
   })
 
+  test("an answer in his own words to a thread's question, or a message that went as its answer, that didn't get there with nothing offered is told with nothing listened for after it", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const network = { id: "network", question: "Which network first?", options: [{ label: "Mainnet" }, { label: "Ghostnet" }] }
+    const decided = (situation: Brain.Situation) =>
+      situation.utterance.heard.startsWith("Tell")
+        ? Brain.decision({ act: "send", target: handle(situation, cloud), text: "Start with mainnet.", how: "now" })
+        : Brain.decision({ act: "reply", target: handle(situation, cloud), text: "Ghostnet, but only for the tests.", pending: "answers" })
+    /** What's said last once his answer didn't get there, given in his own words or, once he let it be, told as a message. */
+    const failed = (letBe: boolean) =>
+      run(
+        Effect.gen(function* () {
+          const made = yield* assistant(decided, undefined, {
+            others: [cloud],
+            items: card("q1", [network]),
+            answer: () => () => Effect.fail(new T3CodeServer.Trouble({ reason: "No connection." })),
+          })
+          yield* asked(made, cloud)
+          if (letBe) {
+            yield* made.answer("Never mind.")
+            yield* made.dictate("Tell the cloud one to start with mainnet.")
+          } else yield* made.answer("Ghostnet, but only for the tests.")
+          const { spoken, followUp } = made.notices().at(-1)!
+          return { spoken, listened: followUp !== undefined }
+        }),
+      )
+    const unsent = { spoken: "I couldn't get your answer to it, sir: no connection.", listened: false }
+    expect(await failed(false)).toEqual(unsent)
+    // Let be, then told it as a message, which goes as its answer.
+    expect(await failed(true)).toEqual(unsent)
+  })
+
   test("an answer can be followed up as anything dictated is, with \"it\" the thread it was about, so a message goes there", async () => {
     const result = await run(
       Effect.gen(function* () {

@@ -2018,14 +2018,23 @@ export const make = (options: {
      * done, the rest of the request is worked out and done as the next step.
      * `free` is how what follows the note is let be stopped, when the change
      * and its note can't be. `putBy` when what an answer that didn't go was
-     * to is put back to be asked again, which he's told.
+     * to is put back to be asked again, which he's told. `worded` when his
+     * own words went in an answer to a thread's question, as in a message.
      */
     const told = (
       act: Hands.Act,
       outcome: Hands.Outcome,
       thought: Thought,
       said: Lines,
-      at: { readonly step: number; readonly commandId: string; readonly quietly?: boolean; readonly besides?: string; readonly putBy?: boolean; readonly routine?: string },
+      at: {
+        readonly step: number
+        readonly commandId: string
+        readonly quietly?: boolean
+        readonly besides?: string
+        readonly putBy?: boolean
+        readonly routine?: string
+        readonly worded?: boolean
+      },
       free: <A>(effect: Effect.Effect<A>) => Effect.Effect<A> = (effect) => effect,
     ): Effect.Effect<Outcome> =>
       Effect.gen(function* () {
@@ -2216,9 +2225,11 @@ export const make = (options: {
                 question,
               })
             }
-            // A message that didn't go, with nothing offered, is said without its words, so nothing said after it is listened for.
+            // A message, or an answer in his own words, that didn't go, with nothing offered, is said without its words, so nothing said
+            // after it is listened for.
+            const unsent = act._tag === "Message" || at.worded === true
             return unfinished(
-              { say: line, subject: { ...subject, said: line }, kind: "done", ...(withheld ? { withheld } : {}), ...(act._tag === "Message" ? { unsent: true as const } : {}) },
+              { say: line, subject: { ...subject, said: line }, kind: "done", ...(withheld ? { withheld } : {}), ...(unsent ? { unsent } : {}) },
               decision.rest,
               said,
               situation.desk,
@@ -2360,6 +2371,12 @@ export const make = (options: {
         // Answered now, however it was asked, what a thread waits on him for is never asked again of yapd's own accord, like a copy put
         // by while its machine's threads couldn't be seen, which its T3 Code may not show as answered just yet.
         const queued = asks !== undefined && asks._tag !== "Agent" && (act._tag === "Decide" || act._tag === "Reply") ? dequeue(asks.requestId) : []
+        // His own words go in an answer to a thread's question when a message he dictated goes as one, or he answered a part in words of his
+        // own: never only options he picked.
+        const worded =
+          act._tag === "Reply" &&
+          (act.as === "message" ||
+            (asks?._tag === "Question" && (asks.dictated !== undefined || Object.values(asks.collected).some(({ _tag }) => _tag === "Words"))))
         // Once it's begun, it's seen through and noted: turning yapd off meanwhile only stops what's said of it, and any step not written yet, like one after a look at the thread, or telling a turn it stopped (I8).
         const wanted = Effect.map(outdated(utterance.turns), (off) => !off)
         return yield* Effect.uninterruptibleMask((free) =>
@@ -2377,6 +2394,7 @@ export const make = (options: {
                   ...(at.besides === undefined ? {} : { besides: at.besides }),
                   ...(putBy ? { putBy } : {}),
                   ...(plan.routine === undefined ? {} : { routine: plan.routine }),
+                  ...(worded ? { worded } : {}),
                 },
                 free,
               ),
