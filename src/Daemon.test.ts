@@ -7345,8 +7345,46 @@ describe("Daemon handing over what's yapd's to do", () => {
     expect(untied.played).toEqual(["This session has no T3 Code thread to settle."])
   })
 
+  test("'scratch that' after 'settle it' over a hooked Tezos update unsettles its thread, sending it nothing", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const t3 = yield* handing
+        const { handle, talk, wait, nextEvent, nextPlayback, played, followUps } = yield* assisted(
+          // "It", as the model is shown it, the update's own thread by its handle, which "scratch that" names too.
+          (situation) => {
+            const it = Option.match(Brain.focused(situation), { onNone: () => "", onSome: ({ handle }) => handle })
+            return situation.utterance.heard === "Settle it." ? Brain.decision({ act: "tidy", how: "settle", target: it }) : Brain.decision({ act: "undo", target: it })
+          },
+          {
+            says: "Settle it.",
+            transcripts: ["Settle it.", "Scratch that."],
+            hands: t3.hands,
+            t3,
+            link: () => Effect.succeedSome({ machine: "Rosie", id: "t-tezos" }),
+            handsOver: () => true,
+            handing: {},
+          },
+          [tezos(), minaThread()],
+        )
+        yield* tezosStop(handle, true)
+        yield* nextEvent("Ready:")
+        yield* nextPlayback
+        yield* talk
+        // Said once its line has played, as it's listened to after.
+        for (let second = 0; second < 11; second++) yield* wait(1)
+        yield* talk
+        for (let second = 0; second < 30; second++) yield* wait(1)
+        return { commands: t3.commands(), relayed: [...followUps].filter((line) => line.includes("sent:")), played: [...played].slice(1) }
+      }),
+    )
+    expect(result.commands).toEqual(["t-tezos: thread.settle", "t-tezos: thread.unsettle"])
+    expect(result.relayed).toEqual([])
+    expect(result.played).toEqual(["Settled: Migrate Tezos Integration.", "Unsettled: Migrate Tezos Integration."])
+  })
+
   test("'scratch that' handed over after the 'On it' of a message passed through a hook, with a dictation's message to Mina sent a minute before, takes nothing back without asking, and asks about Mina's by name; after one yapd sent itself, it takes back that message alone", async () => {
-    const scratched = (hooked: boolean) =>
+    /** With `it`, the model names the update's own thread, "it", for what's taken back. */
+    const scratched = (hooked: boolean, it = false) =>
       run(
         Effect.gen(function* () {
           const t3 = yield* handing
@@ -7354,7 +7392,7 @@ describe("Daemon handing over what's yapd's to do", () => {
             (situation) =>
               situation.utterance.via === "shortcut"
                 ? Brain.decision({ act: "send", target: handleOf(situation, "t-mina"), text: "Wait for the Tezos migration." })
-                : Brain.decision({ act: "undo" }),
+                : Brain.decision({ act: "undo", target: it ? handleOf(situation, "t-tezos") : "" }),
             {
               says: "Use the fee table.",
               transcripts: ["Use the fee table.", "Scratch that."],
@@ -7385,6 +7423,10 @@ describe("Daemon handing over what's yapd's to do", () => {
     expect(hooked.commands).toEqual(["t-mina: message.dispatch"])
     expect(hooked.played.at(-1)).toContain("Open the Mina SSV2 bug tickets")
     expect(hooked.played.at(-1)).toMatch(/\?$/)
+    // Taken as naming "it", it still reaches what was done last, Mina's message, which is asked about the same, never taken back.
+    const named = await scratched(true, true)
+    expect(named.commands).toEqual(["t-mina: message.dispatch"])
+    expect(named.played.at(-1)).toBe(hooked.played.at(-1))
     // By yapd's own hand, it's that message that's taken back, never Mina's: read already, it can only be told to ignore it, which is asked.
     const steered = await scratched(false)
     expect(steered.commands).toEqual(["t-mina: message.dispatch", "t-tezos: message.dispatch"])

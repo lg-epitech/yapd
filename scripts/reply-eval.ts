@@ -1129,9 +1129,6 @@ const intentOf = (decision: Brain.Decision, ownHandle: string | undefined) => {
 /** What changes something, which what was only an answer, a dismissal or talk not meant for yapd may never come to. */
 const changing = new Set(["send", "elsewhere", "reply", "decide", "stop", "undo", "tidy", "start", "mute", "mode", "remind", "remember", "forget"])
 
-/** What changes a thread, as the Brain's guard has it. */
-const writes = new Set(["send", "stop", "undo", "decide", "reply", "tidy"])
-
 /** What the Brain decided, as it's logged beside a result, before `check`. */
 const rawOf = (decision: Brain.Decision) => ({
   act: decision.act,
@@ -1340,16 +1337,17 @@ const run = Effect.gen(function* () {
             // While he isn't at hand, a first step only his word does, with more after it, is acted on only to be turned down.
             const turnedDown = routed._tag === "Act" && routed.unattended === true
             /**
-             * Whether a checked write is to the update's own thread, by thread, over an unsteered update: one with none, by none. Never
-             * tidying it, which changes nothing of its turn.
+             * Whether a checked write reaches the turn of the update's own thread, as `Brain.turnOf` has it, over an unsteered update: by
+             * thread, or one with none, by none. Never tidying it, nor taking back what tidying did, which change nothing of its turn.
              */
-            const ownWrite = (plan: Brain.Plan) =>
-              writes.has(plan.decision.act) &&
-              plan.decision.act !== "tidy" &&
-              !steered &&
-              (ref === undefined
+            const ownWrite = (plan: Brain.Plan) => {
+              const turn = Brain.turnOf(plan.decision, handedOver)
+              if (steered || turn === undefined) return false
+              if (turn !== "named") return ref !== undefined && Threads.same(turn, ref)
+              return ref === undefined
                 ? plan.decision.target.trim() === "" && plan.decision.act !== "undo"
-                : Option.exists(plan.target, (listed) => Threads.same(listed.ref, ref)))
+                : Option.exists(plan.target, (listed) => Threads.same(listed.ref, ref))
+            }
             let ownByHands = routed._tag === "Act" && !leftFirst && checked._tag === "Do" && ownWrite(checked.plan) ? 1 : 0
             let leftOver = routed._tag === "Act" && leftFirst ? 1 : 0
             // Its rest, as the next step works it out, with the update still "it", from what he said, never what may be yapd's own voice.

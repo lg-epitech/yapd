@@ -2827,6 +2827,21 @@ describe("handed over from an update", () => {
     expect(left(settle(tezosAt), over("Settle it, I'm muting it anyway.", "hooked", { muting: true }))).toBe(true)
     expect(left(settle(""), over("Settle it.", "untied"))).toBe(true)
     expect(left(settle(handle(mina)), over("Settle the Mina one.", "untied"))).toBe(false)
+    // Taking back what was done to it reaches its turn only for a message or a stop; "scratch that" takes back what yapd did last,
+    // whatever thread it names, so it's left when that was a message to it, and done when it was a tidy, or anything to another thread.
+    const did = (kind: Ledger.Kind, to: T3Live.Thread): Pick<Brain.Situation, "acted"> => ({
+      acted: Option.some({ commandId: "yapd:u0:0", messageId: null, utterance: "u0", step: 0, kind, machine: "Rosie", thread: to.id, body: {}, digest: null, state: "sent", how: null, reason: null, at: now - 10_000 }),
+    })
+    const scratch = (how: string, target: string, acted: Pick<Brain.Situation, "acted">) => left(Brain.decision({ act: "undo", how, target }), { ...over("Scratch that.", "hooked"), ...acted })
+    for (const target of [tezosAt, ""]) {
+      expect(scratch("", target, did("tidy", tezos))).toBe(false)
+      expect(scratch("", target, did("message", tezos))).toBe(true)
+      expect(scratch("", target, did("stop", tezos))).toBe(true)
+      expect(scratch("", target, did("message", mina))).toBe(false)
+    }
+    expect(scratch("tidy", tezosAt, did("tidy", tezos))).toBe(false)
+    expect(scratch("message", tezosAt, did("tidy", tezos))).toBe(true)
+    expect(scratch("carry", tezosAt, did("tidy", tezos))).toBe(true)
   })
 
   test("over a TV in an empty room, new work, a reminder, a memory, a mode or a mute handed over is never done", () => {

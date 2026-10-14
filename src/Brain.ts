@@ -2937,17 +2937,48 @@ const aimed = (decision: Pick<Decision, "act" | "target">, own: Pick<Own, "ref">
 }
 
 /**
- * Whether a write handed over from an update is left, never done: any while
- * it's about mutes, which never reach an agent; and one aimed at the update's
- * own session when that isn't steered, like one whose Stop hook waits, a
- * rig's tied only by `owner`, or one tied to none, which T3 Code reaching
- * would put two processes on one session. Tidying it changes only how T3
- * Code keeps its thread, never its turn, so that's left only when it has no
- * thread there to tidy.
+ * Of a write, the thread whose turn it reaches, as the hands find it: the one
+ * it names, "named", for a message, a stop, an answer to what a thread asks,
+ * or taking back a message or a stop; for taking back no more than "scratch
+ * that", the one yapd last did something to, whatever it names, while that's
+ * the newest change he made. None for tidying, or taking back what tidying
+ * did, which only changes how T3 Code keeps a thread, nor for taking back a
+ * reminder, a memory or the catch-up, which reach no thread's turn.
  */
-export const leftOver = (decision: Pick<Decision, "act" | "target">, own: Own, handed: Handed | undefined, situation: Pick<Situation, "subject" | "desk">) =>
-  writes.has(decision.act) &&
-  (handed?.muting === true || (aimed(decision, own, situation) && (decision.act === "tidy" ? own.ref === undefined : !own.steered)))
+export const turnOf = (
+  decision: Pick<Decision, "act" | "how">,
+  situation: Pick<Situation, "acted" | "muteChange" | "noted" | "modeChange">,
+): "named" | Threads.Ref | undefined => {
+  if (!writes.has(decision.act) || decision.act === "tidy") return undefined
+  if (decision.act !== "undo") return "named"
+  const taking = undoes(decision.how)
+  if (taking === "thread") return decision.how === "tidy" ? undefined : "named"
+  if (taking !== "last" || newest(situation) !== "acted") return undefined
+  return Option.getOrUndefined(Option.map(Option.filter(situation.acted, ({ kind }) => kind !== "tidy"), ({ machine, thread }) => ({ machine, id: thread })))
+}
+
+/**
+ * Whether a write handed over from an update is left, never done: any while
+ * it's about mutes, which never reach an agent; and one that reaches the turn
+ * of the update's own session when that isn't steered, like one whose Stop
+ * hook waits, a rig's tied only by `owner`, or one tied to none, which T3
+ * Code reaching would put two processes on one session. Tidying it, or
+ * taking back what tidying did, changes only how T3 Code keeps its thread,
+ * so tidying is left only when it has no thread there to tidy.
+ */
+export const leftOver = (
+  decision: Pick<Decision, "act" | "target" | "how">,
+  own: Own,
+  handed: Handed | undefined,
+  situation: Pick<Situation, "subject" | "desk" | "acted" | "muteChange" | "noted" | "modeChange">,
+) => {
+  if (!writes.has(decision.act)) return false
+  if (handed?.muting === true) return true
+  if (decision.act === "tidy") return own.ref === undefined && aimed(decision, own, situation)
+  const turn = turnOf(decision, situation)
+  if (own.steered || turn === undefined) return false
+  return turn === "named" ? aimed(decision, own, situation) : own.ref !== undefined && Threads.same(turn, own.ref)
+}
 
 /** Whether it's only done on his word, but isn't a write: new work, a mute, a mode, a reminder, an offer, a memory, clearing the catch-up. */
 export const unattended = (decision: Pick<Decision, "act" | "how">) => ownWord(decision) && !writes.has(decision.act)
