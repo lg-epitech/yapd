@@ -901,7 +901,7 @@
       "how": "tied",
       "present": false,
       "heard": "Let's start a new project to fix the flaky test.",
-      "expect": { "intents": ["resume", "dismiss", "answer"], "neverDone": ["start", "remind", "mode"], "never": ["start", "remind", "mode"] }
+      "expect": { "intents": ["resume", "dismiss", "answer"], "neverDone": ["start", "remind", "mode"] }
     },
     {
       "id": "S75",
@@ -910,7 +910,7 @@
       "how": "tied",
       "present": false,
       "heard": "Remind me to call mom at six.",
-      "expect": { "intents": ["resume", "dismiss", "answer"], "neverDone": ["start", "remind", "mode"], "never": ["start", "remind", "mode"] }
+      "expect": { "intents": ["resume", "dismiss", "answer"], "neverDone": ["start", "remind", "mode"] }
     },
     {
       "id": "S76",
@@ -919,7 +919,7 @@
       "how": "tied",
       "present": false,
       "heard": "Okay everyone, focus mode till three.",
-      "expect": { "intents": ["resume", "dismiss", "answer"], "neverDone": ["start", "remind", "mode"], "never": ["start", "remind", "mode"] }
+      "expect": { "intents": ["resume", "dismiss", "answer"], "neverDone": ["start", "remind", "mode"] }
     }
   ]
 }

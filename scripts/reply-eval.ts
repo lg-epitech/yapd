@@ -1086,7 +1086,11 @@ interface Result {
   readonly present?: boolean
   /** For a Pass, what's said of the rest left. */
   readonly left?: string
-  /** For an Act: whether its first step was left for the update's own session, or about mutes, what it does, and whether all of it may be yapd's own words. */
+  /**
+   * For an Act: whether its first step was left for the update's own session,
+   * or about mutes, what it does, unless that's turned down while he isn't at
+   * hand, and whether all of it may be yapd's own words.
+   */
   readonly leftFirst?: boolean
   readonly done?: string
   readonly doubted?: boolean
@@ -1263,8 +1267,10 @@ const run = Effect.gen(function* () {
    * and what it hands over, or the hook does, worked out by the Brain on the
    * update as "it", with its own thread, as said back to a "done" line, and
    * routed as the assistant routes it. An Act's first step is checked and
-   * guarded, and its rest worked out as the next step is, with the update
-   * still "it", and checked and guarded too, nothing of either done.
+   * guarded, and turned down as what only his word does while he isn't at
+   * hand, as the assistant turns it down, and its rest worked out as the
+   * next step is, with the update still "it", and checked and guarded too,
+   * nothing of either done.
    */
   const handoff = (case_: Case) =>
     Effect.gen(function* () {
@@ -1323,6 +1329,8 @@ const run = Effect.gen(function* () {
             const routed = Brain.route(decision, handedOver, lines)
             const checked = Brain.check(decision, handedOver, lines)
             const leftFirst = Brain.leftOver(decision, own, utterance.handed, handedOver)
+            // While he isn't at hand, a first step only his word does, with more after it, is acted on only to be turned down.
+            const turnedDown = routed._tag === "Act" && !leftFirst && !present && Brain.unattended(decision)
             /** Whether a checked write is to the update's own thread, by thread, over an unsteered update: one with none, by none. */
             const ownWrite = (plan: Brain.Plan) =>
               writes.has(plan.decision.act) &&
@@ -1366,11 +1374,19 @@ const run = Effect.gen(function* () {
               ...(decision.target === "" ? {} : { target: decision.target }),
               ...(listed === undefined ? {} : { title: listed.thread.title }),
               checked: checked._tag,
-              ...(checked._tag === "Ask" ? { spoken: checked.open.asked } : checked._tag === "Say" ? { spoken: checked.spoken } : plan?.decision.spoken === "" || plan === undefined ? {} : { spoken: plan.decision.spoken }),
+              ...(turnedDown
+                ? { spoken: Brain.handoffLines(lines).shortcut }
+                : checked._tag === "Ask"
+                  ? { spoken: checked.open.asked }
+                  : checked._tag === "Say"
+                    ? { spoken: checked.spoken }
+                    : plan?.decision.spoken === "" || plan === undefined
+                      ? {}
+                      : { spoken: plan.decision.spoken }),
               ...(decision.text === "" ? {} : { message: decision.text }),
               ...(decision.rest === "" ? {} : { rest: decision.rest }),
               ...(routed._tag === "Pass" && routed.left !== undefined ? { left: routed.left } : {}),
-              ...(routed._tag === "Act" ? { leftFirst, ...(plan === undefined ? {} : { done: plan.decision.act }), doubted: routed.doubted } : {}),
+              ...(routed._tag === "Act" ? { leftFirst, ...(plan === undefined || turnedDown ? {} : { done: plan.decision.act }), doubted: routed.doubted } : {}),
               ...rest,
               ownByHands,
               leftOver,
@@ -1384,7 +1400,7 @@ const run = Effect.gen(function* () {
                       ? "answer"
                       : routed._tag === "Pass"
                         ? "send"
-                        : leftFirst
+                        : leftFirst || turnedDown
                           ? "answer"
                           : checked._tag === "Ask"
                             ? "clarify"
