@@ -4169,7 +4169,7 @@ export const prompt = (situation: Situation, style: Option.Option<string>) => {
     ...(situation.utterance.afterDone !== true
       ? []
       : [
-          `He's replying to your last line, which told him what came of something he asked you to do. When it says you did something for him, like sending a message or starting work, nothing but a no to that, like "No.", "No, don't." or "Scratch that.", is never a dismissal: it's "undo" when it plainly takes that back, or else "answer", asking him in a few words whether to take it back; never "dismiss" or "resume". Otherwise, as when it says something didn't go, a no goes as usual.`,
+          `He's replying to your last line, which told him what came of something he asked you to do. When it says you did something for him, like sending a message, nothing but a no to that, like "No.", "No, don't." or "Scratch that.", is never a dismissal: it's "undo" when it plainly takes that back, or else "answer", asking him in a few words whether to take it back; never "dismiss" or "resume". When it says you started work for him, which can't be taken back, nothing but a no to that is "answer", asking him in a few words whether to stop it; never "undo", "dismiss" or "resume". Otherwise, as when it says something didn't go, a no goes as usual.`,
         ]),
     `WHAT HE SAID, ${said(situation)}:\n${situation.utterance.heard}`,
   ].join("\n\n")
