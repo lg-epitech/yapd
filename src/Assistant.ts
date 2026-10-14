@@ -4183,17 +4183,19 @@ export const make = (options: {
      * A step of what was handed over from an update, or of an answer to what
      * that asked, left rather than done, as `leftOver` has it: said, in his
      * words for it, `words` or the step's own, with the rest of the request
-     * done after it; or tidying a session with no thread in T3 Code, said
-     * plainly. Of what may all be yapd's own words, nothing is said.
+     * done after it; or tidying a session with no thread in T3 Code, or a
+     * subagent, which isn't tidied on its own, said plainly. Of what may all
+     * be yapd's own words, nothing is said.
      */
     const leaving = (thought: Thought, said: Lines, at: Stepping, muting: boolean, words?: string): Effect.Effect<Outcome> => {
       if (Brain.mayBeOwn(thought.utterance)) return Effect.as(notActing(thought.utterance), quiet(thought.subject))
-      const { decision } = thought
+      const { decision, subject } = thought
       const lines = Brain.handoffLines(said)
       if (!muting && decision.act === "tidy") {
+        const head = subject._tag === "Session" ? Brain.headCalled(subject.update, thought.situation.desk) : undefined
         return Effect.zipRight(
-          Effect.logInfo("Left it, since the update's own session has no thread in T3 Code to tidy"),
-          onward(thought, reply(lines.untidied(decision.how), thought.subject), Option.none(), at.step + 1, said),
+          Effect.logInfo(head === undefined ? "Left it, since the update's own session has no thread in T3 Code to tidy" : "Left it, since a subagent isn't tidied on its own"),
+          onward(thought, reply(lines.untidied(decision.how, head), subject), Option.none(), at.step + 1, said),
         )
       }
       const step = words ?? (decision.rest.trim() === "" ? thought.utterance.heard : decision.text.trim() || thought.utterance.heard)

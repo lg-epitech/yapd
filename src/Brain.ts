@@ -1244,6 +1244,19 @@ export const subagentBy = (handle: string, situation: Pick<Situation, "subject">
   return handle.trim() === subagentHandle && subject._tag === "Session" && subject.update.subagent !== undefined ? Option.some(subject.update) : Option.none()
 }
 
+/**
+ * What the thread a subagent's update is part of is called aloud: as it's
+ * listed on the desk, else as its chain named it, else plainly. None for an
+ * update that isn't a subagent's.
+ */
+export const headCalled = (update: Pick<Extract<Assistant.Subject, { readonly _tag: "Session" }>["update"], "subagent">, desk: Threads.Desk) => {
+  if (update.subagent === undefined) return undefined
+  const head = update.subagent.head
+  const listed = head === undefined ? undefined : desk.threads.find((one) => Threads.same(one.ref, head.ref))
+  if (listed !== undefined) return `${listed.called}${listed.here ? "" : ` on ${listed.ref.machine}`}`
+  return head?.called ?? "the thread it's part of"
+}
+
 /** What's said once a thread is muted or unmuted, or found as it was, by name or as "it", and once every thread is unmuted. */
 export const muteLines = (lines: Lines, name: string, now: number) => {
   const sir = addressed(lines)
@@ -1290,15 +1303,19 @@ export const subagentLines = (lines: Lines, name: string) => {
  * What's said of what he handed to yapd over an update that it doesn't do:
  * what only the shortcut does while he isn't at hand, a routine's name, which
  * only the shortcut sends, tidying a session that has no thread in T3 Code,
- * and a step left for the update's own session, by his words for it, made
- * fit to say.
+ * or a subagent, which isn't tidied on its own, by the thread it's part of,
+ * `head`, and a step left for the update's own session, by his words for it,
+ * made fit to say.
  */
 export const handoffLines = (lines: Lines) => {
   const sir = addressed(lines)
   return {
     shortcut: `Ask me that with the shortcut${sir}.`,
     routine: `Say that with your shortcut${sir}.`,
-    untidied: (how: string) => `This session has no T3 Code thread to ${tidyings.has(how) ? how : "tidy"}${sir}.`,
+    untidied: (how: string, head?: string) => {
+      const verb = tidyings.has(how) ? how : "tidy"
+      return head === undefined ? `This session has no T3 Code thread to ${verb}${sir}.` : `I can't ${verb} a subagent on its own${sir}, only ${head}.`
+    },
     left: (words: string, desk: Threads.Desk) => {
       const step = speakable(words, desk).replace(/[.!?]+$/, "")
       return step === "" || T3Actions.revealing(words) ? `I left that${sir}.` : `I left that${sir}: ${step}.`

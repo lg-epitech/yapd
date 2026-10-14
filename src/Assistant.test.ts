@@ -15237,4 +15237,25 @@ describe("handed over from an update", () => {
     ])
     expect(result.spoken.at(-1)).toContain("It's waiting now")
   })
+
+  test("'settle it' over a subagent's update tidies nothing, the thread it's part of included, and says a subagent isn't settled on its own, naming that thread", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        // "It", as the model is shown it over a subagent's update: that subagent, by none.
+        const made = yield* assistant((situation) => (situation.utterance.heard === "Settle it." ? Brain.decision({ act: "tidy", how: "settle", target: "" }) : undefined))
+        const at = yield* TestClock.currentTimeMillis
+        const review: Conversation.Update = {
+          ...update("integration", "The Sol review found one release blocker, sir.", at),
+          subagent: { child: { machine: "Rosie", id: "t-review" }, called: "Sol review", head: { ref: { machine: "Rosie", id: tezos.id } } },
+        }
+        const handed = yield* made.over(review, [], review.spoken, { steered: false, present: true, done: {} })("Settle it.", 1)
+        if (handed._tag !== "Act") return yield* Effect.dieMessage(`Not acted on: ${handed._tag}`)
+        yield* handed.run({ cutOff: false, reply: { ms: 2000 }, since: at })
+        yield* made.until(() => made.spoken().length >= 1)
+        return { spoken: made.spoken(), tidied: made.dispatched.filter(({ type }) => String(type).startsWith("thread.")) }
+      }),
+    )
+    expect(result.tidied).toEqual([])
+    expect(result.spoken.at(-1)).toBe("I can't settle a subagent on its own, sir, only Migrate Tezos Integration.")
+  })
 })
