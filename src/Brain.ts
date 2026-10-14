@@ -2879,19 +2879,32 @@ export const check = (given: Decision, situation: Situation, lines: Lines): Chec
  * Nothing he'd only do on his word is done on what may all be yapd's own
  * words said back to a "done" line: it's let go. All but what he'd keep in
  * mind that may give a secret away, which goes on to be refused as one,
- * since only that keeps his words out of the journal. A question asked of
- * them, whether to stop a thread or take back a change, is to that alone,
- * never the rest of the request the model split off, which a yes would bring
- * back as his.
+ * since only that keeps his words out of the journal. Nor is he asked
+ * anything of them but code's own question whether to stop a thread or take
+ * back a change, which his yes does alone, never the rest of the request the
+ * model split off, which a yes would bring back as his: any other question,
+ * like which thread or whether to tidy one, is let go too.
  */
 const unechoed = (checked: Checked, utterance: Assistant.Utterance): Checked => {
-  if (checked._tag === "Ask" && mayBeOwn(utterance)) return { _tag: "Ask", open: { ...checked.open, decision: { ...checked.open.decision, rest: "" } } }
+  const letGo = (decided: Decision): Checked => ({ _tag: "Do", plan: { decision: { ...decided, act: "resume" }, target: Option.none() } })
+  if (checked._tag === "Ask" && mayBeOwn(utterance)) {
+    const { open } = checked
+    return ownQuestion(open) ? { _tag: "Ask", open: { ...open, decision: { ...open.decision, rest: "" } } } : letGo(open.decision)
+  }
   return checked._tag === "Do" &&
     echoedBack(checked.plan.decision, utterance) &&
     !(checked.plan.decision.act === "remember" && secretive(checked.plan.decision, utterance))
-    ? { _tag: "Do", plan: { decision: { ...checked.plan.decision, act: "resume" }, target: Option.none() } }
+    ? letGo(checked.plan.decision)
     : checked
 }
+
+/**
+ * Whether a question is code's own, whether to stop a thread, as `writing`
+ * asks first, or to take back a change, as `askingBack` asks, naming what a
+ * yes does: never which thread, nor whether to tidy one.
+ */
+const ownQuestion = ({ kind, decision: { act, how } }: Pick<Assistant.Open, "kind" | "decision">) =>
+  kind === "confirm" && (act === "stop" || act === "undo" || ((act === "mode" || act === "mute") && how === "undo"))
 
 /** Checks a decision, as `check` does, once a routine's name is its steps. */
 const checking = (choice: Decision, situation: Situation, lines: Lines): Checked => {
@@ -3005,7 +3018,8 @@ const checking = (choice: Decision, situation: Situation, lines: Lines): Checked
     }
     case "stop":
       // Said back to a line saying yapd started work for him, which can't be taken back, a stop is asked about first, never done on a no;
-      // so is one in what may all be yapd's own words said back to a "done" line.
+      // so is one in what may all be yapd's own words said back to a "done" line, and one of those that names no thread is let go.
+      if (mayBeOwn(situation.utterance) && Option.isNone(target)) return doing({ decision: { ...choice, act: "resume" }, target: Option.none() })
       return writing(choice, target, candidates, situation, lines, ask, startedBack(situation) || mayBeOwn(situation.utterance))
     case "decide":
     case "reply": {

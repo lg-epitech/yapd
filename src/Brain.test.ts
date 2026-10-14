@@ -711,6 +711,44 @@ describe("Brain", () => {
     expect(Brain.check(stop, rest, lines)).toMatchObject({ _tag: "Do", plan: { decision: { act: "stop" } } })
   })
 
+  test("of what may be yapd's own words said back to a done line, only code's own question to stop a thread or take back a change is asked, without the rest of the request; any other is let go", () => {
+    const handleOf = (of: T3Live.Thread) => desk().threads.find(({ thread }) => thread.id === of.id)!.handle
+    const resumed = { _tag: "Do", plan: { decision: { act: "resume" } } }
+    const sent: Ledger.Row = {
+      commandId: "yapd:u0:0",
+      messageId: "yapd:u0:0:m",
+      utterance: "u0",
+      step: 0,
+      kind: "message",
+      machine: "Rosie",
+      thread: tezos.id,
+      body: { _tag: "Send", text: "Use staging.", messageId: "yapd:u0:0:m", how: "now" },
+      digest: "use staging",
+      state: "sent",
+      how: "steered",
+      reason: null,
+      at: now - 5_000,
+    }
+    const given = situation("On it. Stop it, and tell the Mina one to wait.", { acted: Option.some(sent), recent: [sent] })
+    const over = { ...given, utterance: { ...given.utterance, via: "reply" as const, afterDone: { change: { what: "acted" as const, utterance: "u0" } }, echo: "On it, sir: the Tezos migration.", carried: true as const } }
+    // A stop is asked about, and a yes to it is to that alone, never the rest the model split off.
+    const stop = Brain.decision({ act: "stop", target: handleOf(tezos), sure: "high", rest: "tell the Mina one to wait" })
+    expect(Brain.check(stop, over, lines)).toMatchObject({ _tag: "Ask", open: { kind: "confirm", decision: { act: "stop", rest: "" } } })
+    // So is a take-back yapd asks about in its own words.
+    const undo = Brain.decision({ act: "undo", sure: "medium", rest: "tell the Mina one to wait" })
+    expect(Brain.check(undo, over, lines)).toMatchObject({ _tag: "Ask", open: { kind: "confirm", asked: "Take back the message to Migrate Tezos Integration, sir?", decision: { rest: "" } } })
+    // A stop of no thread it could name, between two, is let go, never asked which.
+    const which = Brain.decision({ act: "stop", sure: "low", others: `${handleOf(tezos)}, ${handleOf(std)}` })
+    expect(Brain.check(which, over, lines)).toMatchObject(resumed)
+    // Nor is he asked whether to tidy a thread.
+    const archive = Brain.decision({ act: "tidy", how: "archive", target: handleOf(mina), sure: "medium" })
+    expect(Brain.check(archive, over, lines)).toMatchObject(resumed)
+    // Surely his, each is asked as ever.
+    const his = { ...over, utterance: { ...over.utterance, afterPause: "Stop it, and tell the Mina one to wait." } }
+    expect(Brain.check(which, his, lines)).toMatchObject({ _tag: "Ask", open: { kind: "which" } })
+    expect(Brain.check(archive, his, lines)).toMatchObject({ _tag: "Ask", open: { kind: "confirm", decision: { act: "tidy" } } })
+  })
+
   test("a reminder taken back after a done line that said something else is asked about, of another thread named or one filled in, never cancelled on its own", () => {
     const handleOf = (of: T3Live.Thread) => desk().threads.find(({ thread }) => thread.id === of.id)!.handle
     const replied = (given: Brain.Situation, change: Brain.Change) => ({ ...given, utterance: { ...given.utterance, via: "reply" as const, afterDone: { change } } })
