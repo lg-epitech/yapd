@@ -2844,6 +2844,16 @@ describe("handed over from an update", () => {
     expect(scratch("carry", tezosAt, did("tidy", tezos))).toBe(true)
   })
 
+  test("`route` has archiving the update's own thread aim at it, as a stop does, since it stops its turn, so an update that needs him isn't read again after; never another tidy of it, nor archiving a session with no thread", () => {
+    const route = (decision: Brain.Decision, situated: Brain.Situation) => Brain.route(decision, situated, lines)
+    const tidy = (how: string, target: string) => Brain.decision({ act: "tidy", how, target })
+    expect(route(tidy("archive", handle(tezos)), over("Archive it.", "hooked"))).toEqual({ _tag: "Act", aims: true, doubted: false })
+    expect(route(tidy("archive", handle(tezos)), over("Archive it.", "tied"))).toEqual({ _tag: "Act", aims: true, doubted: false })
+    expect(route(tidy("archive", handle(mina)), over("Archive the Mina one.", "hooked"))).toEqual({ _tag: "Act", aims: false, doubted: false })
+    expect(route(tidy("settle", handle(tezos)), over("Settle it.", "hooked"))).toEqual({ _tag: "Act", aims: false, doubted: false })
+    expect(route(tidy("archive", ""), over("Archive it.", "untied"))).toEqual({ _tag: "Act", aims: false, doubted: false })
+  })
+
   test("over a TV in an empty room, new work, a reminder, a memory, a mode or a mute handed over is never done", () => {
     const shortcut: Brain.Routed = { _tag: "Answer", spoken: "Ask me that with the shortcut, sir.", unattended: true }
     const away = (decision: Brain.Decision, heard: string) => Brain.route(decision, over(heard, "tied", { present: false }), lines)
