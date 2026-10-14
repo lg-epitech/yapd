@@ -214,7 +214,7 @@ describe.skipIf(swiftc === undefined)("App", () => {
   )
 
   test(
-    "the menu shows everything it did, in the same order and turned on and off by the same rules, with a panel beside each recent thread instead of the Mute menu, to hear it again, mute it, for an hour too, or take the mute off, and have its subagents read, and keeps each item by an id, so the open menu changes in place",
+    "the menu shows everything it did, in the same order and turned on and off by the same rules, with a panel beside each recent thread instead of the Mute menu, to hear it again, mute it, for an hour too, or take the mute off, and have its subagents read, lists his reminders to cancel each by its id, and keeps each item by an id, so the open menu changes in place",
     async () => {
       expect(await run("menu")).toEqual({ code: 0, out: "The app's checks pass.\n" })
       // What the checks cover is what the menu bar draws: the menu and each panel are only ever built from Menu, and what's chosen does what the
@@ -228,6 +228,11 @@ describe.skipIf(swiftc === undefined)("App", () => {
       expect(bar).toMatch(/case \.showLast: yapd\.showLast\(\)/)
       expect(bar).toMatch(/case \.replay\(let update\): yapd\.replay\(update\)/)
       expect(bar).toMatch(/case \.quit: NSApplication\.shared\.terminate\(nil\)/)
+      // A reminder is cancelled only by its id, through Cancelling, as the checks check, and nothing else is sent of it.
+      expect(bar).toMatch(/case \.cancel\(let reminder\): yapd\.cancel\(reminder\)/)
+      const yapd = await Bun.file(join(app, "yapd", "YapdApp.swift")).text()
+      expect(yapd).toMatch(/func cancel\(_ reminder: Status\.Reminder\) \{\s*ask\(Cancelling\(reminder\)\)\s*\}/)
+      expect(yapd).not.toMatch(/reminders\//)
       // A row clicked is heard again only when it can be, and closes the menu then; otherwise the menu stays open, and its panel still opens.
       expect(bar).toMatch(/private func click\(_ key: String\) \{\s*guard let row = rows\[key\], row\.hearable else \{ return \}\s*menu\.cancelTracking\(\)\s*perform\(\.hear\(row\.recent\)\)\s*\}/)
       // Open, the menu changes only what it shows already, in place, what isn't offered hidden; built again as it opens, and as yapd stops or

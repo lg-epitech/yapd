@@ -3,9 +3,9 @@ import ServiceManagement
 
 // yapd in the menu bar: whether it's on, what it's doing, its mode, the
 // threads waiting on him, what he hasn't heard, to be caught up on or cleared,
-// the threads with the latest updates, each with a panel beside it to see more
-// of it, hear it again, mute it and have its subagents read, and the card it's
-// showing, in a panel under the icon.
+// his reminders, to cancel, the threads with the latest updates, each with a
+// panel beside it to see more of it, hear it again, mute it and have its
+// subagents read, and the card it's showing, in a panel under the icon.
 // It only uses the API in docs/api.md, so another UI can do all of this too.
 
 @MainActor @Observable
@@ -158,6 +158,12 @@ final class Yapd {
   /// yapd says changes: nothing is sent to the thread.
   func subagents(_ row: Status.Recent, on: Bool) {
     ask(Subagents(row, on: on))
+  }
+
+  /// Cancels one of his reminders by its id, as "cancel the bank reminder" does, with nothing said: "scratch that" by voice keeps
+  /// it again. One that went off or was cancelled since is refused, and the list drops it as the state says so.
+  func cancel(_ reminder: Status.Reminder) {
+    ask(Cancelling(reminder))
   }
 
   /// What yapd tells of a thread for its panel, by its key, unless it doesn't know it, is too old to tell, or doesn't answer.

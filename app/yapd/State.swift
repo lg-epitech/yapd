@@ -157,6 +157,31 @@ struct Status: Decodable {
     }
   }
 
+  /// One of his reminders still to come, as `reminders` lists it, worded as yapd says it.
+  struct Reminder: Decodable, Identifiable, Equatable {
+    /// What it's cancelled by, as a name, never shown.
+    let id: String
+    /// What it's to tell him, or offer to send a thread: empty when it's only that a thread did what he asked to hear of.
+    let text: String
+    /// When, by yapd's clock, or the thread and what it's to do.
+    let when: String
+
+    /// How the menu names it: what it's to tell him, or else when, cut short when it's long.
+    var label: String {
+      Reminder.cut(text.isEmpty ? when : text)
+    }
+
+    /// What the menu says under it: when, unless that's what it's named by.
+    var detail: String? {
+      text.isEmpty ? nil : Reminder.cut(when)
+    }
+
+    /// Cut short when it's long, as a recent row's label is.
+    private static func cut(_ line: String) -> String {
+      line.count > 60 ? "\(line.prefix(59))…" : line
+    }
+  }
+
   /// Two letters in one of T3 Code's colours, as T3 Code draws a project with no image, and any icon the app can't draw.
   struct Monogram: Decodable, Equatable {
     let text: String
@@ -227,6 +252,9 @@ struct Status: Decodable {
   /// The threads with the latest updates, newest first. None from a yapd too old to send them, which the menu shows the
   /// updates it said for instead.
   let recent: [Recent]?
+  /// His reminders still to come: those at a time, the soonest first, then those on a thread, the newest first. None from a yapd
+  /// from before them.
+  let reminders: [Reminder]?
   /// None when no card is up, and from a yapd too old to show cards.
   let showing: Showing?
   /// How many times yapd put a card up or took one down, or was asked to take one down, which a card asked to go back up is
@@ -245,7 +273,7 @@ struct Status: Decodable {
   /// turns a request away while it's off.
   private let answersOff: Bool
 
-  private enum CodingKeys: String, CodingKey { case on, activity, updates, recent, showing, revision, mode, until, waiting, unheard }
+  private enum CodingKeys: String, CodingKey { case on, activity, updates, recent, reminders, showing, revision, mode, until, waiting, unheard }
 
   init(from decoder: Decoder) throws {
     let container = try decoder.container(keyedBy: CodingKeys.self)
@@ -254,6 +282,7 @@ struct Status: Decodable {
     updates = try container.decodeIfPresent([Update].self, forKey: .updates) ?? []
     // A row the app can't read is left out, rather than the whole state.
     recent = try container.decodeIfPresent([Lenient<Recent>].self, forKey: .recent).map { $0.compactMap(\.value) }
+    reminders = try container.decodeIfPresent([Lenient<Reminder>].self, forKey: .reminders).map { $0.compactMap(\.value) }
     // An older yapd doesn't send them at all.
     showing = try container.decodeIfPresent(Showing.self, forKey: .showing)
     revision = try container.decodeIfPresent(Int.self, forKey: .revision)

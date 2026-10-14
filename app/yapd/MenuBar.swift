@@ -3,14 +3,14 @@ import AppKit
 // yapd's icon in the menu bar, and its menu. The icon shows what yapd is
 // doing as it changes. The menu is built from yapd's state each time it
 // opens, as Menu has it: whether it's on, its mode, the threads waiting on
-// him, what he hasn't heard, to be caught up on or cleared, the last card, and
-// the threads with the latest updates, each opening a panel beside it on
-// hover, as CodexBar's do, with what the thread is doing and the latest told
-// of it, to hear it again, mute it, have its subagents read or open its pull
-// request. While the menu is open, what changes is changed in place, and what
-// comes or goes waits for the next time it opens, so nothing moves under his
-// pointer, unless yapd stops or starts, when it's built again, as there are no
-// rows on one side to move.
+// him, what he hasn't heard, to be caught up on or cleared, the last card, his
+// reminders, each to cancel, and the threads with the latest updates, each
+// opening a panel beside it on hover, as CodexBar's do, with what the thread
+// is doing and the latest told of it, to hear it again, mute it, have its
+// subagents read or open its pull request. While the menu is open, what
+// changes is changed in place, and what comes or goes waits for the next time
+// it opens, so nothing moves under his pointer, unless yapd stops or starts,
+// when it's built again, as there are no rows on one side to move.
 
 @MainActor
 final class MenuBar: NSObject, NSMenuDelegate {
@@ -197,6 +197,12 @@ final class MenuBar: NSObject, NSMenuDelegate {
   private func apply(_ item: Menu.Item, to made: NSMenuItem) {
     if case .separator = item.kind { return }
     made.title = item.title
+    // The line under it, as a reminder's time, on a macOS that has it, and after it otherwise.
+    if #available(macOS 14.4, *) {
+      made.subtitle = item.detail
+    } else if let detail = item.detail {
+      made.title = "\(item.title) · \(detail)"
+    }
     made.isEnabled = item.enabled
     made.isHidden = item.hidden
     made.state = item.checked ? .on : .off
@@ -297,6 +303,7 @@ final class MenuBar: NSObject, NSMenuDelegate {
     case .mute(let row, let forAnHour): yapd.mute(row, forAnHour: forAnHour)
     case .unmute(let row): yapd.unmute(row)
     case .subagents(let row, let on): yapd.subagents(row, on: on)
+    case .cancel(let reminder): yapd.cancel(reminder)
     // Only ever an https page, as a card's links are.
     case .open(let address): if opens(address) { NSWorkspace.shared.open(address) }
     case .quit: NSApplication.shared.terminate(nil)

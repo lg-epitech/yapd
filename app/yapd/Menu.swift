@@ -25,6 +25,8 @@ struct Menu: Equatable {
     case unmute(Status.Recent)
     /// Has a recent thread's subagents read to him from now on, or kept to yapd again, a subagent's by the thread it's part of.
     case subagents(Status.Recent, on: Bool)
+    /// Cancels one of his reminders, as "cancel the bank reminder" does, with nothing said.
+    case cancel(Status.Reminder)
     /// Opens a thread's pull request in the browser, only ever an https page.
     case open(URL)
     case quit
@@ -59,6 +61,8 @@ struct Menu: Equatable {
     var key: String?
     /// Not shown, as Mute for an Hour while the thread is muted, but kept, so the open panel shows it again in place.
     var hidden = false
+    /// The line said under its title, as a reminder's time.
+    var detail: String?
 
     fileprivate static func line(_ id: String, _ title: String) -> Item {
       Item(id: id, kind: .line, title: title, enabled: false)
@@ -128,6 +132,16 @@ struct Menu: Equatable {
     // it works while yapd is off too, and the count drops as the state says so.
     items.append(Item(id: "clear catch-up", kind: .action(.clearCatchUp), title: "Clear Catch-Up", enabled: unheard != nil, hidden: unheard == nil))
     items.append(Item(id: "show last", kind: .action(.showLast), title: "Show Last Card", enabled: last))
+    // His reminders, set by voice, each with Cancel beside it, as "cancel the bank reminder" does, with no asking first: "scratch
+    // that" by voice keeps it again. It works while yapd is off too, and the list drops one as the state says so. There with none
+    // too, so the item never comes and goes.
+    if let reminders = state.reminders {
+      let rows = reminders.map { reminder in
+        let cancel = Item(id: "reminder \(reminder.id) cancel", kind: .action(.cancel(reminder)), title: "Cancel", enabled: true)
+        return Item(id: "reminder \(reminder.id)", kind: .submenu([cancel]), title: reminder.label, enabled: true, detail: reminder.detail)
+      }
+      items.append(Item(id: "reminders", kind: .submenu(rows.isEmpty ? [.line("no reminders", "No Reminders")] : rows), title: "Reminders", enabled: true))
+    }
     if let recent = state.recent {
       if !recent.isEmpty {
         items += [.separator("recent"), .header("recent", "Recent")]
@@ -148,10 +162,12 @@ struct Menu: Equatable {
 
   private static var quit: Item { Item(id: "quit", kind: .action(.quit), title: "Quit", enabled: true, key: "q") }
 
-  /// Every item, and those of the menus beside them, in order.
-  var all: [Item] {
+  /// Every item, and those of the menus beside them, and beside those, in order.
+  var all: [Item] { Menu.all(items) }
+
+  private static func all(_ items: [Item]) -> [Item] {
     items.flatMap { item in
-      if case .submenu(let items) = item.kind { [item] + items } else { [item] }
+      if case .submenu(let items) = item.kind { [item] + all(items) } else { [item] }
     }
   }
 

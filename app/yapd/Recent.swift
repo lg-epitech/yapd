@@ -129,7 +129,8 @@ struct Tint: Equatable {
   }
 }
 
-/// A request about one of the recent threads, by its key, percent-encoded as one piece of the path.
+/// A request about one of the recent threads, by its key, or one of his reminders, by its id, percent-encoded as one piece of the
+/// path.
 protocol Asking {
   var method: String { get }
   /// Relative to yapd's API.
@@ -147,7 +148,7 @@ extension Asking {
   var body: Data? { nil }
 }
 
-/// A thread's key as one piece of a path: everything but what's never encoded is.
+/// A thread's key, or a reminder's id, as one piece of a path: everything but what's never encoded is.
 func encoded(_ key: String) -> String {
   var unreserved = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
   unreserved.insert(charactersIn: "-._~")
@@ -198,6 +199,18 @@ struct Subagents: Asking, Equatable {
 
   var method: String { on ? "PUT" : "DELETE" }
   var path: String { "threads/\(encoded(key))/subagents" }
+}
+
+/// Cancelling one of his reminders, as `DELETE /reminders/{id}`, by its id, as "cancel the bank reminder" does.
+struct Cancelling: Asking, Equatable {
+  let id: String
+
+  init(_ reminder: Status.Reminder) {
+    id = reminder.id
+  }
+
+  var method: String { "DELETE" }
+  var path: String { "reminders/\(encoded(id))" }
 }
 
 /// Hearing a thread's latest update again, as `POST /threads/{key}/replay`.

@@ -1,8 +1,9 @@
 import Foundation
 
 /// The menu as he sees it, an item a line: "---" a separator, "## " a heading, a line in brackets that's never chosen, "[off]"
-/// after an item he can't choose, "✓" after the mode yapd is in, "⌘Q" after Quit, a submenu's items after "▸", a recent row's
-/// line under it after "—", "[dimmed]" when clicking it does nothing, and its panel after "▸". What's hidden isn't there.
+/// after an item he can't choose, "✓" after the mode yapd is in, "⌘Q" after Quit, a submenu's items after "▸", the line under a
+/// recent row or a submenu after "—", "[dimmed]" when clicking a row does nothing, and its panel after "▸". What's hidden isn't
+/// there.
 @MainActor func drawn(_ items: [Menu.Item]) -> [String] {
   items.filter { !$0.hidden }.map { item in
     switch item.kind {
@@ -12,7 +13,8 @@ import Foundation
     case .card: return "[card \(item.title)]"
     case .action:
       return item.title + (item.enabled ? "" : " [off]") + (item.checked ? " ✓" : "") + (item.key.map { " ⌘\($0.uppercased())" } ?? "")
-    case .submenu(let items): return "\(item.title) ▸ \(drawn(items).joined(separator: " | "))" + (item.enabled ? "" : " [off]")
+    case .submenu(let items):
+      return "\(item.title)\(item.detail.map { " — \($0)" } ?? "") ▸ \(drawn(items).joined(separator: " | "))" + (item.enabled ? "" : " [off]")
     case .row(let row): return "\(row.label) — \(row.detail)" + (row.hearable ? "" : " [dimmed]") + " ▸" + (item.enabled ? "" : " [off]")
     }
   }
@@ -29,8 +31,8 @@ import Foundation
 /// Clear Catch-Up under Catch Me Up, and the recent rows opening a panel each instead of the Mute menu, which offers hearing the
 /// thread again, muting it, for an hour too, or taking the mute off, a subagent's its own, or saying it's muted with the thread
 /// it's part of, having its subagents read, checked while they are, on a T3 Code thread's, a subagent's by the thread it's part
-/// of, and its pull request when it has an https one; and it keeps each item by an id from one state to the next, so the open
-/// menu changes in place.
+/// of, and its pull request when it has an https one, and lists his reminders, each to cancel, while yapd is off too; and it keeps
+/// each item by an id from one state to the next, so the open menu changes in place.
 @MainActor func checkMenu() {
   let decoded = { (json: String) in try? JSONDecoder().decode(Status.self, from: Data(json.utf8)) }
   let utc = TimeZone(identifier: "UTC")!
@@ -182,6 +184,35 @@ import Foundation
   check(does(unsaid)["Unmute"] == .unmute(unsaid.recent), "offers Unmute as before from a yapd that doesn't say whether its thread is muted")
   let cut = Menu.panel(for: longHead, details: nil).first { $0.id == "t3:Rosie:7 mute" }?.title ?? ""
   check(cut == "Muted with Reimagine Yapd as a Jarvis Companion, with subag…" && cut.count == 60, "cuts a long thread's title short, as a row's label, not \(cut)")
+
+  // His reminders, after Show Last Card, each with its time or its thread, never its id, and Cancel beside it, which cancels it
+  // by its id, as "cancel the bank reminder" does; while yapd is off too. With none, it says so; a yapd from before them shows
+  // no item, as everything at once above.
+  let reminder = { (id: String, text: String, when: String) in #"{"id": "\#(id)", "text": "\#(text)", "when": "\#(when)"}"# }
+  let reminding = { (on: Bool, reminders: String) in
+    decoded(#"{"on": \#(on), "activity": "idle", "mode": "normal", "unheard": 0, "reminders": [\#(reminders)], "recent": [\#(rows)]}"#)
+  }
+  let offer = "Offer to tell Reimagine Yapd as a Jarvis Companion: read every subagent aloud from now on"
+  // One the app can't read is left out, rather than the whole list.
+  let set = [
+    reminder("42", "Call the bank", "At 3:00 PM"), reminder("41", "", "When the Mina tickets on rig asks you something"),
+    reminder("43", offer, "Tomorrow at 9:00 AM"), #"{"id": "44", "text": "Unreadable"}"#,
+  ].joined(separator: ", ")
+  let listed = Array(plain(drawn(menu(reminding(true, set), true).items)).prefix(5))
+  let reminders = "Reminders ▸ Call the bank — At 3:00 PM ▸ Cancel | When the Mina tickets on rig asks you something ▸ Cancel | \(offer.prefix(59))… — Tomorrow at 9:00 AM ▸ Cancel"
+  check(listed == ["Turn Off", "Mode ▸ Normal ✓ | Focus for an Hour | Quiet until Morning", "Show Last Card", reminders, "---"], "lists his reminders after Show Last Card, each with its time or thread, cut short when long, not \(listed)")
+  check(!["41", "42", "43", "44"].contains { reminders.contains($0) }, "never shows a reminder's id")
+  let whileOff = Array(plain(drawn(menu(reminding(false, set), true).items)).prefix(5))
+  check(whileOff.first == "Turn On" && whileOff.dropFirst() == listed.dropFirst(), "lists them, each to cancel, while yapd is off too, not \(whileOff)")
+  let none = Array(plain(drawn(menu(reminding(true, ""), true).items)).prefix(4))
+  check(none.last == "Reminders ▸ (No Reminders)", "says there are none, not \(none)")
+  guard let bank = reminding(true, set)?.reminders?.first else { return check(false, "reads his reminders") }
+  let cancelling = menu(reminding(false, set), true).all.first { $0.id == "reminder 42 cancel" }
+  check(cancelling?.kind == .action(.cancel(bank)) && cancelling?.title == "Cancel" && cancelling?.enabled == true, "cancels a reminder by its own row, while yapd is off too")
+  check(Cancelling(bank).method == "DELETE" && Cancelling(bank).path == "reminders/42", "cancels it as DELETE /reminders/{id}, not \(Cancelling(bank).path)")
+  let nested = menu(reminding(true, set), true).all.map(\.id)
+  check(Set(nested).count == nested.count, "names each item once, its reminders' and their Cancel too, not \(nested)")
+  check(nested == menu(reminding(false, set), true).all.map(\.id), "keeps each reminder as one item, on or off, so the open menu changes it in place")
 
   // What the icon tells VoiceOver.
   let told: [(Status?, String)] = [
