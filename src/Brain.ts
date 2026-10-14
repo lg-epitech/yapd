@@ -3008,7 +3008,8 @@ export const route = (decision: Decision, situation: Situation, lines: Lines): R
       return { _tag: "Pass", message: text, ...(decision.rest.trim() === "" ? {} : { left: said.rest(decision.rest, desk) }) }
     }
   }
-  if (handed?.present === false && unattended(decision)) return { _tag: "Answer", spoken: said.shortcut }
+  // With more after it, it's acted on, which says the same of it and does the rest, like a message to another thread, which goes either way.
+  if (handed?.present === false && unattended(decision) && decision.rest.trim() === "") return { _tag: "Answer", spoken: said.shortcut }
   return {
     _tag: "Act",
     aims: decision.act === "dismiss" || (writes.has(decision.act) && own !== undefined && aimed(decision, own, situation)),
