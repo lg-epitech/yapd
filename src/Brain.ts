@@ -76,12 +76,21 @@ const surelyHis = (utterance: Pick<Assistant.Utterance, "echo" | "afterPause">) 
   utterance.echo === undefined || (utterance.afterPause !== undefined && utterance.afterPause.trim() !== "")
 
 /**
- * Whether it's a take-back said back to a "done" line with nothing surely his
- * in it, like yapd's own "Noted." heard as "No.": only ever asked about, never
- * done, however sure the model is.
+ * Whether all of what he said may be yapd's own words: said back to a "done"
+ * line with nothing in it surely his, like its "Noted." heard as "No.", or
+ * the rest of a request that was.
  */
-export const echoedBack = (decided: Pick<Decision, "act" | "how">, utterance: Pick<Assistant.Utterance, "echo" | "afterPause" | "afterDone">) =>
-  utterance.afterDone !== undefined && !surelyHis(utterance) && (decided.act === "undo" || ((decided.act === "mode" || decided.act === "mute") && decided.how === "undo"))
+export const mayBeOwn = (utterance: Pick<Assistant.Utterance, "echo" | "afterPause" | "afterDone" | "echoedBack">) =>
+  utterance.echoedBack === true || (utterance.afterDone !== undefined && !surelyHis(utterance))
+
+/**
+ * Whether it's something only done on his word, or a catch-up, which marks
+ * what it reads heard, in what may all be yapd's own words said back to a
+ * "done" line: never done, however sure the model is. A stop or a take-back
+ * is asked about in yapd's own question, and anything else is let go.
+ */
+export const echoedBack = (decided: Pick<Decision, "act" | "how">, utterance: Pick<Assistant.Utterance, "echo" | "afterPause" | "afterDone" | "echoedBack">) =>
+  mayBeOwn(utterance) && (ownWord(decided) || decided.act === "catchup")
 
 /** How sure the model is of the thread it picked. */
 export const Sure = Schema.Literal("high", "medium", "low")
@@ -2862,9 +2871,22 @@ export const check = (given: Decision, situation: Situation, lines: Lines): Chec
   if (!enabled.has(given.act)) return { _tag: "Say", spoken: notYet(lines) }
   return Option.match(routining(given, situation), {
     onNone: () => ({ _tag: "Say", spoken: lines.cantTell }),
-    onSome: ({ decision, routine }) => routined(checking(decision, situation, lines), routine),
+    onSome: ({ decision, routine }) => unechoed(routined(checking(decision, situation, lines), routine), situation.utterance),
   })
 }
+
+/**
+ * Nothing he'd only do on his word is done on what may all be yapd's own
+ * words said back to a "done" line: it's let go. All but what he'd keep in
+ * mind that may give a secret away, which goes on to be refused as one,
+ * since only that keeps his words out of the journal.
+ */
+const unechoed = (checked: Checked, utterance: Assistant.Utterance): Checked =>
+  checked._tag === "Do" &&
+  echoedBack(checked.plan.decision, utterance) &&
+  !(checked.plan.decision.act === "remember" && secretive(checked.plan.decision, utterance))
+    ? { _tag: "Do", plan: { decision: { ...checked.plan.decision, act: "resume" }, target: Option.none() } }
+    : checked
 
 /** Checks a decision, as `check` does, once a routine's name is its steps. */
 const checking = (choice: Decision, situation: Situation, lines: Lines): Checked => {
@@ -2977,8 +2999,9 @@ const checking = (choice: Decision, situation: Situation, lines: Lines): Checked
       return writing(choice, target, candidates, situation, lines, ask)
     }
     case "stop":
-      // Said back to a line saying yapd started work for him, which can't be taken back, a stop is asked about first, never done on a no.
-      return writing(choice, target, candidates, situation, lines, ask, startedBack(situation))
+      // Said back to a line saying yapd started work for him, which can't be taken back, a stop is asked about first, never done on a no;
+      // so is one in what may all be yapd's own words said back to a "done" line.
+      return writing(choice, target, candidates, situation, lines, ask, startedBack(situation) || mayBeOwn(situation.utterance))
     case "decide":
     case "reply": {
       // Only a thread still waiting on him, and never on a secret, which only T3 Code takes. Which request it answers, maybe one asked

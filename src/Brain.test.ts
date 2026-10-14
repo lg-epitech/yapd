@@ -646,6 +646,63 @@ describe("Brain", () => {
     expect(Brain.check(undo, over({ afterPause: "No." }), lines)).toMatchObject({ _tag: "Do", plan: { decision: { act: "undo" }, pinned: "yapd:u0:0" } })
   })
 
+  test("nothing he'd only do on his word, said back to a done line in what may be yapd's own words or in the rest of it, is done however sure the model is: a stop is asked about, anything else let go", () => {
+    const handle = desk().threads.find(({ thread }) => thread.id === tezos.id)!.handle
+    const over = (given: Brain.Situation, change: Brain.Change, echo: string, more: Partial<Assistant.Utterance> = {}): Brain.Situation => ({
+      ...given,
+      utterance: { ...given.utterance, via: "reply", afterDone: { change }, echo, carried: true, ...more },
+    })
+    const resumed = { _tag: "Do", plan: { decision: { act: "resume" } } }
+    // Its own "Muted, sir." heard as "Unmute it." and taken for an unmute of what the line muted.
+    const muted = Option.some({ how: "mute" as const, at: now - 2_000, added: [{ key: `t3:Rosie:${tezos.id}`, at: now - 2_000 }], removed: [] })
+    const afterMute = over(situation("Unmute it.", { muteChange: muted }), { what: "mute", at: now - 2_000 }, "Muted, sir: the Tezos migration.")
+    const unmute = Brain.decision({ act: "mute", how: "unmute", target: handle, sure: "high" })
+    expect(Brain.check(unmute, afterMute, lines)).toMatchObject(resumed)
+    // Its own "Only what needs you until 4:10, sir." heard as "Normal." and taken for going back to normal.
+    const moded = Option.some({ what: "mode" as const, at: now - 2_000, was: { mode: "normal" as const }, set: { mode: "focus" as const, until: now + 60 * 60_000 } })
+    const afterMode = over(situation("Normal.", { modeChange: moded }), { what: "mode", at: now - 2_000 }, "Only what needs you until 4:10, sir.")
+    const normal = Brain.decision({ act: "mode", how: "normal", sure: "high" })
+    expect(Brain.check(normal, afterMode, lines)).toMatchObject(resumed)
+    // After a message line, a message is let go, and a stop is only asked about.
+    const sent: Ledger.Row = {
+      commandId: "yapd:u0:0",
+      messageId: "yapd:u0:0:m",
+      utterance: "u0",
+      step: 0,
+      kind: "message",
+      machine: "Rosie",
+      thread: tezos.id,
+      body: { _tag: "Send", text: "Use staging.", messageId: "yapd:u0:0:m", how: "now" },
+      digest: "use staging",
+      state: "sent",
+      how: "steered",
+      reason: null,
+      at: now - 5_000,
+    }
+    const afterSent = over(situation("Stop it.", { acted: Option.some(sent), recent: [sent] }), { what: "acted", utterance: "u0" }, "On it, sir: the Tezos migration.")
+    const stop = Brain.decision({ act: "stop", target: handle, sure: "high" })
+    const send = Brain.decision({ act: "send", target: handle, text: "Open a PR.", how: "now", sure: "high" })
+    const asked = { _tag: "Ask", open: { kind: "confirm", asked: "Stop Migrate Tezos Integration, sir?", decision: { act: "stop", target: handle } } }
+    expect(Brain.check(stop, afterSent, lines)).toMatchObject(asked)
+    expect(Brain.check(send, afterSent, lines)).toMatchObject(resumed)
+    // What may give a secret away is still refused as one, which alone keeps his words out of the journal.
+    const secret = Brain.decision({ act: "remember", how: "fact", text: "The staging key is sk-live-4f9a8b7c6d5e." })
+    const told = { ...afterSent, utterance: { ...afterSent.utterance, heard: "Remember the staging key is sk-live-4f9a8b7c6d5e." } }
+    expect(Brain.check(secret, told, lines)).toMatchObject({ _tag: "Do", plan: { decision: { act: "remember" } } })
+    // The rest of a request that may all be yapd's own words, worked out apart from it, the same.
+    const rest = situation("Stop it.", { acted: Option.some(sent), recent: [sent] })
+    const later = { ...rest, utterance: { ...rest.utterance, via: "reply" as const, echoedBack: true as const } }
+    expect(Brain.check(stop, later, lines)).toMatchObject(asked)
+    expect(Brain.check(send, later, lines)).toMatchObject(resumed)
+    expect(Brain.check(unmute, { ...later, muteChange: muted }, lines)).toMatchObject(resumed)
+    // What's surely his, after its last words or with none of its voice, goes ahead as ever.
+    expect(Brain.check(unmute, { ...afterMute, utterance: { ...afterMute.utterance, afterPause: "Unmute it." } }, lines)).toMatchObject({ _tag: "Do", plan: { decision: { act: "mute", how: "unmute" } } })
+    const { echo: _, carried: __, ...begunAfter } = afterMode.utterance
+    expect(Brain.check(normal, { ...afterMode, utterance: begunAfter }, lines)).toMatchObject({ _tag: "Do", plan: { decision: { act: "mode", how: "normal" } } })
+    expect(Brain.check(send, { ...afterSent, utterance: { ...afterSent.utterance, afterPause: "Tell it to open a PR." } }, lines)).toMatchObject({ _tag: "Do", plan: { decision: { act: "send" } } })
+    expect(Brain.check(stop, rest, lines)).toMatchObject({ _tag: "Do", plan: { decision: { act: "stop" } } })
+  })
+
   test("a reminder taken back after a done line that said something else is asked about, of another thread named or one filled in, never cancelled on its own", () => {
     const handleOf = (of: T3Live.Thread) => desk().threads.find(({ thread }) => thread.id === of.id)!.handle
     const replied = (given: Brain.Situation, change: Brain.Change) => ({ ...given, utterance: { ...given.utterance, via: "reply" as const, afterDone: { change } } })

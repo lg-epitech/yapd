@@ -66,6 +66,12 @@ export interface Utterance {
    */
   readonly afterDone?: Brain.Done
   /**
+   * For the rest of a request, whether what came before it in the same
+   * breath was said back to a "done" line with nothing in it surely his: it
+   * may all be yapd's own words, so nothing of the rest is done either.
+   */
+  readonly echoedBack?: true
+  /**
    * With `echo`, the routines whose steps what yapd was saying holds, as code
    * put them in, like an offer of one read as it comes due: a model is only
    * ever told of what it was saying by their names.
@@ -2326,9 +2332,15 @@ export const make = (options: {
      */
     const rest = (thought: Thought, first: Outcome, on: Option.Option<Threads.Ref>, step: number, said: Lines): Effect.Effect<Outcome> =>
       Effect.gen(function* () {
-        // What he went on to say after, which yapd's own voice was never in, nor said back to the line before.
+        // What he went on to say after, which yapd's own voice was never in, nor said back to the line before; but when all he said may be
+        // yapd's own words said back to a "done" line, so may the rest, and nothing of it is done.
         const { echo: _, afterPause: __, echoRoutines: ___, carried: ____, afterDone: _____, ...before } = thought.utterance
-        const utterance: Utterance = { ...before, heard: thought.decision.rest, whole: thought.utterance.whole ?? ownWords(thought.utterance) }
+        const utterance: Utterance = {
+          ...before,
+          heard: thought.decision.rest,
+          whole: thought.utterance.whole ?? ownWords(thought.utterance),
+          ...(Brain.mayBeOwn(thought.utterance) ? { echoedBack: true as const } : {}),
+        }
         yield* Effect.logInfo(`Then: ${logged(utterance.heard)}`)
         // Working it out has no effect, so it carries on whether or not what's said waits for it, until yapd is turned off, which stops it like the rest of the request.
         // "It" is the step before as it'll be said, part of catching up when that is, so what the rest comes to is too, however late it's said,
@@ -3990,20 +4002,20 @@ export const make = (options: {
       said: Lines,
       at: Stepping = { step: 0, twice: false },
     ): Effect.Effect<Outcome> => {
-      // A take-back said back to a "done" line that may be yapd's own words is only ever asked about, or let go, which is logged so how
-      // often that happens can be counted.
+      // Anything he'd only do on his word, said back to a "done" line in what may all be yapd's own words, or in the rest of what was, is
+      // only ever asked about, or let go, which is logged so how often that happens can be counted.
       const echoed = Brain.echoedBack(thought.decision, thought.utterance)
       switch (checked._tag) {
         case "Say":
           return Effect.succeed(unfinished(reply(checked.spoken, thought.subject), thought.decision.rest, said, thought.situation.desk))
         case "Ask":
           return Effect.zipRight(
-            echoed ? Effect.logInfo(`Asking rather than taking anything back, since ${quoted(thought.utterance.heard)} may have been my own voice, sure ${thought.decision.sure}`) : Effect.void,
+            echoed ? Effect.logInfo(`Asking rather than acting on it, since ${quoted(thought.utterance.heard)} may have been my own voice, sure ${thought.decision.sure}`) : Effect.void,
             Effect.map(opening(checked.open, thought.utterance), (outcome) => listing(outcome, checked.open)),
           )
         case "Do":
           if (echoed && checked.plan.decision.act === "resume") {
-            return Effect.as(Effect.logInfo(`Not taking anything back, since ${quoted(thought.utterance.heard)} may have been my own voice`), quiet(thought.subject))
+            return Effect.as(Effect.logInfo(`Not acting on it, since ${quoted(thought.utterance.heard)} may have been my own voice`), quiet(thought.subject))
           }
           // Taking back the step a "done" line said, said back to it, is that step alone, whatever's written before it's done.
           return perform(checked.plan, thought, said, checked.plan.pinned === undefined ? at : { ...at, pinned: checked.plan.pinned })

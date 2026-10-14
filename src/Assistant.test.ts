@@ -4740,6 +4740,35 @@ describe("Assistant", () => {
     expect(result.muted).toEqual([`t3:Rosie:${tezos.id}`])
   })
 
+  test("the rest of a request said back to a done line in what may all be yapd's own words is never done, and is logged, but goes on what's surely his", async () => {
+    const said = (afterPause?: string) => {
+      const logged: Array<string> = []
+      const logger = Logger.make(({ message }) => {
+        logged.push((Array.isArray(message) ? message : [message]).join(" "))
+      })
+      return run(
+        Effect.gen(function* () {
+          const { dictate, followUp, notices, dispatched } = yield* assistant((situation) => {
+            const { heard } = situation.utterance
+            if (heard.startsWith("Tell the Tesla")) return tezosMessage("high")(situation)
+            // Its own "On it." heard ahead of more, which the model splits off as the rest.
+            if (heard.startsWith("On it")) return Brain.decision({ act: "dismiss", rest: "tell the Mina one to add tests" })
+            return Brain.decision({ act: "send", target: handle(situation, mina), text: "Add tests.", how: "now" })
+          })
+          yield* dictate("Tell the Tesla's migration to use the fee table from the Mina work.")
+          const over = "On it, sir: the Tezos migration."
+          yield* followUp("On it. Tell the Mina one to add tests.", 2, notices().findLast(({ kind }) => kind === "done"), over, afterPause, undefined, true)
+          return { sent: dispatched.filter(({ type }) => type === "message.dispatch").map(({ text }) => text), logged }
+        }).pipe(Effect.provide(Logger.replace(Logger.defaultLogger, logger))),
+      )
+    }
+    const echoed = await said()
+    expect(echoed.sent).toEqual(["Use the fee table from the Mina work."])
+    expect(echoed.logged).toContain(`Not acting on it, since "tell the Mina one to add tests" may have been my own voice`)
+    // What he said after a pause is surely his: the rest goes.
+    expect((await said("Tell the Mina one to add tests.")).sent).toEqual(["Use the fee table from the Mina work.", "Add tests."])
+  })
+
   /** Takes each message in behind the turn under way, in a run of its own, as T3 Code queues it, so any can be withdrawn. */
   const queues: Answer = (payload, bounded) =>
     Effect.sync(() => {
