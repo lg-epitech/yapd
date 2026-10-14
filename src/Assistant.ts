@@ -533,6 +533,14 @@ const unaskedAfter = (open: Pick<Open, "kind" | "about" | "decision" | "candidat
       ? "I didn't ask about sending it again"
       : `I didn't ask whether to ${open.about}`
 
+/**
+ * What's said of a question never asked, or let go unanswered: of an offer to
+ * send a message again, it says the message may not have gone without its
+ * words, so nothing said after it is listened for, since "send it again",
+ * his likely reply, the model could only send as it is.
+ */
+const withoutWords = (outcome: Outcome, open: Pick<Open, "kind">): Outcome => (open.kind === "resend" ? { ...outcome, unsent: true } : outcome)
+
 /** The thread a yes or no question, or a thread's own, is about, which it names, so what's said once it's answered needn't name it again. */
 const askedAbout = (open: Pick<Open, "kind" | "candidates">) =>
   Brain.yesNo(open.kind) || open.kind === "question" ? Option.fromNullable(open.candidates[0]) : Option.none<Threads.Ref>()
@@ -1353,7 +1361,7 @@ export const make = (options: {
                 : Brain.yesNo(open.kind)
                   ? `I didn't ask whether to ${open.about}, ${waiting}${addressed(said)}.`
                   : unasked(open.about, said)
-          return unfinished(ofRoutines(reply(left, { _tag: "Nothing" }), askedRoutines(open)), open.decision.rest, said)
+          return unfinished(withoutWords(ofRoutines(reply(left, { _tag: "Nothing" }), askedRoutines(open)), open), open.decision.rest, said)
         }
         if (asking !== undefined) yield* close(asking.open, "replaced")
         const at = yield* Clock.currentTimeMillis
@@ -1392,7 +1400,7 @@ export const make = (options: {
           return yield* offering
         }
         yield* letBe(from)
-        const left = ofRoutines(regarding(Brain.dropped(open, said), open.kind === "question" ? askedAbout(open) : Option.none()), askedRoutines(open))
+        const left = withoutWords(ofRoutines(regarding(Brain.dropped(open, said), open.kind === "question" ? askedAbout(open) : Option.none()), askedRoutines(open)), open)
         yield* deliver(unfinished(left, open.decision.rest, said), { id: open.utterance, turns })
         yield* offering
       })
@@ -3942,7 +3950,7 @@ export const make = (options: {
           // What a thread waits on him for is asked after instead, so there's nothing to tell him of it now.
           if (requestOf(open) !== undefined) return yield* follow(Brain.check(decision, decided.situation, said), decided, said)
           const left = open.news === undefined ? Brain.left(open, said) : `${open.news} ${unaskedAfter(open)}, since you'd moved on.`
-          yield* deliver(unfinished(ofRoutines(reply(left, decided.subject), askedRoutines(open)), open.decision.rest, said), decided)
+          yield* deliver(unfinished(withoutWords(ofRoutines(reply(left, decided.subject), askedRoutines(open)), open), open.decision.rest, said), decided)
           return yield* follow(Brain.check(decision, decided.situation, said), decided, said)
         }
         // Saying again just what was asked about, like the same message to the same thread, is a yes to it. To sending one again, whatever
@@ -4361,9 +4369,11 @@ export const make = (options: {
             // An answer can be followed up about what it was about, in the words he heard it in, and what came of something he asked to be
             // done, like "scratch that" right after "On it", from its end only: never one saying a message of his may not have gone, whose
             // "send it again" the model could only send as it is.
-            ...(kind === "answer"
+            ...(outcome.unsent === true
+              ? {}
+              : kind === "answer"
               ? { followUp: followUp(subject, Effect.sync(() => (reworded && instead !== undefined ? instead : outcome.say))) }
-              : kind === "done" && outcome.unsent !== true
+              : kind === "done"
                 ? {
                     followUp: followUp(subject, Effect.sync(() => (reworded && instead !== undefined ? instead : outcome.say))),
                     window: Conversation.linger,

@@ -9933,6 +9933,64 @@ describe("Assistant", () => {
     expect(failed).toEqual({ kind: "done", spoken: "That didn't go to Migrate Tezos Integration, sir: the provider is offline.", listened: false })
   })
 
+  test("an offer to send a message again that's never asked, or let go unanswered, is told with nothing listened for after it", async () => {
+    const failing = (sent: boolean) => ({ answer: () => () => Effect.fail(new T3CodeServer.Trouble({ reason: "T3 Code is taking too long.", sent })) })
+    /** What's said last, and whether what he says after it can go anywhere. */
+    const last = (notices: () => ReadonlyArray<{ readonly spoken: string; readonly followUp?: unknown }>) => {
+      const { spoken, followUp } = notices().at(-1)!
+      return { spoken, listened: followUp !== undefined }
+    }
+    const asked = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(
+          (situation) =>
+            situation.utterance.heard.startsWith("What")
+              ? Brain.decision({ act: "clarify", target: handle(situation, tezos), others: handle(situation, mina), sure: "low" })
+              : tezosMessage("high")(situation),
+          undefined,
+          failing(true),
+        )
+        const said = yield* TestClock.currentTimeMillis
+        yield* made.wait(5)
+        // Asked about something else, then what was said before that was asked is handed on.
+        yield* made.dictate("What's it doing?")
+        yield* made.heard({ heard: "Tell the Tesla's migration to use the fee table from the Mina work.", via: "shortcut", at: said, voiced: 3, turns: 1 })
+        return last(made.notices)
+      }),
+    )
+    expect(asked).toEqual({
+      spoken: "I couldn't confirm it got to Migrate Tezos Integration, sir. I didn't ask about sending it again, since I'm waiting on your answer to something else.",
+      listened: false,
+    })
+    const movedOn = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant((situation) => (situation.utterance.heard.startsWith("What") ? minaStatus(situation) : tezosMessage("high")(situation)), undefined, {
+          waiting: true,
+          ...failing(false),
+        })
+        yield* made.dictate("Tell the Tesla's migration to use the fee table from the Mina work.")
+        // He pressed again before it was asked.
+        yield* made.dictate("What's the Mina one doing?")
+        return made.notices().map(({ spoken, followUp }) => ({ spoken, listened: followUp !== undefined }))
+      }),
+    )
+    expect(movedOn.filter(({ spoken }) => !spoken.endsWith("?"))).toEqual([
+      { spoken: "That didn't get to Migrate Tezos Integration, sir: T3 Code is taking too long. I didn't ask about sending it again, since you'd moved on.", listened: false },
+      { spoken: "The Mina SSV2 tickets are filed, sir: four bugs, and fee rounding is the worst.", listened: true },
+    ])
+    const letGo = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(tezosMessage("high"), undefined, failing(true))
+        yield* made.dictate("Tell the Tesla's migration to use the fee table from the Mina work.")
+        yield* made.unanswered()
+        yield* made.wait(60)
+        yield* made.unanswered()
+        return last(made.notices)
+      }),
+    )
+    expect(letGo).toEqual({ spoken: "I didn't hear back about whether to send that to Migrate Tezos Integration again, so I left it, sir.", listened: false })
+  })
+
   test("an answer can be followed up as anything dictated is, with \"it\" the thread it was about, so a message goes there", async () => {
     const result = await run(
       Effect.gen(function* () {
