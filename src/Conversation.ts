@@ -569,7 +569,8 @@ export const make = (options: {
      * "Mute.": anything else is dropped, but with yapd's own voice maybe in
      * it, and still going as the line ended, it's his reply, run on from
      * that, and given back as said over it. What he began before that and is
-     * still going is handed on as it is.
+     * still going is handed on as it is, to be heard out there, as "Mute."
+     * too.
      */
     const heed = (playback: Playback, ear: Ear, text: string, from: number, through: Effect.Effect<void>, replying = false) =>
       Effect.gen(function* () {
@@ -832,7 +833,7 @@ export const make = (options: {
          * with yapd's own voice maybe in it, what's heard of it is his reply,
          * which its own voice ran into, with the line's words as what may be
          * its own; without, it's someone else's, like a TV's, which nothing
-         * waits for, and it's dropped once it ends.
+         * waits for, and it's dropped once it ends, unless it's "Mute.".
          */
         let carried: "echo" | "other" | undefined
         const { open } = given
@@ -907,12 +908,23 @@ export const make = (options: {
               else yield* startLingering
               break
             case "Utterance": {
-              // Someone else's, begun over the line, is dropped, and the wait carries on.
+              // Someone else's, begun over the line, is dropped, and the wait carries on. Unless it's "Mute.", heard out as over the line:
+              // only what's no longer than that could be, while Whisper can hear, and never waited on longer than it could be heard out in.
               if (carried === "other") {
                 carried = undefined
                 onset = undefined
                 since = undefined
                 echoing = false
+                if (options.off !== undefined && voiced(signal.audio) <= curt && (yield* transcriber.ready)) {
+                  const heard = yield* unlogged(signal.audio).pipe(
+                    Effect.timeout(outburst),
+                    Effect.orElseSucceed(() => ""),
+                  )
+                  if (halted(heard, undefined)) {
+                    yield* options.off
+                    return { _tag: "Finished" } satisfies Outcome
+                  }
+                }
                 break
               }
               const at = stoppedAt ?? playback.duration

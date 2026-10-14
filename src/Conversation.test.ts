@@ -2642,6 +2642,23 @@ describe("A line listened to from its end", () => {
     expect(await after(true)).toEqual({ transcribed: ["the Tezos migration. No."], offered: [{ heard: "the Tezos migration. No.", echo: spoken }], done: true })
   })
 
+  test("'Mute.' begun over its last second, before its last moment, and still going as it ends, turns yapd off with nothing worked out", async () => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        const helper = yield* overHelper([[0.95, "Mute."]], { answer: true, after: true, off: true, spoken: failed })
+        // Once its own voice is learnt, 0.9 s before it ends.
+        yield* helper.wait(9.1)
+        yield* helper.talk(0.95, 14)
+        yield* helper.wait(0.9)
+        yield* helper.finish
+        yield* helper.quiet
+        yield* helper.wait(0.1)
+        return { offs: helper.offs(), offered: helper.offered, done: Option.isSome(yield* Fiber.poll(helper.fiber)) }
+      }),
+    )
+    expect(result).toEqual({ offs: 1, offered: [], done: true })
+  })
+
   test("what he begins as it ends, while what's run once it's said to the end is still running, is his reply, not talk over it", async () => {
     const result = await overHelperScoped(
       Effect.gen(function* () {
