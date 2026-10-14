@@ -686,9 +686,10 @@
     },
     {
       "id": "S48",
-      "note": "catching up over an update: the catch-up, never a write",
-      "update": "tezos",
-      "how": "tied",
+      "note": "catching up over an update from rig, tied by its owner, so the Brain knows rig: the catch-up, never a write",
+      "update": "rig",
+      "how": "owner",
+      "machine": "rig",
       "heard": "Anything else from rig?",
       "expect": { "act": ["catchup"], "never": ["send", "stop", "undo", "decide", "reply", "tidy"] }
     },
