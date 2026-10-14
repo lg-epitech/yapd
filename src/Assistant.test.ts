@@ -4645,7 +4645,7 @@ describe("Assistant", () => {
     expect(result).toEqual(["No., after what it did", "No."])
   })
 
-  test("a bare no is told as said back to what it did only after a line saying what scratch that reaches, never after a mode or a failure said since", async () => {
+  test("a bare no is told as said back to what it did only after a line saying what scratch that reaches, a mode too, never after a failure said since", async () => {
     let failing = false
     const result = await run(
       Effect.gen(function* () {
@@ -4669,7 +4669,7 @@ describe("Assistant", () => {
         yield* dictate("Tell the Tesla's migration to use the fee table from the Mina work.")
         const sent = done()
         yield* wait(40)
-        // A mode changes nothing "scratch that" takes back, so a no after it is never to the message sent a moment before.
+        // A mode is what "scratch that" takes back next, so a no after it is to the mode, never to the message sent a moment before.
         yield* dictate("Focus for two hours.")
         yield* followUp("No.", 1, done())
         failing = true
@@ -4680,7 +4680,37 @@ describe("Assistant", () => {
       }),
     )
     expect(result.spoken.slice(1, 3)).toEqual([Brain.modeLines(lines, now + 40_000).focus(now + 40_000 + 2 * 60 * 60_000), expect.stringContaining("provider is offline")])
-    expect(result.told).toEqual(["No.", "No.", "No., after what it did"])
+    expect(result.told).toEqual(["No., after what it did", "No.", "No., after what it did"])
+  })
+
+  test("scratch that, or a no, right after a mode puts back what it replaced, never withdrawing a message queued before it", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, followUp, notices, wait, spoken, dispatched, modes } = yield* assistant(
+          (situation) =>
+            situation.utterance.heard.startsWith("When")
+              ? Brain.decision({ act: "send", target: handle(situation, tezos), text: "Open a PR.", how: "after" })
+              : Brain.decision({ act: "undo", sure: "high" }),
+          undefined,
+          { modes: true },
+        )
+        const done = () => notices().findLast(({ kind }) => kind === "done")
+        yield* dictate("When it's done, tell the Tesla's migration to open a PR.")
+        yield* wait(40)
+        yield* dictate("Focus for two hours.")
+        yield* followUp("Scratch that.", 1, done())
+        const scratched = (yield* modes!.current).mode.mode
+        yield* wait(5)
+        yield* dictate("Focus for two hours.")
+        yield* followUp("No.", 1, done())
+        return { spoken: spoken().slice(1), scratched, mode: (yield* modes!.current).mode.mode, dispatched: dispatched.map(({ type }) => type) }
+      }),
+    )
+    const focus = (at: number) => Brain.modeLines(lines, at).focus(at + 2 * 60 * 60_000)
+    expect(result.spoken).toEqual([focus(now + 40_000), "Back to normal, sir.", focus(now + 45_000), "Back to normal, sir."])
+    expect([result.scratched, result.mode]).toEqual(["normal", "normal"])
+    // The message stays queued: nothing else went to T3 Code.
+    expect(result.dispatched).toEqual(["message.dispatch"])
   })
 
   test("scratch that after a line where nothing changed, like a mute there already, asks what it would take back, never withdrawing a message sent before", async () => {

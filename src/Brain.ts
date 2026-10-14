@@ -147,9 +147,9 @@ export const changeOf = (noted: Pick<Noted, "kind">): "reminder" | "memory" | "c
  * A change he made that "scratch that" takes back, told apart from any
  * other: what yapd did to threads, by the request it was a step of, every
  * step of which is said in one line, or a reminder, memory or catch-up
- * change or a mute, by when it was made.
+ * change, a mute or a mode, by when it was made.
  */
-export type Change = { readonly what: "acted"; readonly utterance: string } | { readonly what: "noted" | "mute"; readonly at: number }
+export type Change = { readonly what: "acted"; readonly utterance: string } | { readonly what: "noted" | "mute" | "mode"; readonly at: number }
 
 /** Whether two changes are the same one. */
 const same = (one: Change, other: Change) =>
@@ -208,6 +208,8 @@ export interface Situation {
   readonly reading?: ReadonlyArray<Mutes.Reading>
   /** The last change he made to what's muted, or to whose subagents are read, in the last two minutes, which "scratch that" may mean. */
   readonly muteChange: Option.Option<Mutes.Change>
+  /** The last change he asked for to how yapd talks, in the last two minutes, which "scratch that" may mean. */
+  readonly modeChange?: Option.Option<Modes.Change>
   readonly usage: Option.Option<Threads.Usage>
   /** On a second look: what a thread is doing, or what a search found. */
   readonly second: Option.Option<{ readonly ref: Threads.Ref; readonly detail: T3Actions.Detail } | { readonly found: ReadonlyArray<string> }>
@@ -1271,6 +1273,9 @@ export const modeLines = (lines: Lines, now: number) => {
     quiet: (until: number) => `Quiet until ${ends(until, now)}${sir}. Anything that needs you still comes through, and the menu turns me off completely.`,
     brief: `I'll keep it short${sir}.`,
     full: `I'll tell you everything${sir}.`,
+    /** Focus or quiet taken back. */
+    normal: `Back to normal${sir}.`,
+    unchanged: `There's nothing to take back${sir}.`,
     nothing: `Nothing came in while you were away${sir}.`,
     /** What came in couldn't be put into words, so he's told how to hear it. */
     unbriefed: `Some things came in while you were away, but I couldn't sum them up just now${sir}. Ask me what you missed.`,
@@ -1281,6 +1286,16 @@ export const modeLines = (lines: Lines, now: number) => {
       return { news: `${over}${sir}. ${capital(count(held))} ${held === 1 ? "thing" : "things"} came in.`, question: "Want the rundown?" }
     },
   }
+}
+
+/** What's said once the last change he asked for to how yapd talks is taken back: what's on now, plainly, or that there was nothing to take back. */
+export const modeTakenBack = (lines: Lines, undone: Option.Option<Modes.Change>, now: number) => {
+  const told = modeLines(lines, now)
+  if (Option.isNone(undone)) return told.unchanged
+  const change = undone.value
+  if (change.what === "detail") return change.set === "brief" ? told.brief : told.full
+  const { mode, until } = change.set
+  return mode === "focus" ? told.focus(until ?? now) : mode === "quiet" ? told.quiet(until ?? now) : told.normal
 }
 
 /** How many updates and notices there are, as it's said, like "four updates". */
@@ -1837,12 +1852,13 @@ const glimpsed = (situation: Situation, lines: Lines): Decision | undefined => {
   if (stopping.has(said) && Option.isSome(on) && stoppable(on.value) && !optioned) {
     return decision({ act: "stop", target: on.value.handle, pending: replacing })
   }
-  // With a question open, "cancel that" is a no to it. Otherwise it takes back the newest change he made: a mute, a reminder he set or
-  // cancelled, a memory he had kept or forgotten, the catch-up he cleared, or whatever else yapd last did. Said back to a "done" line,
-  // only what that line said it changed: anything else, changed before it or since, is the model's.
+  // With a question open, "cancel that" is a no to it. Otherwise it takes back the newest change he made: a mute, a mode, a reminder he
+  // set or cancelled, a memory he had kept or forgotten, the catch-up he cleared, or whatever else yapd last did. Said back to a "done"
+  // line, only what that line said it changed: anything else, changed before it or since, is the model's.
   const latest = reached(situation)
   const scratched = scratching.has(said) && Option.isNone(open) && owned(situation, latest)
   if (scratched && latest?.what === "mute") return decision({ act: "mute", how: "undo" })
+  if (scratched && latest?.what === "mode") return decision({ act: "mode", how: "undo" })
   if (scratched && latest?.what === "noted") {
     return decision({ act: "undo", how: Option.match(situation.noted ?? Option.none(), { onNone: () => "reminder", onSome: changeOf }) })
   }
@@ -1944,20 +1960,21 @@ const glimpsed = (situation: Situation, lines: Lines): Decision | undefined => {
 /**
  * The newest change he made that "scratch that" or "undo that" can take
  * back, of those in the last two minutes, told apart from any other: a
- * mute, a reminder he set or cancelled, or whatever else yapd did for him,
- * as the ledger has it. Made at the same time, a mute or a reminder is
- * taken for the later, as it's noted once what it went with is done. With
- * the thread the model took him to name, `on`, only what was changed of
- * that thread, so what he names is never left for a change made since of
- * another.
+ * mute, a mode, a reminder he set or cancelled, or whatever else yapd did
+ * for him, as the ledger has it. Made at the same time, a mute or a
+ * reminder is taken for the later, as it's noted once what it went with is
+ * done. With the thread the model took him to name, `on`, only what was
+ * changed of that thread, so what he names is never left for a change made
+ * since of another, nor for a mode, which is of none.
  */
-export const reached = (situation: Pick<Situation, "acted" | "muteChange" | "noted">, on?: Threads.Ref): Change | undefined => {
+export const reached = (situation: Pick<Situation, "acted" | "muteChange" | "noted" | "modeChange">, on?: Threads.Ref): Change | undefined => {
   const of = (ref: Threads.Ref | undefined) => on === undefined || (ref !== undefined && Threads.same(ref, on))
   const muted = (change: Mutes.Change) =>
     on === undefined || [...change.added, ...change.removed, ...(change.read ?? []), ...(change.unread ?? [])].some(({ key }) => key === Mutes.key.thread(on))
   const changes: ReadonlyArray<{ readonly change: Change; readonly at: number }> = [
     ...Option.toArray(Option.map(Option.filter(situation.noted ?? Option.none(), ({ about }) => of(Option.getOrUndefined(about))), ({ at }) => ({ change: { what: "noted" as const, at }, at }))),
     ...Option.toArray(Option.map(Option.filter(situation.muteChange, muted), ({ at }) => ({ change: { what: "mute" as const, at }, at }))),
+    ...Option.toArray(Option.map(Option.filter(situation.modeChange ?? Option.none(), () => on === undefined), ({ at }) => ({ change: { what: "mode" as const, at }, at }))),
     ...Option.toArray(
       Option.map(Option.filter(situation.acted, ({ machine, thread }) => of({ machine, id: thread })), ({ utterance, at }) => ({ change: { what: "acted" as const, utterance }, at })),
     ),
@@ -1966,7 +1983,7 @@ export const reached = (situation: Pick<Situation, "acted" | "muteChange" | "not
 }
 
 /** What the newest change he made that "scratch that" or "undo that" can take back is, as `reached` finds it. */
-export const newest = (situation: Pick<Situation, "acted" | "muteChange" | "noted">, on?: Threads.Ref) => reached(situation, on)?.what
+export const newest = (situation: Pick<Situation, "acted" | "muteChange" | "noted" | "modeChange">, on?: Threads.Ref) => reached(situation, on)?.what
 
 /**
  * Whether taking back `change` takes back what the "done" line he's
@@ -2947,7 +2964,8 @@ const checking = (choice: Decision, situation: Situation, lines: Lines): Checked
     case "mode":
       // Said over something, too little speech is talk or noise nearby, never something to do.
       if (murmured(choice, situation.utterance)) return doing({ decision: { ...choice, act: "resume" }, target: Option.none() })
-      if (!modes.has(choice.how)) return { _tag: "Say", spoken: lines.cantTell }
+      // Taking back the last change he asked for, as "scratch that" right after it does.
+      if (!modes.has(choice.how) && choice.how !== "undo") return { _tag: "Say", spoken: lines.cantTell }
       // About yapd alone, never a thread.
       return doing({ decision: { ...choice, target: "" }, target: Option.none() })
     case "mute":
@@ -3213,6 +3231,23 @@ const takingBack = (
     return listed === undefined ? (situation.archived ?? []).find((one) => Threads.same(one.ref, ref))?.called : named(listed, desk.threads)
   }
   switch (change.what) {
+    case "mode": {
+      const moded = Option.getOrUndefined(situation.modeChange ?? Option.none())
+      if (moded === undefined) return undefined
+      // What it replaced, unless that would have ended on its own by now, as taking it back puts it.
+      const back = moded.what === "detail" || (moded.was.until !== undefined && moded.was.until <= situation.now) ? "normal" : moded.was.mode
+      const doing =
+        moded.what === "detail"
+          ? moded.was === "full"
+            ? "tell you everything again"
+            : "keep it short again"
+          : back !== "normal"
+            ? `turn ${back} back on`
+            : moded.set.mode !== "normal"
+              ? `turn ${moded.set.mode} off`
+              : "go back to normal"
+      return { doing, decision: decision({ act: "mode", how: "undo" }), candidates: [] }
+    }
     case "mute": {
       const muted = Option.getOrUndefined(situation.muteChange)
       if (muted === undefined) return undefined
@@ -4274,7 +4309,7 @@ export const prompt = (situation: Situation, style: Option.Option<string>) => {
             : yesNo(open.kind)
               ? `\nWhat a yes does: "${open.decision.act}"${open.decision.act !== "send" ? "" : open.routine === undefined ? ` with the message ${fenced(open.decision.text, 400)}` : ` with ${byName([open.routine])}`}${
                   open.decision.act === "mode"
-                    ? ` with "how" "${open.decision.how}", which gives him the catch-up`
+                    ? ` with "how" "${open.decision.how}"${open.decision.how === "undo" ? "" : ", which gives him the catch-up"}`
                     : open.decision.act === "undo" || open.decision.act === "mute"
                       ? ` with "how" "${open.decision.how}"`
                       : open.decision.act === "catchup"

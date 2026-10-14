@@ -27,6 +27,18 @@ export interface State {
   readonly detail: Detail
 }
 
+/**
+ * A change he asked for to how yapd talks, which "scratch that" takes back:
+ * the mode it set, and the one it replaced, with when that was to end, or
+ * how much of an update is said, and how much was.
+ */
+export type Change =
+  | { readonly at: number; readonly what: "mode"; readonly was: Mode; readonly set: Mode }
+  | { readonly at: number; readonly what: "detail"; readonly was: Detail; readonly set: Detail }
+
+/** How long a change he asked for can be taken back for, as for anything else yapd did. */
+const takeBack = 2 * 60_000
+
 const Stored = Schema.parseJson(
   Schema.Struct({
     mode: Schema.Literal("normal", "focus", "quiet"),
@@ -81,9 +93,25 @@ export interface Modes {
   /** Focus or quiet, while one holds. */
   readonly holding: Effect.Effect<Option.Option<Hold>>
   readonly detail: Effect.Effect<Detail>
-  /** Changes the mode, ending at `until` if it's to come within a day, or else when its default says, and gives what it was. */
-  readonly set: (mode: Mode["mode"], until?: number) => Effect.Effect<{ readonly was: Mode; readonly now: Mode }>
-  readonly setDetail: (detail: Detail) => Effect.Effect<void>
+  /**
+   * Changes the mode, ending at `until` if it's to come within a day, or
+   * else when its default says, and gives what it was. `asked` when he
+   * asked for it himself, which "scratch that" then takes back.
+   */
+  readonly set: (mode: Mode["mode"], until?: number, asked?: boolean) => Effect.Effect<{ readonly was: Mode; readonly now: Mode }>
+  /** Changes how much of an update is said, `asked` as for `set` when it changes it. */
+  readonly setDetail: (detail: Detail, asked?: boolean) => Effect.Effect<void>
+  /** The last change he asked for, in the last two minutes: kept in memory only, so a restart forgets it. */
+  readonly last: Effect.Effect<Option.Option<Change>>
+  /**
+   * Takes back the last change he asked for, in the last two minutes, while
+   * it's still what's set: never one the menu, or its time running out, has
+   * changed since. Puts back the mode it replaced, or normal once that would
+   * have ended by now, or how much of an update was said. Taken back, it's a
+   * change of its own, so taking that back too puts it as it was. Gives back
+   * that change, or none when there's nothing to take back.
+   */
+  readonly undo: Effect.Effect<Option.Option<Change>>
   /** When he was last briefed on what was held, which the digest counts from. */
   readonly briefedAt: Effect.Effect<number>
   /** He was briefed on what was held until `at`, or offered it, just now when not said: never earlier than before. */
@@ -104,29 +132,54 @@ export const make = (options: { readonly settings: Settings.Settings["Type"]; re
     let briefedAt = Option.getOrElse(number(yield* read("briefedAt")), () => 0)
     const state = yield* SubscriptionRef.make<State>({ mode, detail })
     const current = SubscriptionRef.get(state)
+    /** The last change he asked for, which "scratch that" takes back. */
+    let last: Change | undefined
+    const lately = Effect.map(Clock.currentTimeMillis, (now) => Option.filter(Option.fromNullable(last), ({ at }) => now - at <= takeBack))
+    const set: Modes["set"] = (mode, until, asked) =>
+      Effect.gen(function* () {
+        const now = yield* Clock.currentTimeMillis
+        const was = (yield* current).mode
+        // Going from focus to quiet, what was held during focus is still held, for the rundown once quiet ends.
+        const next: Mode = mode === "normal" ? { mode } : { mode, until: ending(mode, until, now), since: Option.isSome(holds(was, now)) ? (was.since ?? now) : now }
+        yield* SubscriptionRef.update(state, (before) => ({ ...before, mode: next }))
+        yield* keep("mode", JSON.stringify(next))
+        yield* journal.write({ at: now, kind: "action", detail: { mode: next.mode, ...(next.until === undefined ? {} : { until: next.until }) } })
+        yield* Effect.logInfo(next.mode === "normal" ? "Back to normal" : `${next.mode === "focus" ? "Focus" : "Quiet"} until ${new Date(next.until ?? now).toISOString()}`)
+        if (asked === true) last = { at: now, what: "mode", was, set: next }
+        return { was, now: next }
+      })
+    const setDetail: Modes["setDetail"] = (detail, asked) =>
+      Effect.gen(function* () {
+        const now = yield* Clock.currentTimeMillis
+        const was = (yield* current).detail
+        yield* SubscriptionRef.update(state, (before) => ({ ...before, detail }))
+        yield* keep("detail", detail)
+        yield* journal.write({ at: now, kind: "action", detail: { detail } })
+        if (asked === true && was !== detail) last = { at: now, what: "detail", was, set: detail }
+      })
     const modes: Modes = {
       current,
       changes: state.changes,
       holding: Effect.flatMap(current, ({ mode }) => Effect.map(Clock.currentTimeMillis, (now) => holds(mode, now))),
       detail: Effect.map(current, ({ detail }) => detail),
-      set: (mode, until) =>
-        Effect.gen(function* () {
-          const now = yield* Clock.currentTimeMillis
-          const was = (yield* current).mode
-          // Going from focus to quiet, what was held during focus is still held, for the rundown once quiet ends.
-          const next: Mode = mode === "normal" ? { mode } : { mode, until: ending(mode, until, now), since: Option.isSome(holds(was, now)) ? (was.since ?? now) : now }
-          yield* SubscriptionRef.update(state, (before) => ({ ...before, mode: next }))
-          yield* keep("mode", JSON.stringify(next))
-          yield* journal.write({ at: now, kind: "action", detail: { mode: next.mode, ...(next.until === undefined ? {} : { until: next.until }) } })
-          yield* Effect.logInfo(next.mode === "normal" ? "Back to normal" : `${next.mode === "focus" ? "Focus" : "Quiet"} until ${new Date(next.until ?? now).toISOString()}`)
-          return { was, now: next }
-        }),
-      setDetail: (detail) =>
-        Effect.gen(function* () {
-          yield* SubscriptionRef.update(state, (before) => ({ ...before, detail }))
-          yield* keep("detail", detail)
-          yield* journal.write({ at: yield* Clock.currentTimeMillis, kind: "action", detail: { detail } })
-        }),
+      set,
+      setDetail,
+      last: lately,
+      undo: Effect.gen(function* () {
+        const change = Option.getOrUndefined(yield* lately)
+        if (change === undefined) return Option.none()
+        const { mode, detail } = yield* current
+        if (change.what === "detail") {
+          if (detail !== change.set) return Option.none()
+          yield* setDetail(change.was, true)
+          return Option.fromNullable(last)
+        }
+        if (mode.mode !== change.set.mode || mode.until !== change.set.until) return Option.none()
+        // What it replaced, unless that would have ended on its own by now.
+        const back: Mode = Option.isSome(holds(change.was, yield* Clock.currentTimeMillis)) ? change.was : { mode: "normal" }
+        yield* set(back.mode, back.until, true)
+        return Option.fromNullable(last)
+      }),
       briefedAt: Effect.sync(() => briefedAt),
       briefed: (at) =>
         Effect.flatMap(at === undefined ? Clock.currentTimeMillis : Effect.succeed(at), (at) =>

@@ -203,8 +203,8 @@ export const serve = Effect.gen(function* () {
     },
     holding: modes.holding,
     detail: modes.detail,
-    // "Focus", "talk shorter" or "I'm back" said over an update, in so many words: done here, never sent to the agent. Back, what was
-    // held is told right after, as an answer.
+    // "Focus", "talk shorter" or "I'm back" said over an update, in so many words: done here, never sent to the agent, and what "scratch
+    // that" takes back next, as by the shortcut. Back, what was held is told right after, as an answer.
     command: (heard, asks) =>
       Option.map(modeCommand(heard, asks), ({ how, minutes }) =>
         Effect.gen(function* () {
@@ -213,16 +213,16 @@ export const serve = Effect.gen(function* () {
           switch (how) {
             case "focus":
             case "quiet": {
-              const { now: mode } = yield* modes.set(how, minutes === undefined ? undefined : now + minutes * 60_000)
+              const { now: mode } = yield* modes.set(how, minutes === undefined ? undefined : now + minutes * 60_000, true)
               const ends = mode.until ?? Modes.ending(how, undefined, now)
               return how === "focus" ? told.focus(ends) : told.quiet(ends)
             }
             case "brief":
             case "full":
-              yield* modes.setDetail(how)
+              yield* modes.setDetail(how, true)
               return how === "brief" ? told.brief : told.full
             case "normal":
-              if ((yield* modes.current).mode.mode !== "normal") yield* modes.set("normal")
+              if ((yield* modes.current).mode.mode !== "normal") yield* modes.set("normal", undefined, true)
               yield* Effect.flatten(Deferred.await(welcome))
               return ""
           }

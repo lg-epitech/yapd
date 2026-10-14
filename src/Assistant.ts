@@ -61,8 +61,8 @@ export interface Utterance {
    * reaches, if any, like the message of "On it, sir: the Tezos
    * migration.": a bare no to it is most likely to that. Nothing else, made
    * before it or since, nor anything after a line that changed nothing
-   * "scratch that" reaches, like a mode, something that didn't go, or what
-   * went by a hook, is taken back without the model.
+   * "scratch that" reaches, like something that didn't go, or what went by
+   * a hook, is taken back without the model.
    */
   readonly afterDone?: Brain.Done
   /**
@@ -355,9 +355,9 @@ export interface Outcome {
    * `Brain.reached` tells it, when it says one: a step done to a thread that
    * taking back acts on, like a message sent or queued, a stop, the word to
    * carry on or a tidy, new work started, a reminder set or cancelled, a
-   * memory kept or forgotten, the catch-up cleared or a mute. Never a mode,
-   * nothing changed, like a mute there already, something that didn't go,
-   * nor what taking back does nothing to, like a message withdrawn or an
+   * memory kept or forgotten, the catch-up cleared, a mute or a mode. Never
+   * nothing changed, like a mute there already, nor something that didn't
+   * go, nor what taking back does nothing to, like a message withdrawn or an
    * answer to a thread's question. Said in one line, the newest of them.
    */
   readonly changed?: Brain.Change
@@ -1195,7 +1195,7 @@ export const make = (options: {
         const pending = Option.match(open, { onNone: () => [], onSome: ({ candidates }) => candidates })
         // A reply is about what he just heard, which is on the desk already.
         const found = utterance.via === "reply" ? [] : yield* searching(utterance.heard)
-        const [shortlist, recent, spoke, usage, asked, coming, acted, mutes, muteChange, mode, reminders, kept, written, reading, tidied] = yield* Effect.all([
+        const [shortlist, recent, spoke, usage, asked, coming, acted, mutes, muteChange, mode, modeChange, reminders, kept, written, reading, tidied] = yield* Effect.all([
           threads.desk(focus, pending, utterance.via === "reply" ? desk.reply : desk.asked, found, desk.named, utterance.heard),
           // Never what was held for later, which he was never told.
           journal.since(now - lately.span, { most: 2 * lately.most, kinds: ["update", "reply", "dictation", "answer", "started", "notice", "sent", "action", "brief"], held: false }),
@@ -1208,6 +1208,7 @@ export const make = (options: {
           options.mutes?.list ?? Effect.succeed<ReadonlyArray<Mutes.Mute>>([]),
           options.mutes?.last ?? Effect.succeedNone,
           options.modes === undefined ? Effect.succeedNone : Effect.map(options.modes.current, Option.some),
+          options.modes?.last ?? Effect.succeedNone,
           options.reminders?.pending ?? Effect.succeed<ReadonlyArray<Reminders.Reminder>>([]),
           options.memories?.list ?? Effect.succeed<ReadonlyArray<Memory.Memory>>([]),
           options.routines ?? Effect.succeed<ReadonlyArray<Preferences.Routine>>([]),
@@ -1249,6 +1250,7 @@ export const make = (options: {
           mutes,
           ...(reading.length === 0 ? {} : { reading }),
           muteChange,
+          modeChange,
           usage,
           second: Option.none(),
           asked,
@@ -3137,7 +3139,9 @@ export const make = (options: {
     /**
      * Changes how yapd talks, and says so: focus or quiet until when, short or
      * full updates, or back to normal, which gives him what was held for
-     * later at once. "It" stays what it was. Never anything sent to a thread.
+     * later at once, or takes back the last change he asked for, saying what's
+     * on now. "It" stays what it was. Never anything sent to a thread. Each
+     * is what "scratch that" takes back next.
      */
     const moding = (plan: Brain.Plan, thought: Thought, said: Lines) =>
       Effect.gen(function* () {
@@ -3145,28 +3149,37 @@ export const make = (options: {
         if (modes === undefined) return reply(Brain.notYet(said), thought.subject)
         const now = yield* Clock.currentTimeMillis
         const told = Brain.modeLines(said, now)
-        const stays = (line: string): Outcome => ({
-          say: line,
-          subject: thought.subject._tag === "Session" ? { ...thought.subject, said: line } : { _tag: "Answer", said: line, about: Brain.about(thought.subject) },
-          kind: "done",
-        })
+        /** Said as what it changed, when it changed anything, which "scratch that" takes back. */
+        const stays = (line: string, changed: boolean) =>
+          Effect.map(changed ? modes.last : Effect.succeedNone, (last): Outcome => ({
+            say: line,
+            subject: thought.subject._tag === "Session" ? { ...thought.subject, said: line } : { _tag: "Answer", said: line, about: Brain.about(thought.subject) },
+            kind: "done",
+            ...Option.match(last, { onNone: () => ({}), onSome: ({ at }) => ({ changed: { what: "mode", at } satisfies Brain.Change }) }),
+          }))
         const { how, when } = plan.decision
         switch (how) {
           case "focus":
           case "quiet": {
             // A time that's gone or can't be read is the mode's own default, which is said.
-            const { now: mode } = yield* modes.set(how, Mutes.ending(when, now))
+            const { now: mode } = yield* modes.set(how, Mutes.ending(when, now), true)
             const ends = mode.until ?? Modes.ending(how, undefined, now)
-            return stays(how === "focus" ? told.focus(ends) : told.quiet(ends))
+            return yield* stays(how === "focus" ? told.focus(ends) : told.quiet(ends), true)
           }
           case "brief":
-          case "full":
-            yield* modes.setDetail(how)
-            return stays(how === "brief" ? told.brief : told.full)
+          case "full": {
+            const was = yield* modes.detail
+            yield* modes.setDetail(how, true)
+            return yield* stays(how === "brief" ? told.brief : told.full, was !== how)
+          }
+          case "undo": {
+            const undone = yield* modes.undo
+            return yield* stays(Brain.modeTakenBack(said, undone, now), Option.isSome(undone))
+          }
           case "rundown":
             return yield* rundown(thought.situation.desk, thought.situation.missed.spoke, said)
           default: {
-            if ((yield* modes.current).mode.mode !== "normal") yield* modes.set("normal")
+            if ((yield* modes.current).mode.mode !== "normal") yield* modes.set("normal", undefined, true)
             return yield* rundown(thought.situation.desk, thought.situation.missed.spoke, said)
           }
         }
@@ -3743,10 +3756,11 @@ export const make = (options: {
      * cancelled, of the thread he named if he did and it's of one, and
      * nothing else then; what he just had kept in mind or forgotten, and
      * nothing else then; what yapd last did to a thread, a message or a
-     * stop, of the thread he named if he did, never a reminder, a memory or
-     * a mute made since; and for no more than "scratch that", the newest
-     * change he made, whatever thread the model filled in, so a message sent
-     * a minute before a reminder is never withdrawn in its place. Reminders
+     * stop, of the thread he named if he did, never a reminder, a memory, a
+     * mute or a mode made since; and for no more than "scratch that", the
+     * newest change he made, whatever thread the model filled in, so a
+     * message sent a minute before a reminder or focus is never withdrawn in
+     * its place. Reminders
      * an archive just dropped come back with the thread, as taking that back
      * brings both, never as a reminder he set or cancelled before it: of the
      * thread he named, on the desk or by its handle in ARCHIVED, that thread
@@ -3804,6 +3818,10 @@ export const make = (options: {
         if (latest === "mute" && options.controls !== undefined) {
           const mute = { ...plan, decision: { ...plan.decision, act: "mute" as const, how: "undo" } }
           return yield* Effect.flatMap(muting(mute, thought, said), (outcome) => onward(thought, outcome, Brain.about(outcome.subject), at.step + 1, said))
+        }
+        if (latest === "mode" && options.modes !== undefined) {
+          const mode = { ...plan, decision: { ...plan.decision, act: "mode" as const, how: "undo" } }
+          return yield* Effect.flatMap(moding(mode, thought, said), (outcome) => onward(thought, outcome, Brain.about(outcome.subject), at.step + 1, said))
         }
         // Every thread a tidy just did, only when the model's sure he means all of it, as for "scratch that": never on a guess.
         if (latest === "acted" && Option.exists(situation.acted, ({ kind }) => kind === "tidy") && plan.decision.sure !== "high") return unsure()

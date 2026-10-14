@@ -86,6 +86,29 @@ describe("Modes", () => {
     expect(result.actions[1]).toEqual({ detail: "full" })
   })
 
+  test("scratch that puts back what a change he asked for replaced, only while it's still on and for two minutes, never what the menu set since", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        yield* TestClock.setTime(day)
+        const modes = yield* Modes.make(yield* kept)
+        yield* modes.set("focus", day + 2 * 60 * minute, true)
+        yield* wait("10 seconds")
+        yield* modes.set("quiet", undefined, true)
+        const back = Option.map(yield* modes.undo, ({ set }) => set)
+        // Set from the menu since, it's not his to take back.
+        yield* modes.set("focus", undefined, true)
+        yield* modes.set("normal")
+        const menu = yield* modes.undo
+        yield* modes.set("focus", undefined, true)
+        yield* wait("3 minutes")
+        return { back, menu, late: yield* modes.undo, now: (yield* modes.current).mode.mode }
+      }),
+    )
+    expect(result.back).toEqual(Option.some({ mode: "focus", until: day + 2 * 60 * minute, since: day }))
+    expect(result.menu).toEqual(Option.none())
+    expect([result.late, result.now]).toEqual([Option.none(), "focus"])
+  })
+
   test("focus holds what waits as it begins, and once its time is up goes back to normal and offers the rundown once, but only while yapd is on", async () => {
     const result = await run(
       Effect.gen(function* () {
