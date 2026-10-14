@@ -5,6 +5,7 @@ import {
   ConfigProvider,
   Context,
   Deferred,
+  type Duration,
   Effect,
   Fiber,
   Layer,
@@ -56,7 +57,8 @@ const update: Conversation.Update = {
  * what's said back plays like afplay, which can't say it's playing, and either plays to the end or can't play at all.
  * With `model`, replies are worked out by the provider's responder with that model instead, and the persona's
  * lines are `lines`, or the plain ones. With `persona`, it's that one that picks and is told the lines. With `routines`,
- * those are the names of his routines. With `over`, it's that update that's read, with what the journal `kept` before it.
+ * those are the names of his routines. With `over`, it's that update that's read, with what the journal `kept` before it,
+ * and with `present`, while he's at hand.
  */
 const conversation = (
   said: ReadonlyArray<string>,
@@ -73,6 +75,7 @@ const conversation = (
     readonly routines?: ReadonlyArray<string>
     readonly over?: Conversation.Update
     readonly kept?: ReadonlyArray<Journal.Entry>
+    readonly present?: boolean
   } = {},
 ) =>
   Effect.gen(function* () {
@@ -161,7 +164,7 @@ const conversation = (
       ...(given.routines === undefined ? {} : { routines: Effect.succeed(given.routines) }),
     }).pipe(Effect.provide(context))
     for (const entry of given.kept ?? []) yield* Context.get(context, Journal.Journal).write(entry)
-    const fiber = yield* Effect.fork(made.converse(given.over ?? update))
+    const fiber = yield* Effect.fork(made.converse(given.over ?? update, Effect.void, given.present === undefined ? {} : { present: given.present }))
     // Lets the fibers catch up on what the test did, since the clock only moves when told to.
     const flush = Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 20)))
     // As long as the microphone's, so what's heard lasts as long as it would.
@@ -788,20 +791,29 @@ describe("Answers", () => {
     expect(result).toEqual({ followed: true, followUps: ["Tell it to fix the tests."], heard: ["through"], through: ["through"] })
   })
 
-  test("stops listening after an answer as soon as after an update, sooner than after a question", async () => {
-    /** Whether it's still listening once it's been quiet for three seconds after it was said, or else whether something came of it. */
-    const quiet = (question: boolean) =>
+  test("the microphone stays open 3 s after an update, 6 s after an answer, 8 s after a question or an update that asks one while he's at hand", async () => {
+    const asking: Conversation.Update = { ...update, needsYou: true, spoken: "The PR is up. Should I merge it?" }
+    /** Whether it's still listening once it's been quiet for `seconds` after the line was said. */
+    const quiet = (line: "update" | "asking" | "away" | "answer" | "question", seconds: number) =>
       scoped(
         Effect.gen(function* () {
-          const { say, ask, wait } = yield* conversation([])
-          const saying = yield* (question ? ask([]) : say([]))
+          const { fiber, say, ask, wait } = yield* conversation([], 0, [], "sent", line === "asking" || line === "away" ? { over: asking, present: line === "asking" } : {})
+          const saying = line === "answer" ? yield* say([]) : line === "question" ? yield* ask([]) : fiber
           yield* wait(10)
-          yield* wait(3)
-          return Option.isNone(yield* Fiber.poll(saying)) ? "listening" : yield* Fiber.join(saying)
+          yield* wait(seconds)
+          return Option.isNone(yield* Fiber.poll(saying))
         }),
       )
-    expect(await quiet(false)).toBe(false)
-    expect(await quiet(true)).toBe("listening")
+    for (const [line, seconds] of [
+      ["update", 3],
+      // Asking him something while he's away, it may be the room that answers, so it's as long as after any update.
+      ["away", 3],
+      ["answer", 6],
+      ["question", 8],
+      ["asking", 8],
+    ] as const) {
+      expect([line, await quiet(line, seconds - 0.1), await quiet(line, seconds)]).toEqual([line, true, false])
+    }
   })
 
   test("stops an answer the user talks over and takes what they said for a follow-up, though it wasn't heard to the end", async () => {
@@ -903,6 +915,13 @@ const overHelper = (
     readonly tell?: boolean
     /** Whether something always waits to be said next. */
     readonly queued?: boolean
+    /** With `answer`, whether it's followed up only from its end, and how long it's listened to after: as after an answer unless said. */
+    readonly after?: boolean
+    readonly wait?: Duration.DurationInput
+    /** With `answer`, what's run once it's been said to the end. */
+    readonly through?: Effect.Effect<void>
+    /** Whether an answer he asked for always waits to be said next. */
+    readonly asked?: boolean
   } = {},
 ) =>
   Effect.gen(function* () {
@@ -1045,6 +1064,7 @@ const overHelper = (
           }
         : {}),
       ...(options.queued === true ? { queued: Effect.void } : {}),
+      ...(options.asked === true ? { asked: Effect.void } : {}),
     }).pipe(Effect.provide(context))
     // Lets the helper, the microphone and the fibers catch up on what the test did, since the clock only moves when told to.
     const flush = Effect.promise(async () => {
@@ -1082,7 +1102,14 @@ const overHelper = (
       options.ask === true
         ? made.ask({ audio: "/tmp/question.wav", spoken, answer: respond })
         : options.answer === true
-          ? made.answer({ audio: "/tmp/answer.wav", spoken, followUp: respond })
+          ? made.answer({
+              audio: "/tmp/answer.wav",
+              spoken,
+              followUp: respond,
+              ...(options.after === true ? { after: true } : {}),
+              ...(options.wait === undefined ? {} : { wait: options.wait }),
+              ...(options.through === undefined ? {} : { through: options.through }),
+            })
           : options.tell === true
             ? Effect.as(made.tell({ audio: "/tmp/notice.wav", spoken }), false)
             : made.converse({ ...long, spoken }),
@@ -1209,6 +1236,8 @@ describe("Over its first seconds, while yapd's own voice can still get into the 
           heard: "Which PR was that?",
           echo: first,
           unsaid: long.spoken.slice("Over in yapd, ".length),
+          voiced: 0.16,
+          lateBy: 0,
         },
       ],
       rendered: [answered],
@@ -2482,7 +2511,7 @@ describe("Over its first seconds, while yapd's own voice can still get into the 
       heard: true,
       commands: ["play"],
       // Said to the end, there was nothing it hadn't said yet.
-      responded: [{ project: "yapd", turn: long.turn, needsYou: false, lines: [{ speaker: "yapd", text: long.spoken }], heard: "Sam, can you pass the salt?" }],
+      responded: [{ project: "yapd", turn: long.turn, needsYou: false, lines: [{ speaker: "yapd", text: long.spoken }], heard: "Sam, can you pass the salt?", voiced: 0, lateBy: 0.5 }],
       sent: [],
     })
   })
@@ -2552,6 +2581,129 @@ describe("Over its first seconds, while yapd's own voice can still get into the 
       overheard: [{ echo: first, afterPause: "No, that's fine, leave it." }],
       heard: true,
     })
+  })
+})
+
+describe("A line listened to from its end", () => {
+  /** A failure, as it's said. */
+  const failed = "The Tezos migration failed, sir: the fee tests broke."
+
+  test("plays through talk over it, never turned down or stopped, takes none of that for a reply, even talk going on past its end when it wasn't yapd's own voice, and takes what he says after it", async () => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        const helper = yield* overHelper([[0.8, "And now the weather."], [0.9, "Tell it to fix them and run them again."]], { answer: true, after: true, spoken: failed })
+        // A TV over it once its own voice is learnt, then again, going on past its end.
+        yield* helper.wait(4)
+        yield* helper.talk(0.8, 20)
+        yield* helper.quiet
+        yield* helper.wait(4)
+        yield* helper.talk(0.8, 20)
+        yield* helper.wait(1.5)
+        yield* helper.finish
+        yield* helper.talk(0.8, 20)
+        yield* helper.quiet
+        // Then him.
+        yield* helper.wait(1)
+        yield* helper.talk(0.9, 20)
+        yield* helper.quiet
+        return { commands: helper.commands, offered: helper.offered, followed: helper.followed, done: yield* Fiber.join(helper.fiber) }
+      }),
+    )
+    expect(result).toEqual({
+      commands: ["play"],
+      offered: [{ heard: "Tell it to fix them and run them again." }],
+      followed: ["Tell it to fix them and run them again."],
+      done: true,
+    })
+  })
+
+  test("yapd's own last words alone are dropped with no model call; 'No.' merged into them goes to the model with the line's words as the echo note", async () => {
+    const spoken = "On it, sir: the Tezos migration."
+    const after = (no: boolean) =>
+      overHelperScoped(
+        Effect.gen(function* () {
+          const helper = yield* overHelper([[0.9, "the Tezos migration."], [0.95, "No."]], { answer: true, after: true, wait: Conversation.linger, spoken, duration: 2.5 })
+          // Its own voice gets into the microphone over the line, as over a new voice processor's first seconds, until it ends.
+          yield* helper.wait(0.3)
+          yield* helper.talk(0.9, 40)
+          yield* helper.wait(2.2)
+          yield* helper.finish
+          // He says no right after, before the silence that tells its own voice has stopped.
+          if (no) {
+            yield* helper.wait(0.3)
+            yield* helper.talk(0.95, 10)
+          }
+          yield* helper.quiet
+          yield* helper.wait(4)
+          return { transcribed: helper.transcribed, offered: helper.offered, done: Option.isSome(yield* Fiber.poll(helper.fiber)) }
+        }),
+      )
+    expect(await after(false)).toEqual({ transcribed: ["the Tezos migration."], offered: [], done: true })
+    expect(await after(true)).toEqual({ transcribed: ["the Tezos migration. No."], offered: [{ heard: "the Tezos migration. No.", echo: spoken }], done: true })
+  })
+
+  test("what he begins as it ends, while what's run once it's said to the end is still running, is his reply, not talk over it", async () => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        const helper = yield* overHelper([[0.9, "Scratch that."]], { answer: true, after: true, through: Effect.sleep("200 millis") })
+        yield* helper.wait(4)
+        yield* helper.finish
+        yield* helper.talk(0.9, 10)
+        yield* helper.quiet
+        yield* helper.wait(0.2)
+        return { followed: helper.followed, done: yield* Fiber.join(helper.fiber) }
+      }),
+    )
+    expect(result).toEqual({ followed: ["Scratch that."], done: true })
+  })
+
+  test.each([
+    ["an answer", false],
+    ["a line listened to from its end", true],
+  ] as const)("the wait after %s is over early for an answer he asked for, no sooner than 2 s after it ended, and talk begun before then holds it open", async (_, after) => {
+    const waited = (talk: boolean) =>
+      overHelperScoped(
+        Effect.gen(function* () {
+          const helper = yield* overHelper([[0.9, "And the Mina one?"]], { answer: true, after, asked: true })
+          yield* helper.wait(4)
+          yield* helper.finish
+          yield* helper.wait(1.5)
+          if (talk) yield* helper.talk(0.9, 10)
+          yield* helper.wait(0.4)
+          const early = Option.isSome(yield* Fiber.poll(helper.fiber))
+          // Past two seconds after it ended, and a beat.
+          yield* helper.wait(0.3)
+          const late = Option.isSome(yield* Fiber.poll(helper.fiber))
+          if (talk) yield* helper.quiet
+          return { early, late, followed: helper.followed }
+        }),
+      )
+    expect(await waited(false)).toEqual({ early: false, late: true, followed: [] })
+    expect(await waited(true)).toEqual({ early: false, late: false, followed: ["And the Mina one?"] })
+  })
+
+  test("talk longer than 'Mute.' could be, ending 'and…', then 'Mute.' a second later, in a failure's wait, turns yapd off; 'Can you…' then 'mute.' doesn't", async () => {
+    const over = (before: string, frames: number) =>
+      overHelperScoped(
+        Effect.gen(function* () {
+          const helper = yield* overHelper([[0.8, before], [0.95, "Mute."]], { answer: true, after: true, off: true, responding: 5, spoken: failed })
+          yield* helper.wait(4)
+          yield* helper.finish
+          yield* helper.wait(0.5)
+          yield* helper.talk(0.8, frames)
+          yield* helper.quiet
+          // He says it while that's still being worked out.
+          yield* helper.wait(1)
+          yield* helper.talk(0.95, 10)
+          yield* helper.quiet
+          yield* helper.wait(0.1)
+          return { offs: helper.offs(), worked: helper.offered.map(({ heard }) => heard) }
+        }),
+      )
+    // A TV's talk, cut off mid-sentence: nothing is worked out of it.
+    expect(await over("So the plan for the rollout is to ship the loader and…", 100)).toEqual({ offs: 1, worked: [] })
+    // Trailed off into it, it's the rest of what he was saying, like a thread to mute, for the model to work out.
+    expect(await over("Can you…", 10)).toEqual({ offs: 0, worked: ["Can you Mute."] })
   })
 })
 
@@ -2654,6 +2806,8 @@ describe("Responder", () => {
       needsYou: false,
       lines: [{ speaker: "yapd", text: "Over in yapd,…" }],
       heard: "revert it.",
+      voiced: 1,
+      lateBy: 0,
     }
     const told = Responder.prompt({ ...interruption, echo: "Over in yapd, the tests pass now" }, Option.none())
     expect(told).toContain(
@@ -2699,6 +2853,8 @@ describe("Responder", () => {
       needsYou: true,
       lines: [{ speaker: "yapd", text: "The PR is ready." }],
       heard: "Ready. Merge it.",
+      voiced: 1,
+      lateBy: 0,
     }
     const sentence = `What they said after a pause, "Merge it.", is surely theirs, even where it repeats your words, like naming one of your options; only what came before it may be yours.`
     const told = Responder.prompt({ ...interruption, echo: "The PR is ready.", afterPause: "Merge it." }, Option.none())
@@ -2846,7 +3002,7 @@ describe("Language check", () => {
     ])
     const { reply } = await Effect.runPromise(
       Effect.flatMap(Responder.Responder, ({ respond }) =>
-        respond({ project: "yapd", turn: { prompt: Option.none(), message: "C'est prêt." }, needsYou: false, lines: [], heard: "Fusionne la branche." }),
+        respond({ project: "yapd", turn: { prompt: Option.none(), message: "C'est prêt." }, needsYou: false, lines: [], heard: "Fusionne la branche.", voiced: 1, lateBy: 0 }),
       ).pipe(Effect.provide(Responder.ProviderResponder.pipe(Layer.provide(Layer.merge(layer, Persona.Plain))))),
     )
     expect(reply).toEqual({ intent: "send", spoken: "Noted, sir.", message: "Fusionne la branche." })
@@ -2862,6 +3018,8 @@ describe("more, and how yapd talks, over an update", () => {
     heard,
     ...(more === undefined ? {} : { more }),
     ...(echo === undefined ? {} : { echo }),
+    voiced: 1,
+    lateBy: 0,
   })
   const quickly = (interruption: Responder.Interruption) => Effect.runSync(Responder.quick(interruption, Effect.succeed("On it, sir.")))
 
@@ -2951,7 +3109,7 @@ describe("quick replies", () => {
   const reply = (heard: string, message = "The PR is up. Should I merge it?", needsYou = true, said?: string) =>
     Effect.runSync(
       Responder.quick(
-        { project: "yapd", turn: { prompt: Option.none(), message }, needsYou, lines: said === undefined ? [] : [{ speaker: "yapd", text: said }], heard },
+        { project: "yapd", turn: { prompt: Option.none(), message }, needsYou, lines: said === undefined ? [] : [{ speaker: "yapd", text: said }], heard, voiced: 1, lateBy: 0 },
         Effect.succeed("On it, sir."),
       ),
     )
@@ -2962,6 +3120,31 @@ describe("quick replies", () => {
     expect(reply("yes please", heard, true, heard)).toEqual({ intent: "send", spoken: "On it, sir.", message: "Yes please." })
     // As yapd said it, when the agent buried its question.
     expect(reply("Yes.", "Done. Shall I merge? The docs are updated too.", true, "Over in yapd, it's done. Shall I merge it?")?.intent).toBe("send")
+  })
+
+  test("a plain yes to an update that asked goes to its agent at once only when begun within 3 s of its end and said clearly; later or fainter, the model works it out", () => {
+    const asked = "The PR is up. Should I merge it?"
+    const yes = (lateBy: number, voiced: number) =>
+      Effect.runSync(
+        Responder.quick(
+          { project: "yapd", turn: { prompt: Option.none(), message: asked }, needsYou: true, lines: [{ speaker: "yapd", text: asked }], heard: "Yes.", voiced, lateBy },
+          Effect.succeed("On it, sir."),
+        ),
+      )?.intent
+    expect(yes(0, 0.5)).toBe("send")
+    expect(yes(3, 0.5)).toBe("send")
+    // Begun a while after, or faint, it may be a TV's or someone else's.
+    expect(yes(3.2, 0.5)).toBeUndefined()
+    expect(yes(0.5, 0.2)).toBeUndefined()
+    // A stop is still one, however late or faint.
+    expect(
+      Effect.runSync(
+        Responder.quick(
+          { project: "yapd", turn: { prompt: Option.none(), message: asked }, needsYou: true, lines: [{ speaker: "yapd", text: asked }], heard: "Stop.", voiced: 0.2, lateBy: 5 },
+          Effect.succeed("On it, sir."),
+        ),
+      ),
+    ).toEqual({ intent: "dismiss", spoken: "", message: "" })
   })
 
   test("leaves a nod to an update cut off to the model, shown what yapd hadn't said yet, and that a nod only answers what was heard", () => {
@@ -2999,7 +3182,7 @@ describe("quick replies", () => {
     const over = (heard: string) =>
       Effect.runSync(
         Responder.quick(
-          { project: "yapd", turn: { prompt: Option.none(), message: said }, needsYou: true, lines: [{ speaker: "yapd", text: said }], heard, echo: said },
+          { project: "yapd", turn: { prompt: Option.none(), message: said }, needsYou: true, lines: [{ speaker: "yapd", text: said }], heard, echo: said, voiced: 1, lateBy: 0 },
           Effect.succeed("On it, sir."),
         ),
       )
@@ -3029,6 +3212,8 @@ describe("quick replies", () => {
               { speaker: "yapd", text: "On it, sir." },
             ],
             heard: "Yes.",
+            voiced: 1,
+            lateBy: 0,
           },
           Effect.succeed("On it, sir."),
         ),
@@ -3052,7 +3237,7 @@ describe("quick replies", () => {
     const reply = (said: string, message = heard) =>
       Effect.runSync(
         Responder.quick(
-          { project: "yapd", turn: { prompt: Option.none(), message }, needsYou: message === heard, lines: [{ speaker: "yapd", text: message }], heard: said },
+          { project: "yapd", turn: { prompt: Option.none(), message }, needsYou: message === heard, lines: [{ speaker: "yapd", text: message }], heard: said, voiced: 1, lateBy: 0 },
           onIt,
         ),
       )

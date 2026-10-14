@@ -1,7 +1,8 @@
-import { Clock, type Duration, Effect, Exit, Fiber, Option, Queue, Scope, Stream } from "effect"
+import { Clock, Deferred, Duration, Effect, Exit, Fiber, Option, Queue, Scope, Stream } from "effect"
 import { rm } from "node:fs/promises"
 import { join } from "node:path"
 import { Audio, AudioError, type Playback } from "./Audio.ts"
+import { worded } from "./Brain.ts"
 import type { Turn } from "./Condenser.ts"
 import * as Endpointer from "./Endpointer.ts"
 import { plain, RelayError, type Thread } from "./Relay.ts"
@@ -13,7 +14,7 @@ import type * as Threads from "./Threads.ts"
 import { Transcriber } from "./Transcriber.ts"
 import { Vad } from "./Vad.ts"
 import { extension, Voice } from "./Voice.ts"
-import { agreed, gist, halts, type Line, noted } from "./Words.ts"
+import { agreed, gist, halts, type Line, noted, question } from "./Words.ts"
 
 /** An update, rendered and ready to be read out. */
 export interface Update {
@@ -74,9 +75,22 @@ interface Ear {
   deaf: boolean
 }
 
-/** How a line went: played out, or talked over, with what the user said. */
+/**
+ * A line said to the end that's listened to from its end, for a reply: how
+ * long it was, when it ended, by the clock, and talk still going then, if any,
+ * with how far into the line it began, when by the clock, whether yapd's own
+ * voice may be in it, and whether it began `over` the line, rather than once
+ * it had ended.
+ */
+interface Ended {
+  readonly duration: number
+  readonly finished: number
+  readonly open?: { readonly onset: number; readonly since: number; readonly echo: boolean; readonly over: boolean }
+}
+
+/** How a line went: played out, maybe to be listened to from its end, or talked over, with what the user said. */
 type Outcome =
-  | { readonly _tag: "Finished" }
+  | { readonly _tag: "Finished"; readonly ended?: Ended }
   | {
       readonly _tag: "Interrupted"
       /** How far it got, in seconds. */
@@ -96,12 +110,31 @@ type Outcome =
       readonly finished?: number
       /** How long after it had played to the end he began, in seconds: 0 when he began over it. */
       readonly lateBy: number
+      /**
+       * Begun over a line said to the end, with yapd's own voice maybe in it,
+       * and run on past its end: what may be his reply, which the line's own
+       * voice got into the microphone with as it ended.
+       */
+      readonly carried?: true
     }
 
 /** How long the microphone stays open after yapd stops, for a reply to what it just said. */
-const linger: Duration.DurationInput = "3 seconds"
+export const linger: Duration.DurationInput = "3 seconds"
+/** Longer after an answer to what he asked, or a failure, which he may well want to follow up once he's taken it in. */
+export const answering: Duration.DurationInput = "6 seconds"
 /** Longer after a question, which takes a moment's thought to answer. */
-const pondering: Duration.DurationInput = "8 seconds"
+export const pondering: Duration.DurationInput = "8 seconds"
+/**
+ * How long after a line has ended, in milliseconds, the microphone stays open
+ * at least, even once an answer he asked for waits to be said next: what he
+ * begins by then, like a reply or "Mute.", is still this line's, never cut off
+ * by the next.
+ */
+const grace = 2_000
+/** How long working out what he said can take, in milliseconds, before a tick tells him he was heard. */
+const ticking = 300
+/** How soon after the tick, in milliseconds, what the microphone hears may be the tick itself. */
+const ringing = 300
 /** Longer than the longest utterance, so only a microphone that went quiet trips it. */
 const patience = "40 seconds"
 /**
@@ -237,6 +270,14 @@ export const unsaid = (text: string, fraction: number) => {
   return words.slice(saidOf(words, fraction)).join(" ")
 }
 
+/** Whether all of what was heard is the last words of `line`, as words compare, symbols and all: its own voice dying away as it ended. */
+const trailing = (heard: string, line: string) => {
+  const words = (text: string) => worded(text).split(" ").filter((word) => word !== "")
+  const said = words(heard)
+  const own = words(line)
+  return said.length > 0 && said.length <= own.length && said.every((word, at) => word === own[own.length - said.length + at])
+}
+
 /** Seconds either side of when the user began that what yapd was saying is given with what he said, since where each word falls in a line is only guessed. */
 const reach = 4
 
@@ -301,6 +342,16 @@ export interface Answer extends Omit<Question, "answer"> {
   readonly followUp: Question["answer"]
   /** Run once it's been said to the end, before the wait for a follow-up, since the user has heard it by then. */
   readonly through?: Effect.Effect<void>
+  /** How long the microphone stays open for a follow-up once it's been said to the end: as after any answer, unless said. */
+  readonly wait?: Duration.DurationInput
+  /**
+   * Whether it's followed up only from its end: it plays through whatever's
+   * said over it, never turned down, listening only for "Mute.", as a notice
+   * does, then listens for a reply, like after a failure or work that started.
+   */
+  readonly after?: boolean
+  /** Whether its words are logged nowhere, like what came of a request held back as a secret. */
+  readonly withheld?: boolean
 }
 
 /**
@@ -357,6 +408,13 @@ export const make = (options: {
    * is the usual one.
    */
   readonly queued?: Effect.Effect<void>
+  /**
+   * Once an answer he asked for waits to be said next: the wait for a reply
+   * after an answer, or after a line listened to from its end, is then over
+   * soon after the line ended, rather than holding it up. Without it, that
+   * wait is never cut short.
+   */
+  readonly asked?: Effect.Effect<void>
 }) =>
   Effect.gen(function* () {
     const lifetime = yield* Effect.scope
@@ -381,6 +439,10 @@ export const make = (options: {
 
     /** Once something waits to be said next, if that's ever known. */
     const queued = options.queued ?? Effect.never
+    /** Once an answer he asked for waits to be said next, if that's ever known. */
+    const asked = options.asked ?? Effect.never
+    /** The tick that tells him he was heard, logged so how often it plays, and what's heard right after, can be counted. */
+    const tick = Effect.zipRight(audio.tick, Effect.logInfo("Ticked"))
 
     /** Starts listening, if there's a microphone. That's only known once something plays. */
     const open = (scope: Scope.Scope) =>
@@ -436,7 +498,9 @@ export const make = (options: {
      * `heeding`, it plays through whatever's said, never turned down,
      * listening only for "Mute.", over it and the usual moment after it,
      * whatever `wait` is, which is over after the pause between lines once
-     * something's queued to be said next.
+     * something's queued to be said next; or `replying`, over it only, and
+     * it's then listened to from its end. Once `cut` comes, the wait after it
+     * is over early.
      */
     const speak = (
       path: string,
@@ -449,10 +513,12 @@ export const make = (options: {
         readonly confirmed?: Effect.Effect<void>
         readonly through?: Effect.Effect<void>
         readonly heeding?: boolean
+        readonly replying?: boolean
+        readonly cut?: Effect.Effect<void>
       } = {},
     ) =>
       Effect.gen(function* () {
-        const { wait = linger, begun = Effect.void, confirmed = Effect.void, through = Effect.void, heeding = false } = given
+        const { wait = linger, begun = Effect.void, confirmed = Effect.void, through = Effect.void, heeding = false, replying = false, cut } = given
         const playback = yield* audio.play(path, from)
         yield* begun
         if (playback.confirmed) yield* confirmed
@@ -464,7 +530,9 @@ export const make = (options: {
           yield* played
           return { _tag: "Finished" } satisfies Outcome
         }
-        return yield* (heeding ? heed(playback, listening, text, from, played) : listen(playback, listening, text, from, wait, played))
+        return yield* (heeding
+          ? heed(playback, listening, text, from, played, replying)
+          : listen(playback, listening, text, from, wait, played, undefined, cut === undefined ? {} : { cut }))
       }).pipe(Effect.scoped)
 
     /**
@@ -492,8 +560,18 @@ export const make = (options: {
      * "Mute." then is neither cut in two nor missed: but nothing is listened
      * for longer than `outburst` once that moment is over, so talk that goes
      * on, like a TV's, holds what's next up a few seconds at most.
+     *
+     * `replying`, it listens so over the line only, and its moment after is
+     * the wait for a reply, which hears "Mute." itself: it gives back when it
+     * ended, once `through` has run, with what's still going then. What he
+     * begins from its end is that wait's, even while `through` runs. What he
+     * began over its last moment is heard out first, as long as it could be
+     * "Mute.": anything else is dropped, but with yapd's own voice maybe in
+     * it, and still going as the line ended, it's his reply, run on from
+     * that, and given back as said over it. What he began before that and is
+     * still going is handed on as it is.
      */
-    const heed = (playback: Playback, ear: Ear, text: string, from: number, through: Effect.Effect<void>) =>
+    const heed = (playback: Playback, ear: Ear, text: string, from: number, through: Effect.Effect<void>, replying = false) =>
       Effect.gen(function* () {
         const { signals } = ear
         const id = fresh()
@@ -507,10 +585,12 @@ export const make = (options: {
         let played = false
         /** When it played to the end, by the clock, noted before the moment after it can be over. */
         let finished = 0
-        /** When the usual moment after it was over too, by the clock. */
+        /** When the usual moment after it was over too, by the clock: replying, as soon as it's ended. */
         let over: number | undefined
         /** When what he said last ended, or what he began came to nothing, by the clock. */
         let ended = Number.NEGATIVE_INFINITY
+        /** Replying, once `through` has run, which the wait for a reply follows. */
+        const ran = yield* Deferred.make<void>()
         // The moment after it begins as soon as it's played to the end, however long what was said before takes to make out: over once
         // something waits to be said next, which hears "Mute." itself, and the pause between lines is up, or else after the usual moment.
         const after = Effect.raceFirst(Effect.sleep(linger), Effect.zipRight(Effect.sleep(breather), queued)).pipe(
@@ -524,18 +604,42 @@ export const make = (options: {
             ),
           ),
         )
-        yield* playback.finished.pipe(
-          Effect.zipRight(Clock.currentTimeMillis),
-          Effect.tap(() => through),
-          Effect.matchEffect({
-            onFailure: (error) => Queue.offer(signals, { _tag: "Broke", id, error }),
-            onSuccess: (at) =>
-              Effect.sync(() => {
-                finished = at
-              }).pipe(Effect.zipRight(Queue.offer(signals, { _tag: "Finished", id })), Effect.zipRight(after)),
-          }),
-          Effect.forkScoped,
-        )
+        yield* replying
+          ? playback.finished.pipe(
+              Effect.zipRight(Clock.currentTimeMillis),
+              Effect.matchEffect({
+                onFailure: (error) => Queue.offer(signals, { _tag: "Broke", id, error }),
+                // Its end is noted before `through` runs, so what's begun from then is never taken for talk over it, however long that takes.
+                onSuccess: (at) =>
+                  Effect.sync(() => {
+                    finished = at
+                    over = at
+                  }).pipe(
+                    Effect.zipRight(through),
+                    Effect.ensuring(Deferred.succeed(ran, undefined)),
+                    Effect.zipRight(Queue.offer(signals, { _tag: "Finished", id })),
+                  ),
+              }),
+              Effect.forkScoped,
+            )
+          : playback.finished.pipe(
+              Effect.zipRight(Clock.currentTimeMillis),
+              Effect.tap(() => through),
+              Effect.matchEffect({
+                onFailure: (error) => Queue.offer(signals, { _tag: "Broke", id, error }),
+                onSuccess: (at) =>
+                  Effect.sync(() => {
+                    finished = at
+                  }).pipe(Effect.zipRight(Queue.offer(signals, { _tag: "Finished", id })), Effect.zipRight(after)),
+              }),
+              Effect.forkScoped,
+            )
+        /** Replying, the wait for a reply follows from its end, once `through` has run, with what's still going then, if anything. */
+        const ending = (open?: Ended["open"]) =>
+          Effect.as(Deferred.await(ran), {
+            _tag: "Finished",
+            ended: { duration: playback.duration, finished, ...(open === undefined ? {} : { open }) },
+          } satisfies Outcome)
         /**
          * Whether what he began at `at` is heard out once that moment is over,
          * at `over`: begun in it or just before the line ended, however long
@@ -546,13 +650,14 @@ export const make = (options: {
         // Once it's all over, only what's heeded is waited for, while it could yet be "Mute.": a microphone gone quiet, or talk that goes
         // on, like a TV's, ends it as one gone deaf does. What's come in already is looked at first, however long it waited, but only
         // until `outburst` has passed since that moment was over: then it's over, however much is still waiting to be looked at.
+        // Replying, once it's ended, a "Mute." begun over its last moment is waited for as long as it could be one, and then it's over.
         const next = Effect.suspend((): Effect.Effect<Signal | undefined> => {
-          if (over === undefined) return Queue.take(signals)
+          if (over === undefined || (replying && onset === undefined)) return Queue.take(signals)
           const last = over + outburst
           const until =
             onset === undefined
               ? Math.min(Math.max(over + beat, ended + breather), last)
-              : heeded(since, over)
+              : replying || heeded(since, over)
                 ? Math.min(since, over) + outburst
                 : over
           return Effect.flatMap(Clock.currentTimeMillis, (now) =>
@@ -565,20 +670,35 @@ export const make = (options: {
                     onNone: () =>
                       Queue.take(signals).pipe(
                         Effect.timeout(Math.max(0, until - now)),
-                        Effect.orElseSucceed((): Signal => ({ _tag: "Deaf" })),
+                        Effect.orElseSucceed((): Signal | undefined => (replying ? undefined : { _tag: "Deaf" })),
                       ),
                   }),
                 ),
           )
         })
         while (true) {
+          if (replying && over !== undefined) {
+            // Begun as it ended, though looked at just before its end was noted, it's his reply.
+            if (onset !== undefined && since >= over) return yield* ending({ onset: playback.duration, since, echo: echoing, over: false })
+            // Begun before its last moment and still going as it ended, it's handed on as it is, never waited for.
+            if (onset !== undefined && since < over - brink) return yield* ending({ onset, since, echo: echoing, over: true })
+            if (played && onset === undefined) return yield* ending()
+          }
           const signal = yield* next
-          // Past the moment after it, which only ever begins once it's played to the end.
-          if (signal === undefined) return { _tag: "Finished" } satisfies Outcome
+          // Past the moment after it, which only ever begins once it's played to the end. Replying, what he began over its last
+          // moment isn't "Mute." by now, and is handed on as it is.
+          if (signal === undefined) {
+            if (!replying) return { _tag: "Finished" } satisfies Outcome
+            return yield* ending(onset === undefined ? undefined : { onset, since, echo: echoing, over: true })
+          }
           switch (signal._tag) {
             case "Onset":
+              // Replying, begun as it ended or after, it's his reply, even while `through` is still running.
+              if (replying && over !== undefined && signal.at >= over) {
+                return yield* ending({ onset: playback.duration, since: signal.at, echo: signal.echo, over: false })
+              }
               // Begun once that moment is over, but not heeded, it's more of other talk, like a TV's, which holds nothing up.
-              if (over !== undefined && !heeded(signal.at, over)) return { _tag: "Finished" } satisfies Outcome
+              if (!replying && over !== undefined && !heeded(signal.at, over)) return { _tag: "Finished" } satisfies Outcome
               onset = yield* position
               since = signal.at
               echoing = signal.echo
@@ -611,6 +731,22 @@ export const make = (options: {
                   return { _tag: "Finished" } satisfies Outcome
                 }
               }
+              // Replying, with yapd's own voice maybe in it, and still going as the line ended, it's his reply that its own voice ran
+              // into, worked out as what he said over it, with the line's words as what may be its own: never dropped.
+              if (replying && over !== undefined && echo !== undefined) {
+                return yield* Effect.as(Deferred.await(ran), {
+                  _tag: "Interrupted",
+                  at: playback.duration,
+                  duration: playback.duration,
+                  audio: signal.audio,
+                  ear,
+                  echo,
+                  onset: Math.min(playback.duration, begun),
+                  finished,
+                  lateBy: 0,
+                  carried: true,
+                } satisfies Outcome)
+              }
               break
             }
             case "Finished":
@@ -630,8 +766,23 @@ export const make = (options: {
         }
       })
 
-    /** `done` is when the line had already played to the end, by the clock, for listening on after it. */
-    const listen = (playback: Playback, ear: Ear, text: string, from: number, wait: Duration.DurationInput, through: Effect.Effect<void>, done?: number) =>
+    /**
+     * `done` is when the line had already played to the end, by the clock, for
+     * listening on after it, then with what he'd begun that's still going,
+     * `open`, and `wait` counted from its end, when it's `fromEnd`. Once `cut`
+     * comes, the wait is over early: never sooner than `grace` after the line
+     * ended, nor while he's talking.
+     */
+    const listen = (
+      playback: Playback,
+      ear: Ear,
+      text: string,
+      from: number,
+      wait: Duration.DurationInput,
+      through: Effect.Effect<void>,
+      done?: number,
+      given: { readonly open?: Ended["open"]; readonly fromEnd?: boolean; readonly cut?: Effect.Effect<void> } = {},
+    ) =>
       Effect.gen(function* () {
         const { signals } = ear
         const id = fresh()
@@ -676,6 +827,22 @@ export const make = (options: {
         /** When he began it, by the clock. */
         let since: number | undefined
         let echoing = false
+        /**
+         * Begun over the line, said to the end, and still going as it ended:
+         * with yapd's own voice maybe in it, what's heard of it is his reply,
+         * which its own voice ran into, with the line's words as what may be
+         * its own; without, it's someone else's, like a TV's, which nothing
+         * waits for, and it's dropped once it ends.
+         */
+        let carried: "echo" | "other" | undefined
+        const { open } = given
+        if (open !== undefined) {
+          onset = open.onset
+          since = open.since
+          echoing = open.echo
+          if (open.over) carried = open.echo ? "echo" : "other"
+          speaking = carried !== "other"
+        }
         let lingering: { readonly id: number; readonly fiber: Fiber.RuntimeFiber<void> } | undefined
         const stopLingering = Effect.suspend(() => {
           const fiber = lingering?.fiber
@@ -685,7 +852,16 @@ export const make = (options: {
         const startLingering = Effect.gen(function* () {
           yield* stopLingering
           const id = fresh()
-          const fiber = yield* Effect.sleep(wait).pipe(
+          const now = yield* Clock.currentTimeMillis
+          // From its end, however long what came after took, but never less than the pause between lines from now.
+          const waiting = given.fromEnd === true && done !== undefined ? Effect.sleep(Math.max(done + Duration.toMillis(wait) - now, breather)) : Effect.sleep(wait)
+          // Once an answer he asked for waits, it's over early, though no sooner than `grace` after the line ended, nor the pause between
+          // lines from now, and a beat after it waits, so a word he begins just then isn't cut in two.
+          const early =
+            given.cut === undefined
+              ? Effect.never
+              : Effect.sleep(Math.max((finished ?? now) + grace - now, breather)).pipe(Effect.zipRight(given.cut), Effect.zipRight(Effect.sleep(beat)))
+          const fiber = yield* Effect.raceFirst(waiting, early).pipe(
             Effect.zipRight(Queue.offer(signals, { _tag: "Lingered", id })),
             Effect.asVoid,
             Effect.forkScoped,
@@ -715,6 +891,8 @@ export const make = (options: {
               if (playing) yield* playback.volume(ducked)
               break
             case "Speech":
+              // Someone else's, begun over the line, holds nothing open.
+              if (carried === "other") break
               yield* stopLingering
               if (playing) {
                 playing = false
@@ -724,10 +902,19 @@ export const make = (options: {
               break
             case "Abandoned":
               speaking = false
+              carried = undefined
               if (playing) yield* playback.volume(1)
               else yield* startLingering
               break
             case "Utterance": {
+              // Someone else's, begun over the line, is dropped, and the wait carries on.
+              if (carried === "other") {
+                carried = undefined
+                onset = undefined
+                since = undefined
+                echoing = false
+                break
+              }
               const at = stoppedAt ?? playback.duration
               const begun = onset ?? at
               return {
@@ -741,6 +928,7 @@ export const make = (options: {
                 ...(echoing ? { echo: between(text, playback.duration, begun - reach, Math.max(at, begun) + reach) } : {}),
                 ...(finished === undefined ? {} : { finished }),
                 lateBy: finished === undefined || since === undefined ? 0 : Math.max(0, since - finished) / 1000,
+                ...(carried === "echo" ? { carried: true } : {}),
               } satisfies Outcome
             }
             case "Finished":
@@ -781,19 +969,22 @@ export const make = (options: {
      * Listens on, `wait` longer, after a line of `duration` that was said to
      * the end, `finished` then by the clock, as for a reply to it: for when
      * only its own voice, or what may have been, got into the microphone as
-     * it ended.
+     * it ended, or for a line listened to from its end, with what's still
+     * going as it ended, `open`, and `wait` counted from its end, `fromEnd`.
+     * Once `cut` comes, the wait is over early.
      */
     const harken = (
       text: string,
-      { duration, finished }: { readonly duration: number; readonly finished?: number },
+      { duration, finished, open }: { readonly duration: number; readonly finished?: number; readonly open?: Ended["open"] },
       ear: Effect.Effect<Ear | undefined>,
       wait: Duration.DurationInput,
+      given: { readonly fromEnd?: boolean; readonly cut?: Effect.Effect<void> } = {},
     ) =>
       Effect.gen(function* () {
         const listening = yield* ear
         if (listening === undefined || listening.deaf) return { _tag: "Finished" } satisfies Outcome
         const ended: Playback = { duration, confirmed: true, finished: Effect.void, stop: Effect.succeed(duration), volume: () => Effect.void }
-        return yield* listen(ended, listening, text, duration, wait, Effect.void, finished)
+        return yield* listen(ended, listening, text, duration, wait, Effect.void, finished, { ...given, ...(open === undefined ? {} : { open }) })
       }).pipe(Effect.scoped)
 
     /**
@@ -808,9 +999,11 @@ export const make = (options: {
      * be its own; or the last of it, said on its own once he carried on after
      * a pause, which is surely his, so what someone else said first, like a
      * colleague walking in, doesn't hide it. Never after what trailed off
-     * into it, like "Can you…" then "mute.", which mutes something. Unless
-     * it trails off itself, it's given back at once, never waiting on
-     * whether he carries on.
+     * into it, like "Can you…" then "mute.", which mutes something, unless
+     * what came before the pause was longer than "Mute." could be, like a
+     * TV's talk. Unless it trails off itself, it's given back at once, never
+     * waiting on whether he carries on. Once working it out takes more than
+     * a moment, a tick tells him he was heard.
      */
     const settle = <R>(
       ear: Ear,
@@ -828,12 +1021,33 @@ export const make = (options: {
         /** All he said once he carried on after `first`, kept apart so it can be told it's surely his. */
         let afterPause = ""
         let halt = halted(first, echo)
+        /** Between an onset and the end of what he said, while a reply is worked out. */
+        let speaking = false
+        /** When the tick played, by the clock: once at most, and what's heard right after may be it. */
+        let ticked: number | undefined
+        // Taking longer than a moment, he's told he was heard, but never while he's talking, nor twice: the wait for him to go on
+        // after trailing off isn't counted, nor is "Mute.", which is acted on at once.
+        const timed = <A>(attempt: Effect.Effect<A>) =>
+          Effect.gen(function* () {
+            const timer = yield* Effect.sleep(ticking).pipe(
+              Effect.zipRight(
+                Effect.suspend(() =>
+                  ticked !== undefined || speaking
+                    ? Effect.void
+                    : Effect.flatMap(Clock.currentTimeMillis, (now) => {
+                        ticked = now
+                        return tick
+                      }),
+                ),
+              ),
+              Effect.fork,
+            )
+            return yield* attempt.pipe(Effect.ensuring(Fiber.interrupt(timer)))
+          })
         while (true) {
+          const attempt = halt ? respond(heard, speech, afterPause, halt) : timed(respond(heard, speech, afterPause, halt))
           // Not for what may all be yapd's own voice, cut off where it stopped, like "the PR is ready for": that's no sign he's trailing off.
-          const replying =
-            unfinished(heard) && (hesitates || heard !== first)
-              ? Effect.zipRight(Effect.sleep(hesitation), respond(heard, speech, afterPause, halt))
-              : respond(heard, speech, afterPause, halt)
+          const replying = unfinished(heard) && (hesitates || heard !== first) ? Effect.zipRight(Effect.sleep(hesitation), attempt) : attempt
           // "Mute." not trailing off is acted on at once, so what's said after it, like his phone answered, can't take it back.
           if (ear.deaf || (yield* Clock.currentTimeMillis) > until || (halt && !unfinished(heard))) return { heard, afterPause, halt, reply: yield* replying }
           const id = fresh()
@@ -842,7 +1056,7 @@ export const make = (options: {
             Effect.fork,
           )
 
-          let speaking = false
+          speaking = false
           let carryingOn = false
           let held: R | undefined
           let more: Float32Array | undefined
@@ -863,12 +1077,14 @@ export const make = (options: {
                 break
               case "Onset":
                 speaking = true
+                if (ticked !== undefined && signal.at - ticked < ringing) yield* Effect.logInfo("Onset right after the tick")
                 break
               case "Abandoned":
                 speaking = false
                 if (held !== undefined) return { heard, afterPause, halt, reply: held }
                 break
               case "Speech":
+                if (ticked !== undefined && (yield* Clock.currentTimeMillis) - ticked < ringing) yield* Effect.logInfo("Speech right after the tick")
                 carryingOn = true
                 held = undefined
                 yield* Fiber.interrupt(fiber)
@@ -893,10 +1109,12 @@ export const make = (options: {
           const before = heard
           heard = together(heard, after)
           afterPause = afterPause === "" ? after : together(afterPause, after)
-          // Only what added words, since speech Whisper made nothing of isn't in what was heard.
+          // Only what added words, since speech Whisper made nothing of isn't in what was heard. "Mute." on its own after more than
+          // "Mute." could be is his, however that ended, like a TV's talk cut off mid-sentence.
           if (after !== "") {
+            const lead = speech
             speech += voiced(more)
-            halt = halted(heard, echo) || (!unfinished(before) && halted(after, undefined))
+            halt = halted(heard, echo) || ((!unfinished(before) || lead > curt) && halted(after, undefined))
           }
         }
       })
@@ -996,12 +1214,17 @@ export const make = (options: {
      * someone else's, which its own voice dying away can't be; and when it
      * had said all of it by then, its own voice can only be its last word or
      * so before him, as after any line, so the model isn't told. Otherwise
-     * all of it may yet have been its own voice, `unsure`.
+     * all of it may yet have been its own voice, `unsure`. What ran on from
+     * over a line said to the end into the wait after it, `carried`, is only
+     * its own voice when all that was heard is the line's own last words, as
+     * words compare, symbols and all: with a word of anyone else's, the model
+     * is told, however short it is or wherever it ended.
      */
-    const whose = (outcome: Extract<Outcome, { readonly _tag: "Interrupted" }>, first: string) => {
+    const whose = (outcome: Extract<Outcome, { readonly _tag: "Interrupted" }>, first: string, text: string) => {
       const { echo, onset } = outcome
       if (echo === undefined) return { itself: false, unsure: false }
       if (first === "") return { itself: true, unsure: true }
+      if (outcome.carried === true) return trailing(first, text) ? { itself: true, unsure: true } : { itself: false, unsure: false, echo }
       const past = voiced(outcome.audio) - Math.max(0, outcome.at - onset) > overhang
       return { itself: false, unsure: !past, ...(past && outcome.at >= outcome.duration - ending ? {} : { echo }) }
     }
@@ -1022,9 +1245,11 @@ export const make = (options: {
      * update itself has been read to the end, even with the microphone still
      * open for a reply, since the user has heard it by then. Returns whether
      * he heard it, which he didn't when it ended partway on what may have
-     * been only its own voice.
+     * been only its own voice. The microphone stays open longer after one
+     * that asks him something while he's `present`, and after a `replay` of
+     * one he heard, which he asked for.
      */
-    const converse = (update: Update, through: Effect.Effect<void> = Effect.void) =>
+    const converse = (update: Update, through: Effect.Effect<void> = Effect.void, given: { readonly replay?: boolean; readonly present?: boolean } = {}) =>
       Effect.suspend(() => {
         const rendered: Array<string> = []
         return Effect.gen(function* () {
@@ -1037,6 +1262,10 @@ export const make = (options: {
           /** Said to the end, the line's length and when it ended, when only its own voice, or what may have been, stopped it as it ended: it listens on once for his reply. */
           let ended: { readonly duration: number; readonly finished?: number } | undefined
           let lingered = false
+          /** How long the microphone stays open after the update itself, for a reply. */
+          const own = update.needsYou && given.present === true && question.test(update.spoken.trim()) ? pondering : given.replay === true ? answering : linger
+          /** How long it stays open after the line being said, and whether an answer he asked for waiting ends that early, as after any answer. */
+          let window: { readonly wait: Duration.DurationInput; readonly closing: boolean } = { wait: own, closing: false }
           /**
            * Whether the line being said is one the journal keeps none of, like the model's answer to a secret he said, which could give it
            * away: then nor is what he hadn't heard of it when he talks over it, which a few words at a time may not show to be one.
@@ -1057,6 +1286,7 @@ export const make = (options: {
             unkept = false
             missed = 0
             lingered = false
+            window = { wait: own, closing: false }
             return true
           }
           /**
@@ -1078,12 +1308,14 @@ export const make = (options: {
             const outcome: Outcome =
               ended === undefined
                 ? yield* speak(path, text, from, heeding ? heedful(ear) : ear, {
+                    wait: window.wait,
                     // Noted only once it's known to play, so a line for going ahead that fails to render or play, or that a dictation cuts in before, never counts as the last one he heard.
                     confirmed: path === update.audio ? Effect.void : persona.said(text),
                     through: path === update.audio ? through : Effect.void,
                     heeding,
+                    ...(window.closing ? { cut: asked } : {}),
                   })
-                : yield* harken(text, ended, ear, linger)
+                : yield* harken(text, ended, ear, window.wait, window.closing ? { cut: asked } : {})
             ended = undefined
             if (outcome._tag === "Finished") {
               if (pickUp()) continue
@@ -1098,7 +1330,7 @@ export const make = (options: {
             }
 
             const first = yield* unlogged(outcome.audio)
-            const { itself, echo, unsure } = whose(outcome, first)
+            const { itself, echo, unsure } = whose(outcome, first, text)
             // Its own last words as it ended leave him the usual moment to reply, once.
             const listenOn = () => {
               if (lingered) return false
@@ -1129,7 +1361,7 @@ export const make = (options: {
             // What it hadn't said yet, so the model knows whether he could have heard what he answers, like the agent's question.
             const left = unsaid(text, fraction)
             /** What the model makes of what he said, as ever. */
-            const responding = (heard: string, afterPause: string) =>
+            const responding = (heard: string, voiced: number, afterPause: string) =>
               Effect.flatMap(Effect.zip(options.routines ?? Effect.succeed<ReadonlyArray<string>>([]), shownTurn(update)), ([routines, turn]) =>
                 responder.respond({
                   project: update.project,
@@ -1141,6 +1373,8 @@ export const make = (options: {
                   ...(left === "" ? {} : { unsaid: left }),
                   ...(more === "" ? {} : { more }),
                   ...(routines.length === 0 ? {} : { routines }),
+                  voiced,
+                  lateBy: outcome.lateBy,
                 }),
               ).pipe(
                 Effect.catchAll((error) =>
@@ -1159,7 +1393,7 @@ export const make = (options: {
                   ? Effect.succeed<Worked>({ reply: { intent: "dismiss", spoken: "", message: "" }, source: "halt" })
                   : Option.match(hooked, {
                       onSome: (muting) => Effect.succeed<Worked>({ reply: { intent: "mute", spoken: "", message: "", muting }, source: "mute" }),
-                      onNone: () => responding(heard, afterPause),
+                      onNone: () => responding(heard, voiced, afterPause),
                     })
                 return { ...worked, ms: (yield* Clock.currentTimeMillis) - began, voiced }
               })
@@ -1266,6 +1500,10 @@ export const make = (options: {
               yield* voice.render(text, path)
             }
             yield* options.saying(update, text)
+            // An answer to what he said over it is listened after as any answer is, cut short once one he asked for waits; anything else,
+            // like going ahead, a mute or the rest of the update, as after the update.
+            const answered = reply.intent === "answer" && early === undefined
+            window = { wait: answered ? answering : linger, closing: answered }
             from = 0
             missed = 0
             lingered = false
@@ -1285,9 +1523,17 @@ export const make = (options: {
      * it was said. Its `through` runs each time it's said to the end, and
      * what they say is heard listening for its `terms`. Returns whether
      * something came of what they said, and fails when it can't be played or
-     * breaks off.
+     * breaks off. Listened to `after` it, it plays through whatever's said
+     * over it, listening only for "Mute.", and what they say is listened for
+     * from its end. Once `cut` comes, the wait after it is over early.
      */
-    const exchange = (said: Omit<Question, "answer">, respond: Question["answer"], wait: Duration.DurationInput) =>
+    const exchange = (
+      said: Omit<Question, "answer"> & { readonly withheld?: boolean },
+      respond: Question["answer"],
+      wait: Duration.DurationInput,
+      after = false,
+      cut: Effect.Effect<void> = Effect.never,
+    ) =>
       Effect.gen(function* () {
         const ear = hearing(yield* Effect.scope)
         // Listening for its options, if it has any, all of what he says back, however long he goes on.
@@ -1296,23 +1542,46 @@ export const make = (options: {
         let missed = 0
         let begun = said.saying ?? Effect.void
         let confirmed = said.confirmed ?? Effect.void
-        /** As for an update, the line's length and when it ended, when it listens on once after its own voice as it ended. */
-        let ended: { readonly duration: number; readonly finished?: number } | undefined
+        /**
+         * As for an update, the line's length and when it ended, when it listens on once after its own voice as it ended, or from its end
+         * after it, with what's still going then.
+         */
+        let ended: { readonly duration: number; readonly finished?: number; readonly open?: Ended["open"] } | undefined
         let lingered = false
         while (true) {
           // As for an update, past so much talk that wasn't meant for yapd, the rest plays through whatever's said, listening only for "Mute.".
+          // Listened to after it, it plays through all that's said over it, on the microphone that then hears what he says back.
           const heeding = missed >= misses
           const outcome: Outcome =
             ended === undefined
-              ? yield* speak(said.audio, said.spoken, from, heeding ? heedful(ear) : ear, { wait, begun, confirmed, through: said.through ?? Effect.void, heeding })
-              : yield* harken(said.spoken, ended, ear, wait)
+              ? yield* speak(said.audio, said.spoken, from, heeding && !after ? heedful(ear) : ear, {
+                  wait,
+                  begun,
+                  confirmed,
+                  through: said.through ?? Effect.void,
+                  heeding: heeding || after,
+                  replying: after,
+                  cut,
+                })
+              : yield* harken(said.spoken, ended, ear, wait, { fromEnd: after, cut })
           ended = undefined
           begun = Effect.void
           confirmed = Effect.void
-          if (outcome._tag === "Finished") return false
+          if (outcome._tag === "Finished") {
+            if (outcome.ended === undefined) return false
+            ended = outcome.ended
+            continue
+          }
           const first = yield* hear(outcome.audio)
           // Nothing heard over its first seconds is its own voice, no answer, nor talk that wasn't meant for yapd.
-          const { itself, echo, unsure } = whose(outcome, first)
+          const { itself, echo, unsure } = whose(outcome, first, said.spoken)
+          // Its own last words alone, run on into the wait after it, are logged, so how often that happens can be counted: never what can't be.
+          if (outcome.carried === true && itself && first !== "") {
+            yield* Effect.logInfo(
+              said.withheld === true || T3Actions.revealing(first) ? "Took its own last words for its own voice" : `Took its own last words for its own voice: ${first}`,
+            )
+          }
+          if (outcome.carried === true && !itself) yield* Effect.logInfo("Worked out what ran on from its own voice into the wait after it")
           // What it hadn't said yet when he began, a moment before, so what he could have heard of it is known, like a question's options:
           // never from where it stopped, which takes him for having heard what it said as he was already talking. Nothing once all of it was.
           const left = outcome.at < outcome.duration ? unsaid(said.spoken, Math.max(0, outcome.onset - reaction) / outcome.duration) : ""
@@ -1363,11 +1632,13 @@ export const make = (options: {
 
     /**
      * Says an answer to what the user asked and listens for a follow-up over
-     * it or right after, for as long as after an update, since it's what they
-     * asked to hear rather than something they're asked. Returns whether they
-     * followed it up, and fails when it can't be played or breaks off.
+     * it or right after, longer than after an update, since it's what they
+     * asked to hear and may want to follow up, but over once soon after it
+     * ended when another answer they asked for waits. Said `after`, only what
+     * they say once it's ended is a follow-up. Returns whether they followed
+     * it up, and fails when it can't be played or breaks off.
      */
-    const answer = (said: Answer) => exchange(said, said.followUp, linger)
+    const answer = (said: Answer) => exchange(said, said.followUp, said.wait ?? answering, said.after === true, asked)
 
     /**
      * Says something of yapd's own that nothing he'd say over it has anywhere

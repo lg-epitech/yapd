@@ -1,4 +1,5 @@
 import { Clock, Context, Data, Effect, Layer, Option, Schema } from "effect"
+import { faintest } from "./Brain.ts"
 import { aloud, inEnglish, styled, type Turn } from "./Condenser.ts"
 import * as Config from "./Config.ts"
 import { Model } from "./Model.ts"
@@ -39,6 +40,10 @@ export interface Interruption {
   readonly more?: string
   /** The names of their routines, whose steps yapd sends an agent only when they say one with their shortcut. */
   readonly routines?: ReadonlyArray<string>
+  /** Seconds of speech in all they said. */
+  readonly voiced: number
+  /** How long after yapd's line ended they began, in seconds: 0 when they began over it. */
+  readonly lateBy: number
 }
 
 export class RespondError extends Data.TaggedError("RespondError")<{ readonly cause: unknown }> {}
@@ -89,7 +94,7 @@ const earlier = ({ echo, afterPause }: Line) =>
         afterPause === undefined || afterPause.trim() === "" ? "" : `; what they said after a pause, "${afterPause}", is surely theirs`
       })`
 
-export const prompt = ({ project, turn, needsYou, lines, heard, echo, afterPause, unsaid, more, routines = [] }: Interruption, style: Option.Option<string>) =>
+export const prompt = ({ project, turn, needsYou, lines, heard, echo, afterPause, unsaid, more, routines = [] }: Omit<Interruption, "voiced" | "lateBy">, style: Option.Option<string>) =>
   [
     instructions,
     ...Option.toArray(Option.map(style, styled)),
@@ -140,6 +145,15 @@ const asked = ({ needsYou, turn, lines }: Interruption) => {
   return said !== "" && !said.endsWith("…") && (question.test(said) || question.test(turn.message.trim()))
 }
 
+/**
+ * How long after an update that asked something a plain yes can be begun and
+ * still go straight to its agent, in seconds: later, it may be the room's.
+ */
+const promptly = 3
+
+/** Less speech than this, a plain yes is left to the model, as it may be the room's. The offline measurement of a plain yes sets it. */
+const yesFloor = faintest
+
 /** What they said, as they'd have typed it. */
 const typed = (heard: string) => {
   const trimmed = heard.trim().replace(/[\s.!,]+$/, "")
@@ -148,10 +162,10 @@ const typed = (heard: string) => {
 
 /**
  * The replies that need no model to work out: hearing enough, taking an update
- * in, and going ahead when the agent asked. They're the most common by far,
- * and answering them at once is what makes yapd feel quick. Anything else, or
- * anything said to an update that asked something that isn't a plain yes, is
- * left to the model.
+ * in, and going ahead when the agent asked, with a plain yes begun soon after
+ * and said clearly. They're the most common by far, and answering them at
+ * once is what makes yapd feel quick. Anything else, or anything said to an
+ * update that asked something that isn't such a yes, is left to the model.
  */
 export const quick = (interruption: Interruption, onIt: Effect.Effect<string>): Effect.Effect<Reply | undefined> => {
   const said = gist(interruption.heard)
@@ -162,8 +176,9 @@ export const quick = (interruption: Interruption, onIt: Effect.Effect<string>): 
   if (more !== "" && interruption.echo === undefined && morePlease.has(said)) return Effect.succeed({ intent: "answer", spoken: more, message: "" })
   // Begun while yapd's own voice could still get into the microphone, a yes may be its own words, like its "sir?" heard as "Sure.": the model weighs that.
   if (asked(interruption) && interruption.echo === undefined) {
-    // Only picked: it's noted as said once it's passed on, since he may yet carry on talking and this reply be dropped.
-    return agreed.has(said)
+    // Only picked: it's noted as said once it's passed on, since he may yet carry on talking and this reply be dropped. Begun a while
+    // after, or faint, it may be a TV's or someone else's, which the model weighs.
+    return agreed.has(said) && interruption.lateBy <= promptly && interruption.voiced >= yesFloor
       ? Effect.map(onIt, (spoken) => ({ intent: "send", spoken, message: typed(interruption.heard) }))
       : Effect.succeed(undefined)
   }
