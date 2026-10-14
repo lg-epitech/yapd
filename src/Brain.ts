@@ -2965,7 +2965,8 @@ export const atOnce = (decided: Pick<Decision, "act">, utterance: Pick<Assistant
 export type Routed =
   | { readonly _tag: "Resume" }
   | { readonly _tag: "Dismiss" }
-  | { readonly _tag: "Answer"; readonly spoken: string }
+  /** `unattended` when it's what only his word does, turned down while he isn't at hand, so nothing of his is taken up. */
+  | { readonly _tag: "Answer"; readonly spoken: string; readonly unattended?: true }
   /** For the update's own session, as the Responder's messages go, with what's said of a rest left. */
   | { readonly _tag: "Pass"; readonly message: string; readonly left?: string }
   /** Done as a follow-up to an answer is, `aims` when its first step is at the update itself, `doubted` when all of it may be yapd's own words. */
@@ -3009,7 +3010,7 @@ export const route = (decision: Decision, situation: Situation, lines: Lines): R
     }
   }
   // With more after it, it's acted on, which says the same of it and does the rest, like a message to another thread, which goes either way.
-  if (handed?.present === false && unattended(decision) && decision.rest.trim() === "") return { _tag: "Answer", spoken: said.shortcut }
+  if (handed?.present === false && unattended(decision) && decision.rest.trim() === "") return { _tag: "Answer", spoken: said.shortcut, unattended: true }
   return {
     _tag: "Act",
     aims: decision.act === "dismiss" || (writes.has(decision.act) && own !== undefined && aimed(decision, own, situation)),

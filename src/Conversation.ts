@@ -368,17 +368,19 @@ export interface Running {
 /**
  * What something he said over an update, handed to yapd's assistant, comes
  * to: let go, as talk not meant for yapd or what may all be its own words;
- * dismissed; answered; passed to the update's own session as the Responder's
- * messages are, with a line for a rest left; or acted on, as a follow-up to
- * an answer is, once he's stopped, `aims` when at the update itself, and
- * `doubted` when all of it may be yapd's own words. With how it was worked
- * out, without the model or by it, how long that took and the model's part,
- * and what it came to, as it's logged, never his words nor the model's.
+ * dismissed; answered, `unattended` when that turns down what only his word
+ * does while he isn't at hand; passed to the update's own session as the
+ * Responder's messages are, with a line for a rest left; or acted on, as a
+ * follow-up to an answer is, once he's stopped, `aims` when at the update
+ * itself, and `doubted` when all of it may be yapd's own words. With how it
+ * was worked out, without the model or by it, how long that took and the
+ * model's part, and what it came to, as it's logged, never his words nor the
+ * model's.
  */
 export type Handed = (
   | { readonly _tag: "Resume"; readonly logged?: Effect.Effect<void> }
   | { readonly _tag: "Dismiss" }
-  | { readonly _tag: "Answer"; readonly spoken: string }
+  | { readonly _tag: "Answer"; readonly spoken: string; readonly unattended?: true }
   | { readonly _tag: "Pass"; readonly message: string; readonly left?: string }
   | { readonly _tag: "Act"; readonly aims: boolean; readonly doubted: boolean; readonly run: (running: Running) => Effect.Effect<void> }
 ) & {
@@ -1738,7 +1740,9 @@ export const make = (options: {
                   voiced: hundredths(voiced),
                 },
               })
-              yield* options.replied
+              // Turned down as what only his word does while he isn't at hand, as a TV's talk may be, nothing of his is taken up: he
+              // isn't noted at hand, which would have the next such talk acted on, nor does it take the place of what yapd asked.
+              if (handed?._tag !== "Answer" || handed.unattended !== true) yield* options.replied
             }
 
             if (reply.intent === "dismiss") {

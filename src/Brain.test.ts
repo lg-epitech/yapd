@@ -2823,7 +2823,7 @@ describe("handed over from an update", () => {
   })
 
   test("over a TV in an empty room, new work, a reminder, a memory, a mode or a mute handed over is never done", () => {
-    const shortcut: Brain.Routed = { _tag: "Answer", spoken: "Ask me that with the shortcut, sir." }
+    const shortcut: Brain.Routed = { _tag: "Answer", spoken: "Ask me that with the shortcut, sir.", unattended: true }
     const away = (decision: Brain.Decision, heard: string) => Brain.route(decision, over(heard, "tied", { present: false }), lines)
     expect(away(Brain.decision({ act: "start", text: "look into the flaky Mina test" }), "Let's start a new project to fix the flaky test.")).toEqual(shortcut)
     expect(away(Brain.decision({ act: "remind", how: "at", when: "2026-10-09T18:00", text: "call mom" }), "Remind me to call mom at six.")).toEqual(shortcut)

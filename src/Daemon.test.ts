@@ -7590,4 +7590,46 @@ describe("Daemon handing over what's yapd's to do", () => {
     expect(stopped.played).toEqual(["yapd. The migration compiles.", "Stop Open the Mina SSV2 bug tickets?", "yapd. The migration compiles."])
     expect(stopped.from.at(-1)).toBeGreaterThan(0)
   }, 30_000)
+
+  test("handed over while he isn't at hand, as a TV's talk may be, what's turned down, or acted on, never puts him at hand, so what only his word does, handed over next, is turned down too", async () => {
+    const looked = "What's the Mina one doing?"
+    const said = ["Okay everyone, focus mode till three.", looked, "Right, focus mode till three."]
+    const result = await run(
+      Effect.gen(function* () {
+        const t3 = yield* handing
+        const { handle, talk, wait, nextEvent, played } = yield* assisted(
+          (situation) =>
+            situation.utterance.heard === looked
+              ? Brain.decision({ act: "answer", target: handleOf(situation, "t-mina"), spoken: "The Mina tickets are filed." })
+              : Brain.decision({ act: "mode", how: "focus" }),
+          {
+            says: looked,
+            transcripts: said,
+            hands: t3.hands,
+            t3,
+            link: () => Effect.succeedSome({ machine: "Rosie", id: "t-tezos" }),
+            handsOver: () => true,
+            handing: {},
+          },
+          [tezos(), minaThread()],
+        )
+        // Nothing dictated, nothing said back taken up: he isn't at hand. Each said over an update of its own.
+        for (const message of ["The migration compiles.", "The tests pass.", "The fee table is in."]) {
+          yield* tezosStop(handle, false, message)
+          yield* nextEvent(`Ready: yapd. ${message}`)
+          yield* talk
+          for (let second = 0; second < 40; second++) yield* wait(1)
+        }
+        return [...played]
+      }),
+    )
+    expect(result).toEqual([
+      "yapd. The migration compiles.",
+      "Ask me that with the shortcut.",
+      "yapd. The tests pass.",
+      "The Mina tickets are filed.",
+      "yapd. The fee table is in.",
+      "Ask me that with the shortcut.",
+    ])
+  }, 30_000)
 })
