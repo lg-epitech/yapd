@@ -3377,9 +3377,18 @@ const pinning = (checked: Checked, reach: Reach): Checked =>
   checked._tag !== "Do" || reach.row === undefined ? checked : { ...checked, plan: { ...checked.plan, pinned: reach.row.commandId } }
 
 /** Whether he's replying to a "done" line saying yapd started work for him, which can't be taken back. */
-const startedBack = (situation: Situation) => {
+const startedBack = (situation: Situation) => startedBy(situation).length > 0
+
+/** The steps of the "done" line he's replying to that started work for him: none when it said no such thing. */
+const startedBy = (situation: Pick<Situation, "utterance" | "recent" | "acted">) => {
   const change = situation.utterance.afterDone?.change
-  return change?.what === "acted" && recently(situation).some(({ utterance, kind }) => utterance === change.utterance && kind === "start")
+  return change?.what !== "acted" ? [] : recently(situation).filter(({ utterance, kind }) => utterance === change.utterance && kind === "start")
+}
+
+/** The threads the "done" line he's replying to started, by their handles in THREADS, for the model to name what it means to stop. */
+const startedHandles = (situation: Situation) => {
+  const handles = [...new Set(startedBy(situation).flatMap(({ machine, thread }) => Option.toArray(Option.fromNullable(handleOf(situation.desk, machine, thread)))))]
+  return handles.length === 0 ? "" : `, ${either(handles)}`
 }
 
 /**
@@ -4569,14 +4578,15 @@ export const prompt = (situation: Situation, style: Option.Option<string>) => {
               : ` What he said after a pause, ${fenced(situation.utterance.afterPause, 400)}, is surely his, even where it repeats your words, like naming one of your options; only what came before it may be yours.`
           }`,
         ]),
-    // Said back to what it did, a no only ever of his: with its own voice in what was heard, never one that may be yapd's own words.
+    // Said back to what it did, a no only ever of his: with its own voice in what was heard, never one that may be yapd's own words. To new
+    // work, a stop of the thread it started, by its handle, which yapd asks about in a question of its own that his yes is held to.
     ...(situation.utterance.afterDone?.change === undefined
       ? []
       : [
-          `He spoke right after your last line, which told him what you just did for him. When it says you did something for him, like sending a message, nothing but a no of his to that, like "No.", "No, don't." or "Scratch that.", is never a dismissal: it's "undo", with "sure" "high" when it plainly takes that back, or lower when it may not, for yapd to ask him whether to take it back; never "answer", "dismiss" or "resume". When it says you started work for him, which can't be taken back, nothing but a no of his to that is "answer", asking him in a few words whether to stop it; never "undo", "dismiss" or "resume". Otherwise, as when it says something didn't go, a no goes as usual.${
+          `He spoke right after your last line, which told him what you just did for him. When it says you did something for him, like sending a message, nothing but a no of his to that, like "No.", "No, don't." or "Scratch that.", is never a dismissal: it's "undo", with "sure" "high" when it plainly takes that back, or lower when it may not, for yapd to ask him whether to take it back; never "answer", "dismiss" or "resume". When it says you started work for him, which can't be taken back, nothing but a no of his to that is "stop", with "target" the thread it started${startedHandles(situation)}, for yapd to ask him whether to stop it; never "answer", "undo", "dismiss" or "resume". Otherwise, as when it says something didn't go, a no goes as usual.${
             situation.utterance.echo === undefined
               ? ""
-              : ` What was heard may hold your own words, as above: only what's surely his can be his no, never words that may be yours, like a "No." that may be your own "Noted.", and if nothing surely his is left, it's "resume", never "undo", however low its "sure".`
+              : ` What was heard may hold your own words, as above: only what's surely his can be his no, never words that may be yours, like a "No." that may be your own "Noted.", and if nothing surely his is left, it's "resume", never "undo" or "stop", however low its "sure".`
           }`,
         ]),
     `WHAT HE SAID, ${said(situation)}:\n${situation.utterance.heard}`,

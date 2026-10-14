@@ -479,10 +479,10 @@ describe("Brain", () => {
       return Brain.prompt({ ...given, utterance: { ...given.utterance, via: "reply", ...more } }, Option.none())
     }
     const carried = ` You had said all of your line before he went on, so what he said after its last words is his reply to it, however short.`
-    // New work can't be taken back, so a no to it only ever asks whether to stop it.
-    const done = `He spoke right after your last line, which told him what you just did for him. When it says you did something for him, like sending a message, nothing but a no of his to that, like "No.", "No, don't." or "Scratch that.", is never a dismissal: it's "undo", with "sure" "high" when it plainly takes that back, or lower when it may not, for yapd to ask him whether to take it back; never "answer", "dismiss" or "resume". When it says you started work for him, which can't be taken back, nothing but a no of his to that is "answer", asking him in a few words whether to stop it; never "undo", "dismiss" or "resume". Otherwise, as when it says something didn't go, a no goes as usual.`
+    // New work can't be taken back, so a no to it is only ever a stop of what it started, which yapd asks about.
+    const done = `He spoke right after your last line, which told him what you just did for him. When it says you did something for him, like sending a message, nothing but a no of his to that, like "No.", "No, don't." or "Scratch that.", is never a dismissal: it's "undo", with "sure" "high" when it plainly takes that back, or lower when it may not, for yapd to ask him whether to take it back; never "answer", "dismiss" or "resume". When it says you started work for him, which can't be taken back, nothing but a no of his to that is "stop", with "target" the thread it started, for yapd to ask him whether to stop it; never "answer", "undo", "dismiss" or "resume". Otherwise, as when it says something didn't go, a no goes as usual.`
     // With its own voice in what was heard, a no that may be its own words, like its "Noted.", is never his, as the echo rule has it.
-    const own = ` What was heard may hold your own words, as above: only what's surely his can be his no, never words that may be yours, like a "No." that may be your own "Noted.", and if nothing surely his is left, it's "resume", never "undo", however low its "sure".`
+    const own = ` What was heard may hold your own words, as above: only what's surely his can be his no, never words that may be yours, like a "No." that may be your own "Noted.", and if nothing surely his is left, it's "resume", never "undo" or "stop", however low its "sure".`
     expect(told({ echo, carried: true, afterDone })).toContain(`A question or a dismissal of his goes as usual.${carried}\n\n${done}${own}\n\nWHAT HE SAID`)
     expect(told({ echo, carried: true, afterDone, afterPause: "No." })).toContain(`A question or a dismissal of his goes as usual.${carried} What he said after a pause, «No.», is surely his`)
     // Begun once it had ended, with none of its own voice in what he said, the same of a no.
@@ -517,7 +517,7 @@ describe("Brain", () => {
     expect(Brain.fast(given, lines)).toMatchObject({ act: "undo" })
   })
 
-  test("a stop said back to a line saying yapd started work is asked about first, however sure the model is, never done on a no", () => {
+  test("a no to a line saying yapd started work is a stop of the thread it started, named to the model by its handle, asked about first however sure the model is, never done on a no", () => {
     const start: Ledger.Row = {
       commandId: "yapd:u0:0",
       messageId: "yapd:u0:0:m",
@@ -535,8 +535,13 @@ describe("Brain", () => {
     }
     const given = situation("No, stop it.", { acted: Option.some(start), recent: [start] })
     const replied = { ...given, utterance: { ...given.utterance, via: "reply" as const, afterDone: { change: { what: "acted" as const, utterance: "u0" } } } }
-    const stop = Brain.decision({ act: "stop", target: desk().threads.find(({ thread }) => thread.id === tezos.id)!.handle, sure: "high" })
-    expect(Brain.check(stop, replied, lines)).toMatchObject({ _tag: "Ask", open: { kind: "confirm", asked: "Stop Migrate Tezos Integration, sir?", candidates: [ref(tezos)] } })
+    const handle = desk().threads.find(({ thread }) => thread.id === tezos.id)!.handle
+    expect(Brain.prompt(replied, Option.none())).toContain(`nothing but a no of his to that is "stop", with "target" the thread it started, ${handle}, for yapd to ask him whether to stop it;`)
+    const stop = Brain.decision({ act: "stop", target: handle, sure: "high" })
+    const asked = { _tag: "Ask", open: { kind: "confirm", asked: "Stop Migrate Tezos Integration, sir?", decision: { act: "stop", target: handle }, candidates: [ref(tezos)] } }
+    expect(Brain.check(stop, replied, lines)).toMatchObject(asked)
+    // Over its own voice, the same question, never more.
+    expect(Brain.check(stop, { ...replied, utterance: { ...replied.utterance, echo: "On it, sir: the Tezos migration.", carried: true } }, lines)).toMatchObject(asked)
     // Dictated, a stop the model's sure of goes, as ever.
     expect(Brain.check(stop, given, lines)).toMatchObject({ _tag: "Do" })
   })
