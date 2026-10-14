@@ -55,6 +55,13 @@ export interface Utterance {
    */
   readonly carried?: true
   /**
+   * Whether it was said back to a line saying what came of something he
+   * asked yapd to do, like "On it, sir: the Tezos migration.", in the
+   * moment that line listened after it, run on into it from its last words
+   * or not: a bare no to it is most likely to what it did.
+   */
+  readonly afterDone?: true
+  /**
    * With `echo`, the routines whose steps what yapd was saying holds, as code
    * put them in, like an offer of one read as it comes due: a model is only
    * ever told of what it was saying by their names.
@@ -393,9 +400,10 @@ export class Assistant extends Context.Tag("yapd/Assistant")<
     /**
      * What makes of what he says right after `line`, said of a thread or an
      * update, a follow-up about it, with "it" that thread or update, as he
-     * follows up an answer.
+     * follows up an answer. `done` when the line says what came of something
+     * he asked yapd to do, like a late "On it".
      */
-    readonly following: (about: Threads.Ref | Conversation.Update, line: string) => Conversation.Answer["followUp"]
+    readonly following: (about: Threads.Ref | Conversation.Update, line: string, done?: boolean) => Conversation.Answer["followUp"]
     /**
      * What a thread waits on him for, to ask once nothing else is asked and
      * he isn't dictating, while it still waits on it: once, ever, and once
@@ -2272,8 +2280,8 @@ export const make = (options: {
      */
     const rest = (thought: Thought, first: Outcome, on: Option.Option<Threads.Ref>, step: number, said: Lines): Effect.Effect<Outcome> =>
       Effect.gen(function* () {
-        // What he went on to say after, which yapd's own voice was never in.
-        const { echo: _, afterPause: __, echoRoutines: ___, carried: ____, ...before } = thought.utterance
+        // What he went on to say after, which yapd's own voice was never in, nor said back to the line before.
+        const { echo: _, afterPause: __, echoRoutines: ___, carried: ____, afterDone: _____, ...before } = thought.utterance
         const utterance: Utterance = { ...before, heard: thought.decision.rest, whole: thought.utterance.whole ?? ownWords(thought.utterance) }
         yield* Effect.logInfo(`Then: ${logged(utterance.heard)}`)
         // Working it out has no effect, so it carries on whether or not what's said waits for it, until yapd is turned off, which stops it like the rest of the request.
@@ -4198,10 +4206,12 @@ export const make = (options: {
      * `unsaid`. Begun over its first word, before he could know what it's
      * about, it's most likely a late reply to the line before: then no
      * thread is "it". Run on past its end from over its last words,
-     * `carried`, the model is told it's his reply to all of it.
+     * `carried`, the model is told it's his reply to all of it. Said back to
+     * a line saying what came of something he asked for, `done`, which only
+     * listens from its end, the model is told so, run on into it or not.
      */
     const followUp =
-      (about: Subject, line: Effect.Effect<string>) =>
+      (about: Subject, line: Effect.Effect<string>, done = false) =>
       (heard: string, voiced: number, echo?: string, afterPause?: string, unsaid?: string, carried?: boolean): Effect.Effect<Option.Option<Effect.Effect<void>>> =>
         Effect.gen(function* () {
           const at = yield* Clock.currentTimeMillis
@@ -4220,6 +4230,7 @@ export const make = (options: {
             turns,
             ...overItself({ echo, afterPause, echoRoutines: routinesOf(about).routines }),
             ...(echo === undefined || carried !== true ? {} : { carried }),
+            ...(done ? { afterDone: true } : {}),
             ...(left === undefined ? {} : { unsaid: left }),
           }
           const thought = yield* think(utterance, it, [{ speaker: "yapd", text: heardOf(said, left), ...routinesOf(about) }])
@@ -4410,7 +4421,7 @@ export const make = (options: {
               ? { followUp: followUp(subject, Effect.sync(() => (reworded && instead !== undefined ? instead : outcome.say))) }
               : kind === "done"
                 ? {
-                    followUp: followUp(subject, Effect.sync(() => (reworded && instead !== undefined ? instead : outcome.say))),
+                    followUp: followUp(subject, Effect.sync(() => (reworded && instead !== undefined ? instead : outcome.say)), true),
                     window: Conversation.linger,
                     after: true as const,
                   }
@@ -5075,8 +5086,12 @@ export const make = (options: {
             answered = { subject: { _tag: "Answer", said, about: Option.some(ref) }, at, turns }
           }),
         ),
-      following: (about, line) =>
-        followUp("session" in about ? { _tag: "Session", update: about, said: line } : { _tag: "Answer", said: line, about: Option.some(about) }, Effect.succeed(line)),
+      following: (about, line, done = false) =>
+        followUp(
+          "session" in about ? { _tag: "Session", update: about, said: line } : { _tag: "Answer", said: line, about: Option.some(about) },
+          Effect.succeed(line),
+          done,
+        ),
       ask: (waiting) =>
         Effect.suspend(() => {
           const { requestId } = waiting.asks

@@ -233,10 +233,11 @@ export const make = (
     readonly routines?: Effect.Effect<ReadonlyArray<string>>
     /**
      * What makes of what he says right after a line said of an update, `line`,
-     * a follow-up about it, as the assistant follows up an answer. Without
-     * it, such a line listens only for "Mute.".
+     * a follow-up about it, as the assistant follows up an answer, `done` when
+     * the line says what came of what he said over it. Without it, such a
+     * line listens only for "Mute.".
      */
-    readonly following?: (update: Conversation.Update, line: string) => Conversation.Answer["followUp"]
+    readonly following?: (update: Conversation.Update, line: string, done?: boolean) => Conversation.Answer["followUp"]
   } = {},
 ) => Effect.gen(function* () {
   const lifetime = yield* Effect.scope
@@ -517,7 +518,7 @@ export const make = (
           stale: Effect.succeed(false),
           // Only once it's known to play, so a line for going ahead dropped as yapd was turned off, or that afplay couldn't play, never counts as the last one he heard.
           confirmed: persona.said(spoken),
-          ...(following === undefined || quotes || failed ? {} : { followUp: following(update, line), window: Conversation.linger, after: true }),
+          ...(following === undefined || quotes || failed ? {} : { followUp: following(update, line, true), window: Conversation.linger, after: true }),
         },
         readSince.get(update),
       )

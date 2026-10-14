@@ -4623,6 +4623,28 @@ describe("Assistant", () => {
     expect(result).toEqual(["What about the docs?", "sir. Tell the Mina one to add tests, then tell the Tezos one to wait., run on", "tell the Tezos one to wait"])
   })
 
+  test("said back in the moment after a line saying what came of something he asked for, with none of its own voice, the model is told so, never after an answer", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const told: Array<string> = []
+        const { dictate, followUp, notices } = yield* assistant((situation) => {
+          const { heard, afterDone } = situation.utterance
+          if (heard.startsWith("Tell")) return tezosMessage("high")(situation)
+          if (heard.startsWith("Who")) return Brain.decision({ act: "answer", spoken: "Two threads need you, sir." })
+          told.push(`${heard}${afterDone === true ? ", after what it did" : ""}`)
+          return Brain.decision({ act: "resume" })
+        })
+        yield* dictate("Tell the Tesla's migration to use the fee table from the Mina work.")
+        // Begun a moment after "On it" ended, so none of its own voice is in it.
+        yield* followUp("No.", 1, notices().findLast(({ kind }) => kind === "done"))
+        yield* dictate("Who needs me?")
+        yield* followUp("No.", 1)
+        return told
+      }),
+    )
+    expect(result).toEqual(["No., after what it did", "No."])
+  })
+
   test("asked which thread a request said over yapd's first seconds is for, the model deciding his answer is told what of it may have been yapd's own voice, in OPEN and in LATELY, even once he's had it said again", async () => {
     const over = "Use staging, the Tezos thread says, sir."
     const request = "Use staging. Tell the migration one to add tests."

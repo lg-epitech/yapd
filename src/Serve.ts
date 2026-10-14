@@ -243,8 +243,8 @@ export const serve = Effect.gen(function* () {
       inMind({ memories: { kept, written } }).flatMap(({ name }) => (name === undefined ? [] : [name])),
     ),
     // A late "On it" can be followed up as what was said over its update, which only the assistant works out.
-    following: (update, line) => (heard, voiced, echo, afterPause, unsaid, carried) =>
-      Effect.flatMap(Deferred.await(following), (follow) => follow(update, line)(heard, voiced, echo, afterPause, unsaid, carried)),
+    following: (update, line, done) => (heard, voiced, echo, afterPause, unsaid, carried) =>
+      Effect.flatMap(Deferred.await(following), (follow) => follow(update, line, done)(heard, voiced, echo, afterPause, unsaid, carried)),
   })
   const icons = yield* Icons.make({ actions: threads.actions })
   /** What he hasn't heard, as the assistant gathers it for a catch-up, once it's made. */
