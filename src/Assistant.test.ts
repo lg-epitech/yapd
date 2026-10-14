@@ -678,10 +678,13 @@ const assistant = (
         }),
       /** Nothing was said in the time the question leaves for an answer. */
       unanswered: (to = questions().at(-1)) => to!.question!.unanswered.pipe(Effect.zipRight(flush)),
-      /** Said over or right after the answer, with so many seconds of speech, as the conversation takes it: worked out, then acted on, unless it isn't taken. */
-      followUp: (heard: string, voiced = 2, to = said.findLast(({ kind }) => kind === "answer"), echo?: string, afterPause?: string) =>
+      /**
+       * Said over or right after the answer, with so many seconds of speech, as the conversation takes it: worked out, then acted on,
+       * unless it isn't taken. Said over it, with what it hadn't said yet.
+       */
+      followUp: (heard: string, voiced = 2, to = said.findLast(({ kind }) => kind === "answer"), echo?: string, afterPause?: string, unsaid?: string) =>
         Effect.gen(function* () {
-          const taken = yield* to!.followUp!(heard, voiced, echo, afterPause)
+          const taken = yield* to!.followUp!(heard, voiced, echo, afterPause, unsaid)
           if (Option.isSome(taken)) yield* taken.value
           yield* flush
           return Option.isSome(taken)
@@ -9862,6 +9865,72 @@ describe("Assistant", () => {
     expect(result.open).toEqual(Option.none())
     // What the model is shown it said is the same.
     expect(result.shown).toBe(told)
+  })
+
+  test("a follow-up begun over an answer's first word is worked out with the answer cut to that word and no thread as 'it'", async () => {
+    const answer = "It's comparing fee tables: three of eight networks done, sir."
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, followUp, seen } = yield* assistant((situation) =>
+          Option.isSome(situation.second)
+            ? Brain.decision({ act: "answer", target: handle(situation, tezos), spoken: answer })
+            : situation.utterance.via === "shortcut"
+              ? Brain.decision({ act: "look", target: handle(situation, tezos) })
+              : Brain.decision({ act: "resume" }),
+        )
+        yield* dictate("Get me the status of the Tezos one.")
+        /** What the model is shown of what he said over the answer, with what it hadn't said yet then. */
+        const over = (unsaid: string) =>
+          Effect.gen(function* () {
+            yield* followUp("And the Mina one?", 2, undefined, undefined, undefined, unsaid)
+            const { lines, subject, utterance } = seen.at(-1)!
+            return { lines, about: subject._tag === "Answer" ? Option.isSome(subject.about) : subject._tag, unsaid: utterance.unsaid }
+          })
+        const words = answer.split(" ")
+        return { first: yield* over(words.slice(1).join(" ")), fifth: yield* over(words.slice(5).join(" ")) }
+      }),
+    )
+    // Begun before he could know what it's about, it's most likely about the line before, so no thread is "it", and the model has to ask.
+    expect(result.first).toEqual({ lines: [{ speaker: "yapd", text: "It's…" }], about: false, unsaid: answer.split(" ").slice(1).join(" ") })
+    expect(result.fifth).toEqual({ lines: [{ speaker: "yapd", text: "It's comparing fee tables: three…" }], about: true, unsaid: answer.split(" ").slice(5).join(" ") })
+  })
+
+  test("after a restart, what yapd couldn't confirm went is told with nothing listened for after it; so is a message that failed with nothing offered", async () => {
+    const restarted = await run(
+      Effect.gen(function* () {
+        const { unconfirmed, notices, ledger } = yield* assistant(() => undefined)
+        const message = yield* ledger.prepare({
+          utterance: "u-old1",
+          step: 0,
+          kind: "message",
+          machine: "Rosie",
+          thread: tezos.id,
+          body: ({ messageId }) => ({ _tag: "Send", text: "Use the fee table.", messageId, how: "now" }),
+          message: true,
+        })
+        const stop = yield* ledger.prepare({ utterance: "u-old2", step: 0, kind: "stop", machine: "Rosie", thread: tezos.id, body: () => ({ _tag: "Stop" }), message: false })
+        yield* unconfirmed([
+          { ...message, state: "abandoned", reason: Hands.unconfirmable },
+          { ...stop, state: "abandoned", reason: Hands.unconfirmable },
+        ])
+        return notices().map(({ kind, followUp }) => [kind, followUp !== undefined])
+      }),
+    )
+    expect(restarted).toEqual([
+      ["done", false],
+      ["done", false],
+    ])
+    const failed = await run(
+      Effect.gen(function* () {
+        const { dictate, notices } = yield* assistant(tezosMessage("high"), undefined, {
+          answer: () => () => Effect.fail(new T3CodeServer.Refusal({ tag: "OrchestrationV2DispatchCommandError", message: "The provider is offline." })),
+        })
+        yield* dictate("Tell the Tesla's migration to use the fee table from the Mina work.")
+        const { kind, spoken, followUp } = notices().at(-1)!
+        return { kind, spoken, listened: followUp !== undefined }
+      }),
+    )
+    expect(failed).toEqual({ kind: "done", spoken: "That didn't go to Migrate Tezos Integration, sir: the provider is offline.", listened: false })
   })
 
   test("an answer can be followed up as anything dictated is, with \"it\" the thread it was about, so a message goes there", async () => {

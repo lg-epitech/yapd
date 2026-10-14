@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { Clock, Context, Deferred, Effect, Exit, Fiber, Layer, Logger, Option, Queue, Schema, Scope, STM, Stream, TestClock, TestContext, TRef } from "effect"
+import { Clock, Context, Deferred, type Duration, Effect, Exit, Fiber, Layer, Logger, Option, Queue, Schema, Scope, STM, Stream, TestClock, TestContext, TRef } from "effect"
 import { hostname } from "node:os"
 import * as Assistant from "./Assistant.ts"
 import { Audio, AudioError } from "./Audio.ts"
@@ -109,6 +109,8 @@ const make = (says?: string, options: {
   readonly finishing?: (about: Threads.Ref, before: number, ended: Effect.Effect<Reminders.Ending>) => Effect.Effect<ReadonlyArray<Reminders.Leading>>
   /** How the turn a Stop told of ended, as its thread's run has it. */
   readonly ending?: (about: Threads.Ref, stop: Notices.Stop) => Effect.Effect<Reminders.Ending>
+  /** Where what's said right after a line said of an update, that can be followed up, goes, with that line. */
+  readonly following?: Array<string>
 } = {}) => Effect.gen(function* () {
   /** What each rendered file says, and what was played, in order. */
   const rendered = new Map<string, string>()
@@ -291,6 +293,9 @@ const make = (says?: string, options: {
     ...(options.off === true ? { off: Effect.suspend(() => switchOff) } : {}),
     ...(options.finishing === undefined ? {} : { finishing: options.finishing }),
     ...(options.ending === undefined ? {} : { ending: options.ending }),
+    ...(options.following === undefined
+      ? {}
+      : { following: (_: unknown, line: string) => (heard: string) => Effect.succeed(Option.some(Effect.sync(() => void options.following?.push(`${line} ${heard}`)))) }),
     // This machine is Rosie, as yapd serves it.
     naming,
   }).pipe(Effect.provide(context))
@@ -356,6 +361,10 @@ const make = (says?: string, options: {
       readonly unheard?: Array<string | undefined>
       readonly gone?: Array<string>
       readonly followUp?: Array<string>
+      /** With `followUp`, whether it's followed up only from its end, said unasked, and how long it's listened to after. */
+      readonly after?: boolean
+      readonly unasked?: boolean
+      readonly window?: Duration.DurationInput
     } = {},
   ) =>
     tell({
@@ -374,6 +383,9 @@ const make = (says?: string, options: {
         : {
             followUp: (heard: string) =>
               Effect.succeed(heard.startsWith("Sam,") ? Option.none() : Option.some(Effect.sync(() => void options.followUp?.push(`${id}: ${heard}`)))),
+            ...(options.after === true ? { after: true as const } : {}),
+            ...(options.unasked === true ? { unasked: true as const } : {}),
+            ...(options.window === undefined ? {} : { window: options.window }),
           }),
       ...(options.question === undefined
         ? {}
@@ -5291,6 +5303,168 @@ describe("Daemon with threads muted", () => {
   })
 })
 
+describe("Lines listened to from their end", () => {
+  /** What he says, for as long as it takes to be his, begun now, ending once `after` seconds have gone by. */
+  const saying = (microphone: Queue.Queue<Float32Array>, flush: Effect.Effect<unknown>, wait: (seconds: number) => Effect.Effect<void>, after: number) =>
+    Effect.gen(function* () {
+      yield* Queue.offerAll(microphone, Array.from({ length: 30 }, () => new Float32Array(512).fill(0.9)))
+      yield* flush
+      yield* wait(after)
+      yield* Queue.offerAll(microphone, Array.from({ length: defaults.silence }, () => new Float32Array(512)))
+      yield* flush
+    })
+
+  test.each([
+    ["as it ends", 9.5],
+    ["in the wait after it", 11],
+  ] as const)("'Mute.' said %s, over a notice that can be answered, turns yapd off without working anything out", async (_, at) => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { made, notice, microphone, flush, wait, responded } = yield* make("Mute.", { off: true })
+        const followUp: Array<string> = []
+        yield* notice("f", "Tezos failed: rate limited.", { followUp, after: true })
+        yield* wait(at)
+        yield* saying(microphone, flush, wait, 1)
+        return { on: (yield* made.power).on, followUp, responded: [...responded] }
+      }),
+    )
+    expect(result).toEqual({ on: false, followUp: [], responded: [] })
+  })
+
+  test.each([
+    ["a failure", "Tezos failed: rate limited.", false],
+    ["a 'done' line", "On it, sir: the Tezos migration.", true],
+  ] as const)("with an answer waiting, 'Mute.' begun 0.1 s after %s ends turns yapd off; with nothing said, the answer follows 2 s after it ends, with no pause of its own", async (_, spoken, done) => {
+    const after = (mute: boolean) =>
+      run(
+        Effect.gen(function* () {
+          const { made, notice, microphone, flush, wait, played } = yield* make(mute ? "Mute." : undefined, { off: true, microphone: true })
+          yield* notice("f", spoken, { followUp: [], after: true, done })
+          yield* wait(1)
+          yield* notice("a", "The Mina one is still running its tests, sir.", { answer: true })
+          yield* wait(9.1)
+          if (mute) {
+            yield* saying(microphone, flush, wait, 0.5)
+            return { on: (yield* made.power).on, played: [...played] }
+          }
+          // Two seconds after it ended, and a beat, but not the pause between lines.
+          yield* wait(1.9)
+          const before = [...played]
+          yield* wait(0.15)
+          return { before, played: [...played] }
+        }),
+      )
+    expect(await after(true)).toEqual({ on: false, played: [spoken] })
+    expect(await after(false)).toEqual({ before: [spoken], played: [spoken, "The Mina one is still running its tests, sir."] })
+  })
+
+  test("with two answers queued, a follow-up begun a second after the first ends goes to the first, not the second", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { notice, wait, speak, played } = yield* make(undefined, { microphone: true, transcripts: ["Tell it to rerun them."] })
+        const followUp: Array<string> = []
+        yield* notice("first", "The loader fix is running its tests, sir.", { answer: true, followUp })
+        yield* wait(1)
+        yield* notice("second", "Nothing else needs you, sir.", { answer: true, followUp })
+        yield* wait(10)
+        yield* speak
+        yield* wait(1)
+        return { followUp, played: [...played] }
+      }),
+    )
+    expect(result).toEqual({ followUp: ["first: Tell it to rerun them."], played: ["The loader fix is running its tests, sir.", "Nothing else needs you, sir."] })
+  })
+
+  test("a failure said with no dictation or reply taken in the last ten minutes listens only for 'Mute.'; said a minute after a dictation, it can be answered", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { notice, wait, speak, dictate } = yield* make(undefined, { microphone: true, transcripts: ["Tell it to rerun them."] })
+        const followUp: Array<string> = []
+        yield* notice("away", "Tezos failed: rate limited.", { followUp, after: true, unasked: true })
+        yield* wait(11)
+        yield* speak
+        yield* wait(5)
+        const away = [...followUp]
+        yield* Scope.close(yield* dictate, Exit.void)
+        yield* wait(60)
+        yield* notice("near", "Mina failed: the fee tests broke.", { followUp, after: true, unasked: true })
+        yield* wait(11)
+        yield* speak
+        yield* wait(1)
+        return { away, near: [...followUp] }
+      }),
+    )
+    expect(result).toEqual({ away: [], near: ["near: Tell it to rerun them."] })
+  })
+
+  test.each([
+    ["went, says so from its end, and what he says after it is taken up", false],
+    ["couldn't be sent says so without listening, so nothing said after it goes anywhere", true],
+  ] as const)("a reply cut off by a dictation that %s", async (_, fails) => {
+    const result = await run(
+      Effect.gen(function* () {
+        const following: Array<string> = []
+        const { finish, speak, wait, dictate, played } = yield* make("Merge it.", {
+          following,
+          transcripts: ["Merge it.", "Send it again."],
+          send: () => Effect.sleep("3 seconds").pipe(Effect.zipRight(fails ? Effect.fail(new RelayError({ reason: "T3 Code isn't answering." })) : Effect.void)),
+        })
+        yield* finish("a", "The PR is ready.")
+        yield* speak
+        yield* wait(1)
+        yield* Scope.close(yield* dictate, Exit.void)
+        // Sent or not, then said to the end.
+        yield* wait(3)
+        yield* wait(10)
+        yield* speak
+        yield* wait(4)
+        return { following, played: [...played] }
+      }),
+    )
+    expect(result.played).toEqual(["yapd. The PR is ready.", fails ? "yapd. T3 Code isn't answering." : "yapd. Okay, passed on."])
+    expect(result.following).toEqual(fails ? [] : ["yapd. Okay, passed on. Send it again."])
+  })
+
+  test("a late line that reads his message back never listens, so nothing said after it goes anywhere", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const following: Array<string> = []
+        const { handle, finish, speak, wait, dictate, nextPlayback, nextEvent, heard, replay, played } = yield* make("Merge it.", {
+          following,
+          transcripts: ["Merge it.", "Run the checks.", "Send it again."],
+        })
+        yield* finish("a", "The PR is ready.")
+        yield* nextPlayback
+        yield* speak
+        yield* wait(1)
+        yield* Scope.close(yield* dictate, Exit.void)
+        // Heard again, what he says over it waits behind the first.
+        const [id] = yield* heard
+        yield* replay(id!)
+        yield* wait(1)
+        yield* nextPlayback
+        yield* speak
+        yield* nextPlayback
+        yield* wait(3)
+        yield* handle("claude", { hook_event_name: "UserPromptSubmit", session_id: "a", cwd: "/tmp", prompt: "Merge it." }, { project: "yapd" }, false)
+        yield* finish("a", "Merged it.")
+        // Sent once the turn it waited behind ended, then said once what's ahead of it has been.
+        yield* wait(3)
+        yield* nextEvent("Ready: yapd. Sent the queued message")
+        const sent = (said: string) => said.startsWith("yapd. Sent the queued message")
+        for (let second = 0; second < 60 && !played.some(sent); second++) yield* wait(1)
+        // Said to the end, then he says something right after.
+        yield* wait(10)
+        yield* speak
+        yield* wait(4)
+        return { line: played.find(sent), following }
+      }),
+    )
+    expect(result.line).toBe("yapd. Sent the queued message: Run the checks.")
+    expect(result.following.filter((followed) => followed.startsWith("yapd. Sent the queued message"))).toEqual([])
+  })
+})
+
 describe("Daemon turned off by 'Mute.'", () => {
   /** The updates kept, what each said, when it was heard, and why it was held, if it was. */
   const kept = (journal: Journal.Journal["Type"]) =>
@@ -5926,6 +6100,11 @@ describe("Daemon while off", () => {
         yield* wait(11)
         yield* speak
         yield* wait(11)
+        // What came of what he asked, which on would be listened to from its end.
+        yield* notice("started", "Started the parser fix, sir.", { done: true, followUp, after: true, heard })
+        yield* wait(11)
+        yield* speak
+        yield* wait(11)
         // Of its own accord, nothing.
         yield* notice("failed", "The Tezos migration failed.")
         yield* finish("a", "The PR is ready.")
@@ -5933,8 +6112,8 @@ describe("Daemon while off", () => {
         return { played: [...played], followUp, heard, asked, answers, listened: listened.length }
       }),
     )
-    expect(result.played).toEqual(["Distribox is migrated, sir.", "The Tezos migration or the Mina tickets, sir?"])
-    expect(result).toMatchObject({ followUp: [], answers: [], listened: 0, heard: ["answer", "which"], asked: ["which unanswered"] })
+    expect(result.played).toEqual(["Distribox is migrated, sir.", "The Tezos migration or the Mina tickets, sir?", "Started the parser fix, sir."])
+    expect(result).toMatchObject({ followUp: [], answers: [], listened: 0, heard: ["answer", "which", "started"], asked: ["which unanswered"] })
   })
 
   test("turned on again, what it was saying or about to say in answer to what he asked while it was off is stopped and dropped, never heard", async () => {

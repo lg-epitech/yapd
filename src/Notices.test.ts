@@ -158,6 +158,8 @@ const notices = (
       store,
     })
     const told: Array<string> = []
+    /** Everything handed over to be said, said or not, and whether what's said after it can be taken up. */
+    const handed: Array<readonly [string, boolean]> = []
     /** The entries what was told was kept under, as it was being said. */
     const beingSaid: Array<string> = []
     /** What was asked as the one question open, as the assistant asks it: kept under its key, or the entry it was kept under before, and heard to the end. */
@@ -180,6 +182,7 @@ const notices = (
     const waiting = new Map<string, Notice>()
     const tell = (notice: Notice) =>
       Effect.gen(function* () {
+        handed.push([notice.spoken, notice.followUp !== undefined])
         if (given.dropping === true) {
           power.on = false
           power.turns++
@@ -223,6 +226,7 @@ const notices = (
       ...(reminders === undefined ? {} : { reminders, offered: (reminder) => Effect.sync(() => void offers.push(reminder.propose ?? "")) }),
       ...(given.holding === undefined ? {} : { holding: Effect.sync(given.holding) }),
       ...(given.archiving === undefined ? {} : { archiving: given.archiving }),
+      following: () => () => Effect.succeedNone,
     }).pipe(Effect.provide(Layer.merge(persona, condenser(rewritten))))
     yield* Effect.forkScoped(made.follow)
     const flush = Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 20)))
@@ -234,6 +238,7 @@ const notices = (
       offers,
       power,
       told,
+      handed,
       beingSaid,
       asked,
       worded,
@@ -1799,6 +1804,52 @@ describe("Notices of reminders", () => {
     // In words that aren't its run's, as when the thread is on another run by now, it can't be told how it went.
     expect(Notices.ended(stop("The build is green again."), failed, std)).toEqual({ _tag: "Unknown" })
     expect(Notices.ended(stop("The provider failed, so I stopped."), { ...failed, status: "running" }, std)).toEqual({ _tag: "Unknown" })
+  })
+
+  test("a failure or a reminder can be answered about its thread; a thread waiting on a secret, or on what yapd can't word, and 'your reminders went with it', even said again after a restart, are told with nothing listened for", async () => {
+    const failed = thread("tezos", "Migrate Tezos Integration", { status: "failed", latestRunId: "run-1", lastErrorClass: "provider_error" })
+    const stripe = thread("stripe", "Wire up Stripe", { activeRunId: "run-2", pendingRuntimeRequest: { id: "r2", kind: "user_input", createdAt: minutes(0) } })
+    const mina = thread("mina", "Open Mina SSV2 Bug Tickets", { activeRunId: "run-3", pendingRuntimeRequest: { id: "r3", kind: "user_input", createdAt: minutes(0) } })
+    const loader = thread("loader", "Fix the loader")
+    const bounded: Record<string, Bounded> = {
+      tezos: {
+        runs: [{ id: "run-1", status: "failed", ordinal: 1, startedAt: minutes(5) }],
+        turnItems: [failure("run-1", "provider_error", "API Error: 500 Internal server error")],
+        sessions: ["s-tezos"],
+      },
+      stripe: { turnItems: [{ type: "secret_request", id: "r2", status: "waiting", label: "Stripe API key" }] },
+      // Its card is never there to be read.
+      mina: {},
+    }
+    const view = [failed, stripe, mina, loader]
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* notices({ view, bounded, reminding: true, queueing: true })
+        yield* made.reminders!.add({ ...bank(now - 60_000), machine: "Rosie", thread: "tezos", called: "the Tezos importer" })
+        yield* made.reminders!.add({ ...bank(now + 60 * 60_000), machine: "Rosie", thread: "loader", called: "the loader fix" })
+        yield* made.due
+        yield* made.hear(
+          ended(failed, "run-1"),
+          { _tag: "Asked", thread: stripe, request: stripe.pendingRuntimeRequest! },
+          { _tag: "Asked", thread: mina, request: mina.pendingRuntimeRequest! },
+          { _tag: "Removed", thread: loader },
+        )
+        yield* made.wait(10)
+        // Taken up, then cut off by a dictation, so none is heard: after a restart, what's said again of a reminder is said once more.
+        yield* made.cut
+        const again = yield* notices({ view, bounded, reminding: true, queueing: true, store: made.store })
+        yield* again.retell
+        return { handed: made.handed, again: again.handed }
+      }),
+    )
+    const listens = (handed: ReadonlyArray<readonly [string, boolean]>, word: RegExp) => handed.filter(([spoken]) => word.test(spoken)).map(([, listens]) => listens)
+    expect(listens(result.handed, /call the bank/)).toEqual([true])
+    expect(listens(result.handed, /failed/)).toEqual([true])
+    expect(listens(result.handed, /Stripe/)).toEqual([false])
+    expect(listens(result.handed, /Mina/)).toEqual([false])
+    expect(listens(result.handed, /dropped your reminder/)).toEqual([false])
+    expect(listens(result.again, /dropped your reminder/)).toEqual([false])
+    expect(listens(result.again, /call the bank/)).toEqual([true])
   })
 })
 
