@@ -2550,6 +2550,45 @@ describe("Assistant", () => {
     expect(result).toEqual({ over: ["I couldn't work that out just now, sir. What you said is in my log."], open: Option.some(`${choices}, sir?`) })
   })
 
+  test("code's own question from the rest of what may all be yapd's own words said back to a done line, in place of a question, tells him what was left of it, whether he was yet to hear it or had", async () => {
+    const choices = "Migrate Tezos Integration or Open Mina SSV2 Bug Tickets"
+    const taking = (hearing: boolean) =>
+      run(
+        Effect.gen(function* () {
+          const made = yield* assistant(
+            (situation) => {
+              const { heard } = situation.utterance
+              if (heard.startsWith("Tell the Tesla")) return tezosMessage("high")(situation)
+              // Which thread his message is for, with more of his request after it.
+              if (heard.startsWith("Tell the migration")) {
+                return Brain.decision({ act: "send", target: handle(situation, tezos), sure: "low", others: handle(situation, mina), text: "Add tests.", how: "now", rest: "Tell the Mina one to rebase." })
+              }
+              // Its own "On it." heard ahead of more, let go, and the rest taken for stopping the Tezos thread.
+              if (heard.startsWith("On it")) return Brain.decision({ act: "dismiss", rest: "Stop the Tezos one." })
+              return Brain.decision({ act: "stop", target: handle(situation, tezos), sure: "high" })
+            },
+            undefined,
+            { waiting: true },
+          )
+          yield* made.dictate("Tell the Tesla's migration to use the fee table from the Mina work.")
+          const sent = made.notices().findLast(({ kind }) => kind === "done")
+          // Which thread is asked behind the done line, which he hears first.
+          yield* made.dictate("Tell the migration one to add tests, and the Mina one to rebase.")
+          yield* made.play(sent)
+          if (hearing) yield* made.play(made.questions().at(-1))
+          const before = made.spoken().length
+          yield* made.followUp("On it. Stop the Tezos one.", 2, sent, sent?.spoken, undefined, undefined, true)
+          return { over: made.spoken().slice(before), open: Option.map(yield* made.open, ({ asked }) => asked) }
+        }),
+      )
+    const asked = "Stop Migrate Tezos Integration, sir?"
+    expect(await taking(false)).toEqual({
+      over: [`I didn't ask whether you meant ${choices}, since you'd moved on, sir. I left the rest: Tell the Mina one to rebase.`, asked],
+      open: Option.some(asked),
+    })
+    expect(await taking(true)).toEqual({ over: ["I left the rest, sir: Tell the Mina one to rebase.", asked], open: Option.some(asked) })
+  })
+
   test("a message said over a question that can't go as its answer, to a form that takes only its options or as T3 Code takes a message, goes in the queue behind it, and the question is asked again after", async () => {
     const cloud = waitingOn({ id: "q1", kind: "user_input" })
     const telling = (items: ReadonlyArray<Record<string, unknown>>, text: string) =>

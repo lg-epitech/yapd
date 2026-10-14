@@ -1424,7 +1424,7 @@ export const make = (options: {
      * what didn't go and the rest of its request, and a message it would have
      * offered to send again is never offered on its own.
      */
-    const opening = (open: Omit<Open, "id" | "version" | "at">, utterance: Pick<Utterance, "turns" | "at">) =>
+    const opening = (open: Omit<Open, "id" | "version" | "at">, utterance: Utterance | Pick<Utterance, "turns" | "at">) =>
       Effect.gen(function* () {
         if (yield* outdated(utterance.turns)) return quiet({ _tag: "Nothing" })
         if (asking !== undefined && before(utterance) === undefined) {
@@ -1442,7 +1442,16 @@ export const make = (options: {
                   : unasked(open.about, said)
           return unfinished(withoutWords(ofRoutines(reply(left, { _tag: "Nothing" }), askedRoutines(open)), open), open.decision.rest, said)
         }
-        if (asking !== undefined) yield* close(asking.open, "replaced")
+        if (asking !== undefined) {
+          // Its place taken only by a step after the first of what he said, like code's own question from the rest of what may all be
+          // yapd's own words, he's told what was left of it all the same, as when the first step's is: of one he was yet to hear, what
+          // didn't go and the rest of its request, and of one he'd heard, the rest of its request.
+          const { open: replaced, said: heard } = asking
+          yield* close(replaced, "replaced")
+          const said = yield* persona.lines
+          const left = heard === undefined ? unheardLeft(replaced, said) : ahead(quiet({ _tag: "Nothing" }), replaced.decision.rest, said)
+          yield* deliver(left, "heard" in utterance ? utterance : { id: replaced.utterance, turns: utterance.turns })
+        }
         const at = yield* Clock.currentTimeMillis
         version++
         // A dictation begun before it was asked can't be answering it, so nothing holds it yet.
@@ -1982,6 +1991,18 @@ export const make = (options: {
       const left = Brain.speakable(rest, nowhere).replace(/[.!?]+$/, "")
       if (left === "") return outcome
       return { ...retold(outcome, (say) => joined(`I left the rest${addressed(said)}: ${left}.`, say, said)), kind: outcome.kind === "none" ? "answer" : outcome.kind }
+    }
+
+    /**
+     * What's said of a question he was yet to hear when something new took
+     * its place, since he'd moved on: what didn't go, and the rest of its
+     * request. Nothing is of what a thread waits on him for, which is asked
+     * after instead.
+     */
+    const unheardLeft = (open: Open, said: Lines): Outcome => {
+      if (requestOf(open) !== undefined) return quiet({ _tag: "Nothing" })
+      const left = open.news === undefined ? Brain.left(open, said) : `${open.news} ${unaskedAfter(open)}, since you'd moved on.`
+      return unfinished(withoutWords(ofRoutines(reply(left, { _tag: "Nothing" }), askedRoutines(open)), open), open.decision.rest, said)
     }
 
     /**
@@ -4157,10 +4178,7 @@ export const make = (options: {
           // waiting its turn as it was, and nothing is said of it, so it's never lost to them, nor told as left since he'd moved on.
           if (checked._tag !== "Ask" && Brain.mayBeOwn(utterance)) return yield* follow(checked, decided, said)
           yield* close(open, "replaced", utterance.id)
-          // What a thread waits on him for is asked after instead, so there's nothing to tell him of it now.
-          if (requestOf(open) !== undefined) return yield* follow(checked, decided, said)
-          const left = open.news === undefined ? Brain.left(open, said) : `${open.news} ${unaskedAfter(open)}, since you'd moved on.`
-          yield* deliver(unfinished(withoutWords(ofRoutines(reply(left, decided.subject), askedRoutines(open)), open), open.decision.rest, said), decided)
+          yield* deliver(unheardLeft(open, said), decided)
           return yield* follow(checked, decided, said)
         }
         // Saying again just what was asked about, like the same message to the same thread, is a yes to it. To sending one again, whatever
