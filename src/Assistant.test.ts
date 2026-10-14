@@ -4793,6 +4793,51 @@ describe("Assistant", () => {
     }
   })
 
+  test("a no the model isn't sure takes back, after a late word that a steer went, asks about the steer, and a yes withdraws it alone, never what went to the same thread since", async () => {
+    const said = (since: boolean) =>
+      run(
+        Effect.gen(function* () {
+          const { dictate, following, answer, wait, flush, questions, dispatched, ledger } = yield* assistant(
+            (situation) => {
+              const asked = situation.utterance.heard
+              if (asked.startsWith("Tell the Tesla")) return Brain.decision({ act: "send", target: handle(situation, tezos), text: "Use staging.", how: "now" })
+              if (asked.startsWith("Then tell")) return Brain.decision({ act: "send", target: handle(situation, tezos), text: "Add tests.", how: "now" })
+              // A no that may not be to the steer.
+              return Brain.decision({ act: "undo", sure: "medium" })
+            },
+            undefined,
+            { answer: () => queues },
+          )
+          yield* dictate("Tell the Tesla's migration to use staging.")
+          const steer = Option.getOrThrow(yield* ledger.latest("1 minute"))
+          yield* wait(5)
+          // More sent the same thread after the line, or nothing.
+          if (since) yield* dictate("Then tell it to add tests.")
+          const after = Option.getOrThrow(yield* ledger.latest("1 minute"))
+          const taken = yield* following({ machine: "Rosie", id: tezos.id }, "On it, sir.", { change: { what: "acted", utterance: steer.utterance } })("No.", 1)
+          if (Option.isSome(taken)) yield* taken.value
+          yield* flush
+          const asked = questions().map(({ spoken }) => spoken)
+          const unasked = dispatched.filter(({ type }) => type === "queued-run.cancel").length
+          yield* answer("Yes.")
+          return {
+            asked,
+            unasked,
+            withdrawn: dispatched.filter(({ type }) => type === "queued-run.cancel").map(({ runId }) => runId),
+            steer: `run-${steer.messageId}`,
+            after: Option.map(yield* ledger.get(after.commandId), ({ state }) => state),
+          }
+        }),
+      )
+    for (const since of [false, true]) {
+      const result = await said(since)
+      expect(result.asked).toEqual(["Take back the message to Migrate Tezos Integration, sir?"])
+      expect(result.unasked).toBe(0)
+      expect(result.withdrawn).toEqual([result.steer])
+      if (since) expect(result.after).toEqual(Option.some("sent"))
+    }
+  })
+
   test("taken back after a late word that a reply went, it's that reply alone, though more went to the same thread between working it out and doing it", async () => {
     const said = (heard: string) =>
       run(

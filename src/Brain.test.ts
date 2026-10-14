@@ -480,9 +480,9 @@ describe("Brain", () => {
     }
     const carried = ` You had said all of your line before he went on, so what he said after its last words is his reply to it, however short.`
     // New work can't be taken back, so a no to it only ever asks whether to stop it.
-    const done = `He spoke right after your last line, which told him what you just did for him. When it says you did something for him, like sending a message, nothing but a no of his to that, like "No.", "No, don't." or "Scratch that.", is never a dismissal: it's "undo" when it plainly takes that back, or else "answer", asking him in a few words whether to take it back; never "dismiss" or "resume". When it says you started work for him, which can't be taken back, nothing but a no of his to that is "answer", asking him in a few words whether to stop it; never "undo", "dismiss" or "resume". Otherwise, as when it says something didn't go, a no goes as usual.`
+    const done = `He spoke right after your last line, which told him what you just did for him. When it says you did something for him, like sending a message, nothing but a no of his to that, like "No.", "No, don't." or "Scratch that.", is never a dismissal: it's "undo", with "sure" "high" when it plainly takes that back, or lower when it may not, for yapd to ask him whether to take it back; never "answer", "dismiss" or "resume". When it says you started work for him, which can't be taken back, nothing but a no of his to that is "answer", asking him in a few words whether to stop it; never "undo", "dismiss" or "resume". Otherwise, as when it says something didn't go, a no goes as usual.`
     // With its own voice in what was heard, a no that may be its own words, like its "Noted.", is never his, as the echo rule has it.
-    const own = ` What was heard may hold your own words, as above: only what's surely his can be his no, never words that may be yours, like a "No." that may be your own "Noted.", and if nothing surely his is left, it's "resume".`
+    const own = ` What was heard may hold your own words, as above: only what's surely his can be his no, never words that may be yours, like a "No." that may be your own "Noted.", and if nothing surely his is left, it's "resume", never "undo", however low its "sure".`
     expect(told({ echo, carried: true, afterDone })).toContain(`A question or a dismissal of his goes as usual.${carried}\n\n${done}${own}\n\nWHAT HE SAID`)
     expect(told({ echo, carried: true, afterDone, afterPause: "No." })).toContain(`A question or a dismissal of his goes as usual.${carried} What he said after a pause, «No.», is surely his`)
     // Begun once it had ended, with none of its own voice in what he said, the same of a no.
@@ -571,6 +571,36 @@ describe("Brain", () => {
     // What the line said, the memory, is taken back as ever.
     expect(Brain.check(Brain.decision({ act: "undo", how: "memory", sure: "high" }), replied, lines)).toMatchObject({ _tag: "Do" })
     expect(Brain.check(Brain.decision({ act: "undo", sure: "high" }), replied, lines)).toMatchObject({ _tag: "Do" })
+  })
+
+  test("a no said back to a done line that the model isn't sure takes it back is asked about, pinned to the line's own step, and a sure one goes ahead pinned to it", () => {
+    const sent: Ledger.Row = {
+      commandId: "yapd:u0:0",
+      messageId: "yapd:u0:0:m",
+      utterance: "u0",
+      step: 0,
+      kind: "message",
+      machine: "Rosie",
+      thread: tezos.id,
+      body: { _tag: "Send", text: "Use staging.", messageId: "yapd:u0:0:m", how: "now" },
+      digest: "use staging",
+      state: "sent",
+      how: "queued",
+      reason: null,
+      at: now - 5_000,
+    }
+    const given = situation("No.", { acted: Option.some(sent), recent: [sent] })
+    const replied = { ...given, utterance: { ...given.utterance, via: "reply" as const, afterDone: { change: { what: "acted" as const, utterance: "u0" } } } }
+    for (const sure of ["medium", "low"] as const) {
+      expect(Brain.check(Brain.decision({ act: "undo", sure }), replied, lines)).toMatchObject({
+        _tag: "Ask",
+        open: { kind: "confirm", asked: "Take back the message to Migrate Tezos Integration, sir?", decision: { act: "undo", how: "message" }, pinned: "yapd:u0:0" },
+      })
+    }
+    expect(Brain.check(Brain.decision({ act: "undo", sure: "high" }), replied, lines)).toMatchObject({ _tag: "Do", plan: { decision: { act: "undo" }, pinned: "yapd:u0:0" } })
+    // Dictated, it's whatever was done last, as ever, pinned to nothing.
+    const dictated = Brain.check(Brain.decision({ act: "undo", sure: "medium" }), given, lines)
+    expect(dictated._tag === "Do" ? dictated.plan.pinned : dictated).toBeUndefined()
   })
 
   test("over yapd's first seconds, what he said after a pause isn't taken for nothing on the strength of yapd's own word before it", () => {

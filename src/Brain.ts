@@ -3325,21 +3325,24 @@ const theirs = (choice: Decision, situation: Situation): Reach | undefined => {
  * yapd changed, or he's asked first, naming what his yes takes back, and it
  * takes back that alone: the line's own change, when he means that kind of
  * change, however much was done since, or else what it would reach. It goes
- * ahead, as `going` has it, when it reaches the line's own change, a step
- * pinned to its command, so one written before it's done is never what's
- * taken back; or when there's nothing to ask about, as ever, like a refusal
- * of what can't be taken back.
+ * ahead, as `going` has it, when it reaches the line's own change and the
+ * model's sure he means that, a step pinned to its command, so one written
+ * before it's done is never what's taken back; or when there's nothing to
+ * ask about, as ever, like a refusal of what can't be taken back. A no the
+ * model isn't sure takes it back is asked about here, never in words of the
+ * model's own, which nothing would hold his yes to.
  */
 const answeredBack = (choice: Decision, situation: Situation, lines: Lines, going: () => Checked): Checked => {
   if (situation.utterance.afterDone === undefined) return going()
   const reach = reaching(choice, situation)
-  if (reach !== undefined && owned(situation, reach.change)) return pinning(going(), reach)
+  const ours = reach !== undefined && owned(situation, reach.change) ? reach : undefined
+  if (ours !== undefined && choice.sure === "high") return pinning(going(), ours)
   const own = theirs(choice, situation)
   const said = choice.act === "undo" ? choice : { how: "", target: "" }
   return (
     (own === undefined ? undefined : askingBack(own, situation, lines, said)) ??
     (reach === undefined ? undefined : askingBack(reach, situation, lines, said)) ??
-    going()
+    (ours === undefined ? going() : pinning(going(), ours))
   )
 }
 
@@ -4539,10 +4542,10 @@ export const prompt = (situation: Situation, style: Option.Option<string>) => {
     ...(situation.utterance.afterDone?.change === undefined
       ? []
       : [
-          `He spoke right after your last line, which told him what you just did for him. When it says you did something for him, like sending a message, nothing but a no of his to that, like "No.", "No, don't." or "Scratch that.", is never a dismissal: it's "undo" when it plainly takes that back, or else "answer", asking him in a few words whether to take it back; never "dismiss" or "resume". When it says you started work for him, which can't be taken back, nothing but a no of his to that is "answer", asking him in a few words whether to stop it; never "undo", "dismiss" or "resume". Otherwise, as when it says something didn't go, a no goes as usual.${
+          `He spoke right after your last line, which told him what you just did for him. When it says you did something for him, like sending a message, nothing but a no of his to that, like "No.", "No, don't." or "Scratch that.", is never a dismissal: it's "undo", with "sure" "high" when it plainly takes that back, or lower when it may not, for yapd to ask him whether to take it back; never "answer", "dismiss" or "resume". When it says you started work for him, which can't be taken back, nothing but a no of his to that is "answer", asking him in a few words whether to stop it; never "undo", "dismiss" or "resume". Otherwise, as when it says something didn't go, a no goes as usual.${
             situation.utterance.echo === undefined
               ? ""
-              : ` What was heard may hold your own words, as above: only what's surely his can be his no, never words that may be yours, like a "No." that may be your own "Noted.", and if nothing surely his is left, it's "resume".`
+              : ` What was heard may hold your own words, as above: only what's surely his can be his no, never words that may be yours, like a "No." that may be your own "Noted.", and if nothing surely his is left, it's "resume", never "undo", however low its "sure".`
           }`,
         ]),
     `WHAT HE SAID, ${said(situation)}:\n${situation.utterance.heard}`,
