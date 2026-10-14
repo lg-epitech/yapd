@@ -986,7 +986,7 @@
       "left": "now.",
       "echo": "so you can settle it",
       "heard": "Settle it.",
-      "expect": { "intents": ["resume"], "route": ["Resume"], "neverDone": ["tidy", "send"] }
+      "expect": { "intents": ["resume"], "neverDone": ["tidy", "send"] }
     }
   ]
 }
