@@ -4645,6 +4645,44 @@ describe("Assistant", () => {
     expect(result).toEqual(["No., after what it did", "No."])
   })
 
+  test("a bare no is told as said back to what it did only after a line saying what scratch that reaches, never after a mode or a failure said since", async () => {
+    let failing = false
+    const result = await run(
+      Effect.gen(function* () {
+        const told: Array<string> = []
+        const { dictate, followUp, notices, wait, spoken } = yield* assistant(
+          (situation) => {
+            const { heard, afterDone } = situation.utterance
+            if (heard.startsWith("Tell")) return tezosMessage("high")(situation)
+            if (heard.startsWith("Stop")) return Brain.decision({ act: "stop", target: handle(situation, tezos) })
+            told.push(`${heard}${afterDone === true ? ", after what it did" : ""}`)
+            return Brain.decision({ act: "resume" })
+          },
+          undefined,
+          {
+            modes: true,
+            answer: () => (payload, bounded) =>
+              failing ? Effect.fail(new T3CodeServer.Refusal({ tag: "OrchestrationV2DispatchCommandError", message: "The provider is offline." })) : takes(payload, bounded),
+          },
+        )
+        const done = () => notices().findLast(({ kind }) => kind === "done")
+        yield* dictate("Tell the Tesla's migration to use the fee table from the Mina work.")
+        const sent = done()
+        yield* wait(40)
+        // A mode changes nothing "scratch that" takes back, so a no after it is never to the message sent a moment before.
+        yield* dictate("Focus for two hours.")
+        yield* followUp("No.", 1, done())
+        failing = true
+        yield* dictate("Stop the Tezos one.")
+        yield* followUp("No.", 1, done())
+        yield* followUp("No.", 1, sent)
+        return { told, spoken: spoken() }
+      }),
+    )
+    expect(result.spoken.slice(1, 3)).toEqual([Brain.modeLines(lines, now + 40_000).focus(now + 40_000 + 2 * 60 * 60_000), expect.stringContaining("provider is offline")])
+    expect(result.told).toEqual(["No.", "No.", "No., after what it did"])
+  })
+
   test("asked which thread a request said over yapd's first seconds is for, the model deciding his answer is told what of it may have been yapd's own voice, in OPEN and in LATELY, even once he's had it said again", async () => {
     const over = "Use staging, the Tezos thread says, sir."
     const request = "Use staging. Tell the migration one to add tests."

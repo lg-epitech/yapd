@@ -234,8 +234,9 @@ export const make = (
     /**
      * What makes of what he says right after a line said of an update, `line`,
      * a follow-up about it, as the assistant follows up an answer, `done` when
-     * the line says what came of what he said over it. Without it, such a
-     * line listens only for "Mute.".
+     * the line says what came of what he said over it by yapd's own hand,
+     * which "scratch that" reaches. Without it, such a line listens only for
+     * "Mute.".
      */
     readonly following?: (update: Conversation.Update, line: string, done?: boolean) => Conversation.Answer["followUp"]
   } = {},
@@ -502,7 +503,10 @@ export const make = (
    * as what was said over the update; never a line that `quotes` his message
    * back, which taken up could send it twice, nor one that says it may not
    * have gone, which he'd answer with "send it again", words the model could
-   * only send the agent as they are.
+   * only send the agent as they are. A bare no to it is told as said back to
+   * what it did only when it went by yapd's own hand, which "scratch that"
+   * reaches: never through a hook, which leaves nothing to take back, so the
+   * no would reach whatever yapd did before it.
    */
   const late = (update: Conversation.Update, spoken: string, failed: boolean, quotes = false) =>
     Effect.flatMap(Clock.currentTimeMillis, (at) => {
@@ -518,7 +522,7 @@ export const make = (
           stale: Effect.succeed(false),
           // Only once it's known to play, so a line for going ahead dropped as yapd was turned off, or that afplay couldn't play, never counts as the last one he heard.
           confirmed: persona.said(spoken),
-          ...(following === undefined || quotes || failed ? {} : { followUp: following(update, line, true), window: Conversation.linger, after: true }),
+          ...(following === undefined || quotes || failed ? {} : { followUp: following(update, line, steered(update)), window: Conversation.linger, after: true }),
         },
         readSince.get(update),
       )

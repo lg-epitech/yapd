@@ -109,7 +109,7 @@ const make = (says?: string, options: {
   readonly finishing?: (about: Threads.Ref, before: number, ended: Effect.Effect<Reminders.Ending>) => Effect.Effect<ReadonlyArray<Reminders.Leading>>
   /** How the turn a Stop told of ended, as its thread's run has it. */
   readonly ending?: (about: Threads.Ref, stop: Notices.Stop) => Effect.Effect<Reminders.Ending>
-  /** Where what's said right after a line said of an update, that can be followed up, goes, with that line. */
+  /** Where what's said right after a line said of an update, that can be followed up, goes, with that line, and whether it's said back to what it did. */
   readonly following?: Array<string>
 } = {}) => Effect.gen(function* () {
   /** What each rendered file says, and what was played, in order. */
@@ -295,7 +295,10 @@ const make = (says?: string, options: {
     ...(options.ending === undefined ? {} : { ending: options.ending }),
     ...(options.following === undefined
       ? {}
-      : { following: (_: unknown, line: string) => (heard: string) => Effect.succeed(Option.some(Effect.sync(() => void options.following?.push(`${line} ${heard}`)))) }),
+      : {
+          following: (_: unknown, line: string, done?: boolean) => (heard: string) =>
+            Effect.succeed(Option.some(Effect.sync(() => void options.following?.push(`${line} ${heard}${done === true ? ", after what it did" : ""}`)))),
+        }),
     // This machine is Rosie, as yapd serves it.
     naming,
   }).pipe(Effect.provide(context))
@@ -5422,7 +5425,39 @@ describe("Lines listened to from their end", () => {
       }),
     )
     expect(result.played).toEqual(["yapd. The PR is ready.", fails ? "yapd. T3 Code isn't answering." : "yapd. Okay, passed on."])
+    // Gone through a hook, which leaves nothing "scratch that" takes back, a bare no after it is never told as said back to what it did.
     expect(result.following).toEqual(fails ? [] : ["yapd. Okay, passed on. Send it again."])
+  })
+
+  test("a reply cut off by a dictation that went by yapd's own hand is followed up from its end as said back to what it did", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const t3 = yield* handing
+        const following: Array<string> = []
+        const { handle, speak, wait, dictate, nextEvent, nextPlayback, played } = yield* make("Use the fee table.", {
+          following,
+          // T3 Code slow to take it, so the dictation cuts the reply off before it's sent.
+          hands: { ...t3.hands, run: (step, act, given) => Effect.zipRight(Effect.sleep("3 seconds"), t3.hands.run(step, act, given)) },
+          link: () => Effect.succeedSome({ machine: "Rosie", id: "t-tezos" }),
+          transcripts: ["Use the fee table.", "No."],
+        })
+        yield* handle("claude", { hook_event_name: "Stop", session_id: "s-tezos", cwd: "/code/yapd", last_assistant_message: "The migration compiles." }, { project: "yapd", host: hostname() }, false)
+        yield* nextEvent("Ready:")
+        yield* nextPlayback
+        yield* speak
+        yield* wait(1)
+        yield* Scope.close(yield* dictate, Exit.void)
+        // Sent, then said to the end.
+        yield* wait(3)
+        yield* wait(10)
+        yield* speak
+        yield* wait(4)
+        return { following, sent: t3.sent(), played: [...played] }
+      }),
+    )
+    expect(result.sent).toEqual(["t-tezos: Use the fee table."])
+    expect(result.played).toEqual(["yapd. The migration compiles.", "yapd. Okay, passed on."])
+    expect(result.following).toEqual(["yapd. Okay, passed on. No., after what it did"])
   })
 
   test("a late line that reads his message back never listens, so nothing said after it goes anywhere", async () => {
