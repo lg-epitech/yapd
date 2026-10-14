@@ -348,7 +348,9 @@ export interface Question {
    * began, while its own voice could still get into the microphone: the
    * first words heard may be some of it, or their first word lost under it.
    * With it, `afterPause` is what they said once they carried on after a
-   * pause, when they did, which is surely theirs, as yapd had stopped by then.
+   * pause, when they did, which is surely theirs, as yapd had stopped by then;
+   * or what they said after its last words, when its own voice ran on into
+   * what they said as it ended.
    * Said over it, `unsaid` is what yapd hadn't said of it yet a moment
    * before they began, as far as where it had got to tells, like its
    * options: none when all of it was said.
@@ -1637,10 +1639,14 @@ export const make = (options: {
                   hear,
                   !unsure,
                   echo,
-                  (heard, voiced, afterPause, halt) =>
-                    halt
+                  (heard, voiced, afterPause, halt) => {
+                    // What he said after the line's last words is surely his, however short, like the "No." of "the Tezos migration. No.".
+                    const rest = own === undefined ? "" : (beyond(heard, own) ?? "")
+                    const his = worded(rest) === "" ? afterPause : rest
+                    return halt
                       ? Effect.succeed(Option.none<Effect.Effect<void>>())
-                      : respond(heard, voiced, echo, echo === undefined || afterPause === "" ? undefined : afterPause, left === "" ? undefined : left),
+                      : respond(heard, voiced, echo, echo === undefined || his === "" ? undefined : his, left === "" ? undefined : left)
+                  },
                   own,
                 )
           if (settled !== undefined) yield* Effect.logInfo(heardLine(settled.heard))

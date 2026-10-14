@@ -2617,12 +2617,12 @@ describe("A line listened to from its end", () => {
     })
   })
 
-  test("yapd's own last words alone are dropped with no model call; 'No.' merged into them goes to the model with the line's words as the echo note", async () => {
+  test("yapd's own last words alone are dropped with no model call; 'No.' merged into them goes to the model with the line's words as the echo note, and what's after them as surely his", async () => {
     const spoken = "On it, sir: the Tezos migration."
-    const after = (no: boolean) =>
+    const after = (own: string, no: boolean, line = spoken) =>
       overHelperScoped(
         Effect.gen(function* () {
-          const helper = yield* overHelper([[0.9, "the Tezos migration."], [0.95, "No."]], { answer: true, after: true, wait: Conversation.linger, spoken, duration: 2.5 })
+          const helper = yield* overHelper([[0.9, own], [0.95, "No."]], { answer: true, after: true, wait: Conversation.linger, spoken: line, duration: 2.5 })
           // Its own voice gets into the microphone over the line, as over a new voice processor's first seconds, until it ends.
           yield* helper.wait(0.3)
           yield* helper.talk(0.9, 40)
@@ -2638,8 +2638,19 @@ describe("A line listened to from its end", () => {
           return { transcribed: helper.transcribed, offered: helper.offered, done: Option.isSome(yield* Fiber.poll(helper.fiber)) }
         }),
       )
-    expect(await after(false)).toEqual({ transcribed: ["the Tezos migration."], offered: [], done: true })
-    expect(await after(true)).toEqual({ transcribed: ["the Tezos migration. No."], offered: [{ heard: "the Tezos migration. No.", echo: spoken }], done: true })
+    expect(await after("the Tezos migration.", false)).toEqual({ transcribed: ["the Tezos migration."], offered: [], done: true })
+    expect(await after("the Tezos migration.", true)).toEqual({
+      transcribed: ["the Tezos migration. No."],
+      offered: [{ heard: "the Tezos migration. No.", echo: spoken, afterPause: "No." }],
+      done: true,
+    })
+    // Misheard, with its last word said earlier in the line too, none of it is told as his: it may all be its own.
+    const runsOn = "On it, sir: fixing what Rosie runs on."
+    expect(await after("On it, sir. Fixing what Rosy runs on.", false, runsOn)).toEqual({
+      transcribed: ["On it, sir. Fixing what Rosy runs on."],
+      offered: [{ heard: "On it, sir. Fixing what Rosy runs on.", echo: runsOn }],
+      done: true,
+    })
   })
 
   test("'Mute.' run into by yapd's own last words turns yapd off with nothing worked out, however early its own voice began", async () => {
