@@ -1368,7 +1368,7 @@ describe("Over its first seconds, while yapd's own voice can still get into the 
     expect(result).toEqual({ commands: ["play", "volume", "stop"], responded: [{ heard: said, echo: first }], rendered: [], sent: [], replies: [said], done: true })
   })
 
-  test("sends \"Tell it to revert it.\" said over its first second whole, as any message for the agent is sent", async () => {
+  test("sends \"Tell it to revert it.\" said over its first second whole, as the Responder made it, when there's no assistant to hand it to", async () => {
     const result = await overHelperScoped(
       Effect.gen(function* () {
         const helper = yield* overHelper([[0.9, "Tell it to revert it."]])
