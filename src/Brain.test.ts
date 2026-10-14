@@ -2854,6 +2854,13 @@ describe("handed over from an update", () => {
     expect(route(tidy("archive", ""), over("Archive it.", "untied"))).toEqual({ _tag: "Act", aims: false, doubted: false })
   })
 
+  test("over a session with no thread in T3 Code, a thread the model names to tidy may be its guess at 'it', so it's only asked about, by name; over one with its own thread, it's done", () => {
+    const settle = Brain.decision({ act: "tidy", how: "settle", target: handle(mina), sure: "high" })
+    const untied = Brain.check(settle, over("Settle it.", "untied"), lines)
+    expect(untied._tag === "Ask" ? untied.open.asked : untied._tag).toBe("Settle Open Mina SSV2 Bug Tickets, sir?")
+    expect(Brain.check(settle, over("Settle the Mina one.", "hooked"), lines)._tag).toBe("Do")
+  })
+
   test("in the rest of what's handed over, 'it' is the thread the step before went to when that's another, while the update stays FOCUS as 'this one'; a write to its own thread is still left", () => {
     const hooked = over("Tell the Mina one to wait and tell it to rebase.", "hooked")
     const session = hooked.subject as Extract<Assistant.Subject, { readonly _tag: "Session" }>

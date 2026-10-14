@@ -4051,6 +4051,9 @@ const tidying = (
   const said = tidyLines(lines)
   if (murmured(choice, utterance)) return { _tag: "Do", plan: { decision: { ...choice, act: "resume" }, target: Option.none() } }
   if (!tidyings.has(choice.how)) return { _tag: "Say", spoken: lines.cantTell }
+  // Handed over from an update with no thread of its own in T3 Code, "it" has none to tidy, so a thread the model names may be its guess
+  // at "it", like the one doing the same work, which only he can say: he's asked first, by name, as for a thread only fairly surely meant.
+  const guessed = utterance.handed !== undefined && utterance.own !== undefined && utterance.own.ref === undefined
   const handles = tidyHandles(choice.target)
   // Several unarchived at once that are all yapd just archived in one step are that taken back, reminders and all, only when the model's
   // sure, and none left out nor any more, and of those alone, never one of it T3 Code never said it archived, which isn't in ARCHIVED.
@@ -4081,7 +4084,7 @@ const tidying = (
     // Only one yapd archived, by its handle in ARCHIVED, which nothing on the desk can stand for.
     const archived = archivedBy(handles[0] ?? "", situation)
     if (Option.isNone(archived) || choice.sure === "low") return { _tag: "Say", spoken: lines.cantTell }
-    if (choice.sure === "medium") return tidyConfirm(choice, archived.value, situation, lines)
+    if (choice.sure === "medium" || guessed) return tidyConfirm(choice, archived.value, situation, lines)
     return { _tag: "Do", plan: { decision: { ...choice, target: handles[0] ?? "" }, target: Option.none() } }
   }
   if (handles.length > 1) {
@@ -4102,7 +4105,7 @@ const tidying = (
   const answering =
     choice.pending === "answers" && Option.exists(situation.open, ({ kind, decision }) => kind === "confirm" && decision.act === "tidy" && decision.how === "rename")
   const unsaid = choice.how === "rename" && (utterance.echo !== undefined || !(answering ? retitled : titled)(choice.text, heard))
-  if (choice.sure === "medium" || unsaid || (choice.how === "archive" && occupied(listed))) {
+  if (choice.sure === "medium" || guessed || unsaid || (choice.how === "archive" && occupied(listed))) {
     return tidyConfirm(choice, { ref: listed.ref, called: Reminders.named(listed), listed }, situation, lines)
   }
   return writing({ ...choice, target: listed.handle }, one, among, situation, lines, ask)
