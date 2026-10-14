@@ -4241,7 +4241,8 @@ export const make = (options: {
      * `carried`, the model is told it's his reply to all of it. Said back to
      * a line saying what yapd just changed for him that "scratch that"
      * reaches, `done`, which only listens from its end, the model is told
-     * so, run on into it or not.
+     * so, run on into it or not, and what's too faint to take is logged as
+     * said after what it did, so how often that's let go can be counted.
      */
     const followUp =
       (about: Subject, line: Effect.Effect<string>, done = false) =>
@@ -4269,7 +4270,7 @@ export const make = (options: {
           const thought = yield* think(utterance, it, [{ speaker: "yapd", text: heardOf(said, left), ...routinesOf(about) }])
           if (thought.decision.act === "resume") return Option.none()
           if (Brain.murmured(thought.decision, utterance)) {
-            yield* Effect.logInfo(`Not taking ${quoted(heard)} as a follow-up, with only ${voiced.toFixed(2)} s of speech`)
+            yield* Effect.logInfo(`Not taking ${quoted(heard)} as a follow-up${done ? " after what it did" : ""}, with only ${voiced.toFixed(2)} s of speech`)
             return Option.none()
           }
           // Taken, it holds a question asked since the answer that he's yet to hear, like one an agent asked meanwhile, so it isn't said
