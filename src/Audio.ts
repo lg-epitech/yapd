@@ -102,18 +102,52 @@ export class Activity extends Context.Tag("yapd/Activity")<
   }
 >() {}
 
+/**
+ * How long "speaking" holds once what plays ends, in milliseconds, so what
+ * plays on from it right after, like the rest of a line from its first part,
+ * doesn't have the menu's icon flicker.
+ */
+const between = 250
+
 /** Turns whether something plays and whether the microphone is open into what they're doing, for whoever watches. */
 const reporter = Effect.gen(function* () {
   const ref = yield* SubscriptionRef.make<Doing>("idle")
-  const runSync = Runtime.runSync(yield* Effect.runtime<never>())
+  const runtime = yield* Effect.runtime<never>()
+  const runSync = Runtime.runSync(runtime)
+  const runFork = Runtime.runFork(runtime)
   let last: Doing = "idle"
+  /** What it's doing once speaking is over, told only once nothing has played for a moment. */
+  let after: { doing: Doing } | undefined
+  const set = (doing: Doing) => {
+    if (doing === last) return
+    last = doing
+    runSync(SubscriptionRef.set(ref, doing))
+  }
   return {
     activity: { changes: ref.changes } satisfies Activity["Type"],
     report: (speaking: boolean, listening: boolean) => {
-      const doing = speaking ? "speaking" : listening ? "listening" : "idle"
+      const doing: Doing = speaking ? "speaking" : listening ? "listening" : "idle"
+      if (after !== undefined) {
+        // Playing again in that moment, it never stopped speaking.
+        if (doing === "speaking") after = undefined
+        else after.doing = doing
+        return
+      }
       if (doing === last) return
-      last = doing
-      runSync(SubscriptionRef.set(ref, doing))
+      if (last !== "speaking") return set(doing)
+      const held = { doing }
+      after = held
+      runFork(
+        Effect.sleep(between).pipe(
+          Effect.zipRight(
+            Effect.sync(() => {
+              if (after !== held) return
+              after = undefined
+              set(held.doing)
+            }),
+          ),
+        ),
+      )
     },
   }
 })

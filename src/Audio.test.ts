@@ -139,7 +139,9 @@ describe("Native audio", () => {
         yield* fake.audio.play("/tmp/fake.wav")
         yield* until("speaking")
         yield* fake.finish
-        yield* until("listening")
+        // Only once nothing has played for a moment, as what plays on from it right after would.
+        const later = Effect.forever(Effect.zipRight(Effect.promise(() => Bun.sleep(10)), TestClock.adjust("50 millis")))
+        yield* until("listening").pipe(Effect.raceFirst(later))
         yield* fake.audio.rest
         yield* until("idle")
       }),
@@ -275,7 +277,7 @@ describe("Native audio", () => {
         const seen: Array<string> = []
         yield* fake.activity.pipe(Stream.runForEach((doing) => Effect.sync(() => void seen.push(doing))), Effect.forkScoped)
         const tick = Effect.zipRight(fake.audio.tick, flush)
-        /** Plays a line to the end, ticking as it plays, and lets go of it as a line said is let go of. */
+        /** Plays a line to the end, ticking as it plays, and lets go of it as a line said is let go of, then the moment speaking holds after it. */
         const line = (file: string) =>
           Effect.scoped(
             Effect.gen(function* () {
@@ -284,7 +286,7 @@ describe("Native audio", () => {
               yield* fake.finish
               yield* playback.finished
             }),
-          ).pipe(Effect.zipRight(flush))
+          ).pipe(Effect.zipRight(flush), Effect.zipRight(TestClock.adjust("250 millis")), Effect.zipRight(flush))
         // The microphone isn't open yet.
         yield* tick
         expect(fake.played).toEqual([])
