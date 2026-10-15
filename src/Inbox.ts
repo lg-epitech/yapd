@@ -1,4 +1,5 @@
-import type { Duration, Effect } from "effect"
+import { type Duration, Effect } from "effect"
+import { rm } from "node:fs/promises"
 import type { Ticket } from "./ClaudeCode.ts"
 import type { Priority } from "./Condenser.ts"
 import type { Answer, Question, Update } from "./Conversation.ts"
@@ -137,6 +138,14 @@ export const empty: Inbox = new Map()
 
 /** The file that's played for it. */
 export const audio = (entry: Entry) => ("update" in entry ? entry.update.audio : entry.audio)
+
+/**
+ * Lets go of what's played for it once it's done with: its render, given up
+ * if it's still under way, with its files, when it was started on its own,
+ * else its file. Never for one put back to be said again.
+ */
+export const release = (entry: Entry) =>
+  ("update" in entry ? entry.update.render?.abandon : undefined) ?? Effect.promise(() => rm(audio(entry), { force: true }))
 
 /** Adds an update, replacing any older one from the same session. */
 export const add = (inbox: Inbox, ready: Entry): Inbox => new Map(inbox).set(ready.session, ready)

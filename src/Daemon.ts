@@ -30,7 +30,7 @@ import type { Handle } from "./Server.ts"
 import * as T3Actions from "./T3Actions.ts"
 import * as T3Code from "./T3Code.ts"
 import * as Threads from "./Threads.ts"
-import { extension, Voice } from "./Voice.ts"
+import { extension, startRender, Voice } from "./Voice.ts"
 import type { Line } from "./Words.ts"
 
 const squash = (text: string) => text.replace(/\s+/g, " ").trim()
@@ -482,18 +482,22 @@ export const make = (
   /**
    * Queues something to say, unless yapd was turned off or on since `turns`,
    * or is off and it isn't what he asked for, and returns whether it did.
-   * What it's timed by notes it's ready now.
+   * What it's timed by notes it's ready now. What it takes the place of, of
+   * the same session, is let go of.
    */
   const enqueue = (entry: Inbox.Entry, turns: number) =>
-    Effect.flatMap(Clock.currentTimeMillis, (now) => {
+    Effect.gen(function* () {
+      const now = yield* Clock.currentTimeMillis
       const ready: Inbox.Entry = entry.timing === undefined ? entry : { ...entry, timing: { ...entry.timing, ready: now } }
-      return STM.commit(
+      const queued = yield* STM.commit(
         STM.flatMap(TRef.get(power), (current) =>
           current.turns === turns && (current.on || askedFor(ready))
-            ? STM.as(TRef.update(inbox, (queued) => Inbox.add(queued, ready)), true)
-            : STM.succeed(false),
+            ? TRef.modify(inbox, (queued) => [{ replaced: queued.get(ready.session) }, Inbox.add(queued, ready)] as const)
+            : STM.succeed(undefined),
         ),
       )
+      if (queued?.replaced !== undefined) yield* Inbox.release(queued.replaced)
+      return queued !== undefined
     })
 
   /**
@@ -669,7 +673,7 @@ export const make = (
         }),
       )
       if (answered === undefined) return
-      yield* removeFile(Inbox.audio(answered))
+      yield* Inbox.release(answered)
       yield* release(answered.hook)
     })
 
@@ -1418,6 +1422,8 @@ export const make = (
     if (hook !== undefined) summing.set(session, hook)
     /** What he asked to hear of its finishing, once fired to lead it, until it's queued or kept: said on its own should it be neither. */
     let unsaid: Effect.Effect<void> | undefined
+    /** Its render, once it's queued, which is then the inbox's to let go of. */
+    let handed = false
     return Effect.gen(function* () {
       // What was said or held of the same work lately, by its session or its thread, read here rather than once its thread is found,
       // which can take seconds: so "another review round" is told from news. Meanwhile, whether it's in T3 Code's scratch folder,
@@ -1599,8 +1605,10 @@ export const make = (
       // Rendering takes about as long as the speaker takes to get ready, which it stays for until it's queued or comes to nothing.
       yield* Effect.acquireRelease(soon, (letGo) => letGo)
       const rendering = yield* Clock.currentTimeMillis
-      yield* voice.render(said, audio).pipe(Effect.onError(() => removeFile(audio)))
-      // From its Stop: summed up, tied to its thread and what was said of the same work, then rendered.
+      // Said from its first sentences as soon as they're out, while the rest renders: given up, files and all, unless it's queued.
+      const render = yield* Effect.acquireRelease(startRender(voice, said, audio, lifetime), (render) => (handed ? Effect.void : render.abandon))
+      const lead = yield* render.first
+      // From its Stop: summed up, tied to its thread and what was said of the same work, then rendered, as far as it's first said.
       const steps: ReadonlyArray<readonly [string, number]> = [
         ["summed up", summedAt - arrivedAt],
         ["tied", rendering - summedAt],
@@ -1615,6 +1623,8 @@ export const make = (
         spoken: said,
         ...(more === "" ? {} : { more }),
         audio,
+        render,
+        ...(lead === audio ? {} : { first: lead }),
         thread,
         at: arrivedAt,
         ...ties,
@@ -1629,7 +1639,6 @@ export const make = (
       const { fallback } = finished
       // Given way since to a Stop of its own, or its thread started again or went, it isn't said.
       if (fallback !== undefined && (fallbacks.get(fallback.key) !== fallback || !(yield* fallback.current))) {
-        yield* removeFile(audio)
         return yield* Effect.logInfo("Skipped a turn no hook told of, since its hook came or its thread started again")
       }
       // Its entry is noted as it's kept, so giving way to a Stop of its own notes it as dealt with, however soon that comes.
@@ -1645,32 +1654,27 @@ export const make = (
               ),
             )
       if (claimed !== undefined && Option.isNone(claimed)) {
-        yield* removeFile(audio)
         return yield* Effect.logInfo(`Skipped update, said already: ${spoken}`)
       }
       // Its subagents no longer read to him while it was rendered, a subagent's is kept to yapd all the same.
       if (yield* unread) {
-        yield* removeFile(audio)
         return yield* hush(finished, entry, detail, own, { _tag: "Subagent", child: Option.getOrThrow(part).child, head }, claimed === undefined ? undefined : Option.flatten(claimed))
       }
       // Muted while it was rendered, it's kept quiet all the same, and held all the same once focus or quiet began meanwhile.
       const late = mutable ? yield* muting(keys) : Option.none<Mutes.Mute>()
       if (Option.isSome(late)) {
-        yield* removeFile(audio)
         return yield* hush(finished, entry, detail, own, { _tag: "Muted", mute: late.value }, claimed === undefined ? undefined : Option.flatten(claimed))
       }
       // Turned off meanwhile, it's held for when he catches up, whatever mode began too, which would otherwise have the digest say it, and
       // what he asked to hear of its finishing with it.
       const off = { _tag: "Held", why: "off" } as const
       if (yield* offSince(turns)) {
-        yield* removeFile(audio)
         yield* journal.hold(remindRows, "off")
         unsaid = undefined
         return yield* hush(finished, entry, detail, own, off, claimed === undefined ? undefined : Option.flatten(claimed))
       }
       const lateHeld: Option.Option<Held> = reminded ? Option.none() : yield* heldFor(priority, full, mutable, opening)
       if (Option.isSome(lateHeld)) {
-        yield* removeFile(audio)
         return yield* hush(finished, entry, detail, own, { _tag: "Held", why: lateHeld.value }, claimed === undefined ? undefined : Option.flatten(claimed))
       }
       if (fallback !== undefined) standing.set(update, fallback)
@@ -1679,14 +1683,15 @@ export const make = (
       const queued = yield* enqueue({ session, priority, arrivedAt, update, timing, ...(hook === undefined ? {} : { hook }) }, turns).pipe(
         Effect.tap((queued) =>
           Effect.sync(() => {
-            if (queued) unsaid = undefined
+            if (!queued) return
+            unsaid = undefined
+            handed = true
           }),
         ),
         Effect.uninterruptible,
       )
       if (!queued) {
         // Turned off just now, it's kept unheard all the same.
-        yield* removeFile(audio)
         yield* journal.hold(remindRows, "off")
         unsaid = undefined
         return yield* hush(finished, entry, detail, own, off, claimed === undefined ? undefined : Option.flatten(claimed))
@@ -1738,7 +1743,7 @@ export const make = (
       const dropped = yield* STM.commit(
         TRef.modify(inbox, (current) => [current.get(session), Inbox.remove(current, session)] as const),
       )
-      if (dropped !== undefined) yield* removeFile(Inbox.audio(dropped))
+      if (dropped !== undefined) yield* Inbox.release(dropped)
       // What led it, he never heard, so it's said on its own.
       if (dropped !== undefined && "update" in dropped) yield* parted(dropped.update)
       // Its hook, if one waits, won't be getting a reply.
@@ -2450,7 +2455,7 @@ export const make = (
       const { heard } = yield* SubscriptionRef.get(state)
       const kept: Array<number> = []
       for (const entry of dropped) {
-        yield* removeFile(Inbox.audio(entry))
+        yield* Inbox.release(entry)
         if (!heardAlready(heard, entry.update)) yield* release(entry.hook)
         const fallback = standing.get(entry.update)
         if (fallback !== undefined) {
@@ -2481,7 +2486,7 @@ export const make = (
         }),
       )
       if (dropped !== undefined && "update" in dropped) {
-        yield* removeFile(Inbox.audio(dropped))
+        yield* Inbox.release(dropped)
         if (!heardAlready((yield* SubscriptionRef.get(state)).heard, update)) yield* release(dropped.hook)
         if (dropped.replay !== undefined) yield* replayed(dropped.replay)
       }
@@ -2568,7 +2573,7 @@ export const make = (
     // A turn said in its hook's place is the turn's as he hears it, unless it gave way to a Stop of its own, or its thread was on another run, by now.
     const fallback = "update" in ready ? standing.get(ready.update) : undefined
     if (fallback !== undefined && !(yield* begin(fallback))) {
-      yield* removeFile(Inbox.audio(ready))
+      yield* Inbox.release(ready)
       yield* STM.commit(TRef.set(floor.reading, false))
       if ("update" in ready) yield* parted(ready.update)
       return yield* Effect.logInfo("Not saying a turn no hook told of, since its hook came or its thread started again")
@@ -2702,7 +2707,7 @@ export const make = (
           kept
             ? Effect.void
             : Effect.zipRight(
-                removeFile(Inbox.audio(ready)),
+                Inbox.release(ready),
                 "update" in ready ? (ready.replay === undefined ? Effect.void : replayed(ready.replay)) : (ready.notice.gone ?? Effect.void),
               ),
         ),
@@ -2770,7 +2775,7 @@ export const make = (
       const { heard } = yield* SubscriptionRef.get(state)
       const kept: Array<number> = []
       for (const entry of dropped) {
-        yield* removeFile(Inbox.audio(entry))
+        yield* Inbox.release(entry)
         if (!("update" in entry)) {
           yield* entry.notice.gone ?? Effect.void
           continue
@@ -2827,13 +2832,17 @@ export const make = (
   const again = (found: HeardUpdate, asked: Inbox.Replay) =>
     Effect.gen(function* () {
       const audio = join(dir, `${crypto.randomUUID()}${extension}`)
-      const { more, ...was } = found.update
+      // Never with what it was said from before: its first part, or its render, which is let go of once that's said.
+      const { more, render: _render, first: _first, ...was } = found.update
       const spoken = Missed.whole(was.spoken, more)
       const ask = yield* Clock.currentTimeMillis
       yield* Effect.acquireRelease(soon, (letGo) => letGo)
-      yield* voice.render(spoken, audio).pipe(Effect.onError(() => removeFile(audio)))
+      /** Its render, once it's queued, which is then the inbox's to let go of. */
+      let handed = false
+      const render = yield* Effect.acquireRelease(startRender(voice, spoken, audio, lifetime), (render) => (handed ? Effect.void : render.abandon))
+      const first = yield* render.first
       const timing = Latency.stage(Latency.from("update again", ask, "the ask"), "rendered", (yield* Clock.currentTimeMillis) - ask)
-      const update: Conversation.Update = { ...was, spoken, audio }
+      const update: Conversation.Update = { ...was, spoken, audio, render, ...(first === audio ? {} : { first }) }
       // Replays keep both the hook generation and the original chain of voice replies.
       const generation = generations.get(found.update)
       if (generation !== undefined) generations.set(update, generation)
@@ -2843,9 +2852,15 @@ export const make = (
       if (row !== undefined) rows.set(update, row)
       const arrivedAt = yield* Clock.currentTimeMillis
       const session = `replay:${found.id}`
-      if (yield* enqueue({ session, priority: "needs-you", arrivedAt, update, replay: asked, timing }, asked.turns)) return "queued" as const
-      yield* removeFile(audio)
-      return "off" as const
+      const queued = yield* enqueue({ session, priority: "needs-you", arrivedAt, update, replay: asked, timing }, asked.turns).pipe(
+        Effect.tap((queued) =>
+          Effect.sync(() => {
+            handed = queued
+          }),
+        ),
+        Effect.uninterruptible,
+      )
+      return queued ? ("queued" as const) : ("off" as const)
     }).pipe(Effect.scoped)
 
   return {

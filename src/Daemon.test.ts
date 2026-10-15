@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { Clock, Context, Deferred, type Duration, Effect, Exit, Fiber, Layer, Logger, Option, Queue, Schema, Scope, STM, Stream, TestClock, TestContext, TRef } from "effect"
+import { existsSync } from "node:fs"
 import { hostname } from "node:os"
 import * as Assistant from "./Assistant.ts"
 import { Audio, AudioError } from "./Audio.ts"
@@ -14,7 +15,7 @@ import { defaults } from "./Endpointer.ts"
 import * as Floor from "./Floor.ts"
 import { RelayError, Relays, type Thread } from "./Relay.ts"
 import { key } from "./Payload.ts"
-import { quick, Responder } from "./Responder.ts"
+import { type Interruption, quick, Responder } from "./Responder.ts"
 import type { Handle } from "./Server.ts"
 import * as Show from "./Show.ts"
 import { Transcriber } from "./Transcriber.ts"
@@ -33,7 +34,7 @@ import * as T3Actions from "./T3Actions.ts"
 import * as T3CodeServer from "./T3CodeServer.ts"
 import * as T3Live from "./T3Live.ts"
 import * as Threads from "./Threads.ts"
-import { Voice } from "./Voice.ts"
+import { KokoroError, Voice, withFallback } from "./Voice.ts"
 import type { Line } from "./Words.ts"
 import { Writer } from "./Writer.ts"
 
@@ -63,6 +64,13 @@ const make = (says?: string, options: {
   readonly unplayable?: ReadonlyArray<string>
   /** Lines that can't be rendered, as when Kokoro fails. */
   readonly unrenderable?: ReadonlyArray<string>
+  /**
+   * Whether lines of more than one sentence are rendered in parts, as Kokoro
+   * renders them: their first sentence at once, and their whole so many
+   * seconds after, which fails for those that `breakOff`.
+   */
+  readonly parted?: number
+  readonly breakOff?: ReadonlyArray<string>
   /** Plays like afplay, which can't say it's playing, so that's known only once it has played to the end. */
   readonly afplay?: boolean
   /** How many frames from the microphone, from the first, may carry yapd's own voice, as before the echo cancellation has learnt it. */
@@ -121,6 +129,30 @@ const make = (says?: string, options: {
 } = {}) => Effect.gen(function* () {
   /** What each rendered file says, and what was played, in order. */
   const rendered = new Map<string, string>()
+  /** Rendered in parts, the files written, the renders given up while their whole was still under way, and those let go of, by their whole's file. */
+  const written: Array<string> = []
+  const givenUp: Array<string> = []
+  const letGo: Array<string> = []
+  const parting = withFallback(
+    (text, path, part) =>
+      Effect.gen(function* () {
+        const [lead, ...rest] = text.split(/(?<=\.) /)
+        if (part !== undefined && lead !== undefined && rest.length > 0) {
+          const first = `${path}.first.wav`
+          yield* Effect.promise(() => Bun.write(first, lead))
+          written.push(first)
+          rendered.set(first, lead)
+          part(first, lead.split(" ").length)
+        }
+        yield* Effect.sleep(`${options.parted ?? 0} seconds`).pipe(Effect.onInterrupt(() => Effect.sync(() => void givenUp.push(path))))
+        if (options.breakOff?.includes(text)) return yield* new KokoroError({ cause: "Kokoro's process stopped" })
+        yield* Effect.promise(() => Bun.write(path, text))
+        written.push(path)
+        rendered.set(path, text)
+        return 10
+      }),
+    (text, path) => Effect.sync(() => void rendered.set(path, text)),
+  )
   const played: Array<string> = []
   /** How far into each line it was played from, in seconds, in order. */
   const playedFrom: Array<number> = []
@@ -130,8 +162,9 @@ const make = (says?: string, options: {
   const condensed: Array<Turn> = []
   /** The project each turn was summed up in, in order. */
   const projects: Array<string> = []
-  /** What the user said over an update, each time yapd worked out what to do with it. */
+  /** What the user said over an update, each time yapd worked out what to do with it, and all the model was told then. */
   const responded: Array<string> = []
+  const told: Array<Interruption> = []
   const logs = yield* Queue.unbounded<string>()
   /** What was logged, and what of it as a warning, in order. */
   const logged: Array<string> = []
@@ -186,6 +219,15 @@ const make = (says?: string, options: {
         options.unrenderable?.includes(text)
           ? Effect.fail(new ProcessError({ command: "kokoro", code: 1, stderr: "Kokoro failed" }))
           : Effect.sleep(`${options.renderSeconds ?? 0} seconds`).pipe(Effect.zipRight(Effect.sync(() => void rendered.set(path, text)))),
+      ...(options.parted === undefined
+        ? {}
+        : {
+            renderFirst: (text: string, path: string) =>
+              Effect.zipRight(
+                Effect.addFinalizer(() => Effect.sync(() => void letGo.push(path))),
+                parting.renderFirst!(text, path),
+              ),
+          }),
     }),
     Layer.succeed(Audio, {
       play: (path, from = 0) =>
@@ -247,7 +289,10 @@ const make = (says?: string, options: {
           ? Effect.succeed({ reply: fast, source: "quick" as const })
           : says === undefined
           ? Effect.die("nothing to respond to")
-          : Effect.sync(() => void responded.push(heard)).pipe(
+          : Effect.sync(() => {
+              responded.push(heard)
+              told.push(interruption)
+            }).pipe(
               Effect.zipRight(Effect.sleep(`${options.thinking ?? 0} seconds`)),
               Effect.as({
                 reply:
@@ -458,7 +503,7 @@ const make = (says?: string, options: {
   /** What the user heard lately, newest first, by id. */
   const heard = Effect.map(Stream.runHead(made.state), (state) => Option.getOrThrow(state).heard.map(({ id }) => id))
   const toggle = (on: boolean) => made.turn(on).pipe(Effect.zipRight(flush))
-  return { responded, listened, microphone, made, handle, finish, turn, notice, lastHeard: made.lastHeard, speak, talk, followUps, wait, dictate, record, reading, played, playedFrom, stopped, condensed, projects, logged, warnings, nextEvent, nextPlayback: Queue.take(playbacks), rests: () => rests, warms: () => warms, renders: () => rendered.size, flush, toggle, power: made.turn, heard, replay: made.replay, awaiting: made.awaiting.pipe(Effect.map((arrived) => arrived.pipe(Effect.zipRight(flush)))), journal: Context.get(context, Journal.Journal) }
+  return { responded, told, listened, microphone, made, handle, finish, turn, notice, lastHeard: made.lastHeard, speak, talk, followUps, wait, dictate, record, reading, played, playedFrom, stopped, condensed, projects, logged, warnings, nextEvent, nextPlayback: Queue.take(playbacks), rests: () => rests, warms: () => warms, renders: () => rendered.size, written, givenUp, letGo, flush, toggle, power: made.turn, heard, replay: made.replay, awaiting: made.awaiting.pipe(Effect.map((arrived) => arrived.pipe(Effect.zipRight(flush)))), journal: Context.get(context, Journal.Journal) }
 })
 
 const daemon = make()
@@ -7774,4 +7819,70 @@ describe("Daemon handing over what's yapd's to do", () => {
     expect(Brain.prompt(dictation, Option.none())).not.toContain(`never "start"`)
     expect(result.sent).toEqual(["t-mina: Wait for the Tezos migration.", "t-mina: Rebase onto master."])
   }, 30_000)
+})
+
+describe("Daemon with lines in parts", () => {
+  test("an update dropped for new work, muted, held or turned off while its whole renders gives that render up, leaving none of its files; one of a single sentence lets its render go once it's said", async () => {
+    for (const how of ["new work", "muted", "held", "off"] as const) {
+      const result = await run(
+        Effect.gen(function* () {
+          const { finish, handle, dictate, wait, made, toggle, flush, written, givenUp, letGo, played } = yield* make(undefined, { parted: 5 })
+          // Nothing's said while he dictates, so it waits its turn with its first part out and its whole still rendering.
+          const dictating = yield* dictate
+          yield* finish("s", "The tests pass. The PR is ready.")
+          yield* wait(1)
+          const waiting = { given: givenUp.length, written: written.length }
+          if (how === "new work") yield* handle("claude", { hook_event_name: "UserPromptSubmit", session_id: "s", cwd: "/tmp", prompt: "Go on." }, { project: "yapd" }, false)
+          if (how === "muted") yield* made.silence([sessionKey("s")])
+          if (how === "held") yield* made.hold("focus")
+          if (how === "off") yield* toggle(false)
+          yield* flush
+          const given = givenUp.length
+          yield* Scope.close(dictating, Exit.void)
+          yield* wait(20)
+          return { waiting, given, letGo: letGo.length, left: written.filter((file) => existsSync(file)), played: [...played] }
+        }),
+      )
+      expect([how, result]).toEqual([how, { waiting: { given: 0, written: 1 }, given: 1, letGo: 1, left: [], played: [] }])
+    }
+    // Said, as a single sentence, with no part of its own, its render is let go of once it's said, its file with it.
+    const said = await run(
+      Effect.gen(function* () {
+        const { finish, wait, written, letGo, played } = yield* make(undefined, { parted: 1 })
+        yield* finish("s", "The yapd tests pass.")
+        yield* wait(2)
+        const playing = { letGo: letGo.length, left: written.filter((file) => existsSync(file)).length }
+        yield* wait(15)
+        return { playing, letGo: letGo.length, left: written.filter((file) => existsSync(file)), played: [...played] }
+      }),
+    )
+    expect(said).toEqual({ playing: { letGo: 0, left: 1 }, letGo: 1, left: [], played: ["The yapd tests pass."] })
+  })
+
+  test("an update whose whole fails once its first part has played is left unheard; talked over first, what he said is worked out as cut short in that part", async () => {
+    const line = "yapd. The tests pass. The PR is ready."
+    const played = await run(
+      Effect.gen(function* () {
+        const { finish, wait, journal, played, warnings } = yield* make(undefined, { parted: 1, breakOff: [line] })
+        yield* finish("s", "The tests pass. The PR is ready.")
+        yield* wait(30)
+        const kept = yield* journal.since(0, { kinds: ["update"] })
+        return { played: [...played], heard: kept.map(({ heardAt }) => heardAt), broke: warnings.some((warning) => warning.startsWith("Could not speak update")) }
+      }),
+    )
+    // Only its first part, then nothing more, and it's still to be heard, as the catch-up and the menu have it.
+    expect(played).toEqual({ played: ["yapd."], heard: [undefined], broke: true })
+    const talkedOver = await run(
+      Effect.gen(function* () {
+        const { finish, wait, speak, told } = yield* make("Hold on.", { parted: 1, breakOff: [line], answer: "Holding on, sir." })
+        yield* finish("s", "The tests pass. The PR is ready.")
+        yield* wait(2)
+        yield* speak
+        yield* wait(10)
+        return told.map(({ lines, unsaid }) => [lines.at(-1)?.text, unsaid])
+      }),
+    )
+    // Stopped two seconds into the ten its first word, "yapd.", takes: that word, cut short, and all the rest still to come.
+    expect(talkedOver).toEqual([["yapd.…", "The tests pass. The PR is ready."]])
+  })
 })
