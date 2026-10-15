@@ -79,8 +79,16 @@ export class Audio extends Context.Tag("yapd/Audio")<
      * takes its place. It never counts as speaking.
      */
     readonly tick: Effect.Effect<void>
+    /** When the helper last woke from rest, for how long a line waited on the speaker: none before it ever has, nor without it. */
+    readonly woke?: Effect.Effect<Option.Option<Woke>>
   }
 >() {}
+
+/** The helper waking from rest: when it was asked to play, and when it started playing, by the clock. */
+export interface Woke {
+  readonly asked: number
+  readonly playing: number
+}
 
 /** What the speaker and microphone are doing. The microphone is open while yapd speaks too, so that wins. */
 export type Doing = "idle" | "speaking" | "listening"
@@ -310,6 +318,10 @@ export const native = (
     let heard = 0
     /** When what the helper is playing started, if it's playing. */
     let playingSince: number | undefined
+    /** Whether it has played since it last rested, and when it was asked to play while it was resting, until it does. */
+    let awake = false
+    let waking: number | undefined
+    let woke: Woke | undefined
     /** The frames yapd's own voice may be in, as they came in. */
     const echoes = new WeakSet<Float32Array>()
     let permission: string | undefined
@@ -361,6 +373,15 @@ export const native = (
       if (playingSince !== undefined) heard += now() - playingSince
       playingSince = undefined
     }
+    /** It rested, or quit, so whatever's played next wakes it. */
+    const asleep = () => {
+      awake = false
+      waking = undefined
+    }
+    /** Asked to play something while it rests, which wakes it. */
+    const wake = () => {
+      if (!awake) waking ??= now()
+    }
 
     const receive = (message: Helper.Message) => {
       if (message.kind === Helper.Kind.pcm) {
@@ -396,9 +417,14 @@ export const native = (
           // before that playback fails, so whoever then asks for the microphone hears it's off rather than
           // listening to one that will never hear anything. An older helper never says.
           quiet()
+          asleep()
           runFork(endMicrophone())
           return
         case "playing":
+          // Awake now, whatever it plays, its warm-up silence too.
+          if (waking !== undefined) woke = { asked: waking, playing: now() }
+          waking = undefined
+          awake = true
           // Silence, or a note so soft it's never taken for yapd talking, which neither speaks nor teaches the echo cancellation anything.
           if (event.value.id === warming || event.value.id === ticking) return
           // Playing something new stops what it played before without saying so.
@@ -476,6 +502,7 @@ export const native = (
       unsent = []
       runFork(endMicrophone())
       quiet()
+      asleep()
       if (current !== undefined) settle(current, new AudioError({ message: "The audio helper quit" }), 0)
       current = undefined
       if (shortcut !== undefined) runSync(shortcut.quit)
@@ -592,6 +619,7 @@ export const native = (
             warming = undefined
             ticking = undefined
             yield* Effect.addFinalizer(() => stop)
+            wake()
             send({ type: "play", id: playback.id, path: file, from })
             playback.duration = yield* restore(
               Deferred.await(playback.started).pipe(
@@ -635,6 +663,7 @@ export const native = (
       warm: Effect.sync(() => {
         if (connection === undefined || listening || current !== undefined || warming !== undefined) return
         warming = crypto.randomUUID()
+        wake()
         send({ type: "play", id: warming, path: silence, from: 0 })
       }),
       // Over a line, the helper would stop it without a word, leaving it never to finish: so only while nothing plays, not even afplay.
@@ -649,10 +678,12 @@ export const native = (
         send({ type: "rest" })
         // It stops whatever it's playing without saying so.
         quiet()
+        asleep()
         const ended = endMicrophone()
         reportActivity()
         return ended
       }),
+      woke: Effect.sync(() => Option.fromNullable(woke)),
     }
     return Context.make(Audio, audio).pipe(
       Context.add(Shortcut.Shortcut, shortcut?.service ?? Shortcut.none),

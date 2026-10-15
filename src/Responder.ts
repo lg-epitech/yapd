@@ -202,7 +202,10 @@ export const ProviderResponder = Layer.effect(
           const fast = yield* quick(interruption, persona.onIt())
           if (fast !== undefined) return { reply: fast, source: "quick" } satisfies Responded
           const began = yield* Clock.currentTimeMillis
-          const reply = yield* model.ask(Reply, prompt(interruption, style)).pipe(Effect.mapError((cause) => new RespondError({ cause })))
+          const reply = yield* model.ask(Reply, prompt(interruption, style)).pipe(
+            Effect.annotateLogs({ role: "responder" }),
+            Effect.mapError((cause) => new RespondError({ cause })),
+          )
           const modelMs = (yield* Clock.currentTimeMillis) - began
           // Going ahead, an "On it" the model wrote anyway gives way to a line of yapd's own: picked as it's passed on
           // when that was all of it, or put in its place now, with the rest after it.

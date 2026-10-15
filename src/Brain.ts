@@ -5030,6 +5030,7 @@ export const ProviderBrain = Layer.effect(
     return {
       decide: (situation) =>
         model.ask(Decision, prompt(situation, style)).pipe(
+          Effect.annotateLogs({ role: "brain" }),
           Effect.mapError((cause) => new BrainError({ cause })),
           Effect.flatMap((decided) =>
             decided.spoken.trim() === ""
@@ -5039,6 +5040,7 @@ export const ProviderBrain = Layer.effect(
         ),
       brief: (brief, desk, now) =>
         model.ask(Briefed, briefPrompt(brief, desk, now, style)).pipe(
+          Effect.annotateLogs({ role: "brief" }),
           Effect.mapError((cause) => new BrainError({ cause })),
           Effect.flatMap(({ spoken }) => (spoken.trim() === "" ? Effect.fail(new BrainError({ cause: "The brief came back empty." })) : inEnglish(model, spoken.trim()))),
           Effect.map((spoken) => speakable(spoken, desk)),

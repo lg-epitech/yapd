@@ -358,7 +358,10 @@ export const ProviderWriter = Layer.effect(
     const style = yield* Config.style
     return {
       decide: (material) =>
-        model.ask(Decision, prompt(material, style)).pipe(Effect.mapError((cause) => new WriteError({ cause }))),
+        model.ask(Decision, prompt(material, style)).pipe(
+          Effect.annotateLogs({ role: "writer" }),
+          Effect.mapError((cause) => new WriteError({ cause })),
+        ),
       prepare: model.prepare,
     }
   }),

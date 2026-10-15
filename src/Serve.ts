@@ -247,11 +247,11 @@ export const serve = Effect.gen(function* () {
       inMind({ memories: { kept, written } }).flatMap(({ name }) => (name === undefined ? [] : [name])),
     ),
     // A late "On it" can be followed up as what was said over its update, which only the assistant works out.
-    following: (update, line, done, own) => (heard, voiced, echo, afterPause, unsaid, carried) =>
-      Effect.flatMap(Deferred.await(following), (follow) => follow(update, line, done, own)(heard, voiced, echo, afterPause, unsaid, carried)),
+    following: (update, line, done, own) => (heard, voiced, echo, afterPause, unsaid, carried, stopped) =>
+      Effect.flatMap(Deferred.await(following), (follow) => follow(update, line, done, own)(heard, voiced, echo, afterPause, unsaid, carried, stopped)),
     // What he says over an update that's yapd's to do, like another thread, who needs him or new work, which only the assistant works out.
-    over: (update, lines, line, given) => (heard, voiced, echo, afterPause, unsaid) =>
-      Effect.flatMap(Deferred.await(handing), (over) => over(update, lines, line, given)(heard, voiced, echo, afterPause, unsaid)),
+    over: (update, lines, line, given) => (heard, voiced, echo, afterPause, unsaid, stopped) =>
+      Effect.flatMap(Deferred.await(handing), (over) => over(update, lines, line, given)(heard, voiced, echo, afterPause, unsaid, stopped)),
     // What he changed of how yapd talks over an update, which "scratch that" said next takes back.
     modeChange: modes.last,
   })

@@ -5,6 +5,7 @@ import * as Conversation from "./Conversation.ts"
 import type * as Drafts from "./Drafts.ts"
 import * as Hands from "./Hands.ts"
 import type { Notice } from "./Inbox.ts"
+import * as Latency from "./Latency.ts"
 import { type Entry, type Journal, type Kept, routinesIn, routinesNamed, unroutined } from "./Journal.ts"
 import * as Ledger from "./Ledger.ts"
 import * as Memory from "./Memory.ts"
@@ -100,6 +101,12 @@ export interface Utterance {
    * nothing written to it by yapd's own hand unless it is.
    */
   readonly own?: Brain.Own
+  /**
+   * Said back to something yapd said, when he stopped talking, by the clock,
+   * which what comes of it is timed from: a dictation's is its `at`, when he
+   * pressed to send it.
+   */
+  readonly stopped?: number
 }
 
 /**
@@ -438,6 +445,8 @@ export interface Outcome {
    * nothing said after it is listened for.
    */
   readonly unsent?: true
+  /** What it is, for how long it took in the log, when it's more than what was decided, like where work started: "start on rig, in a worktree". */
+  readonly timed?: string
 }
 
 /** What the user says to yapd itself, worked out and acted on. */
@@ -1109,6 +1118,8 @@ export const make = (options: {
     const over = new Map<number, string | undefined>()
     /** Prompts being written for what was said before it's known whether it's new work, by utterance. */
     const writing = new Map<string, Fiber.RuntimeFiber<Either.Either<Drafts.Written, string>>>()
+    /** When working out what he said began and was decided, by what he said, which what's said of it is timed by as it plays. */
+    const workedOut = new WeakMap<Utterance, { readonly began: number; readonly decided: number }>()
     /** What's under way for a request, being worked out or in the background, stopped when yapd is turned off. */
     const jobs = yield* FiberSet.make()
     /** How many times yapd had been turned on or off when it was last turned off, so what's begun after for a request heard by then is stopped too. */
@@ -1161,6 +1172,29 @@ export const make = (options: {
       )
 
     const mint = (at: number, prefix: string) => `${prefix}${at.toString(36)}${crypto.randomUUID().slice(0, 4)}`
+
+    /**
+     * How long what's said of what he said took by `at`, as it's told, from
+     * the press that sent it or his last word: to hear it, to work it out and
+     * to do it, to log as it plays, under how it came and was worked out and
+     * what was decided, like "dictation, model, look", or what the outcome
+     * says it was, like where work started. None for what wasn't worked out
+     * from his words.
+     */
+    const timed = (thought: Thought, at: number, outcome?: Pick<Outcome, "timed">): Latency.Timing | undefined => {
+      const { utterance } = thought
+      const worked = workedOut.get(utterance)
+      if (worked === undefined) return undefined
+      const anchor = utterance.stopped ?? utterance.at
+      const what = `${utterance.via === "shortcut" ? "dictation" : utterance.via}, ${thought.source}, ${outcome?.timed ?? thought.decision.act}`
+      const since = utterance.via === "shortcut" ? "the press" : utterance.via === "typed" ? "when it was typed" : "his last word"
+      const steps: ReadonlyArray<readonly [string, number]> = [
+        ["heard", worked.began - anchor],
+        ["worked out", worked.decided - worked.began],
+        ["done", at - worked.decided],
+      ]
+      return steps.reduce((timing, [name, ms]) => Latency.stage(timing, name, ms), Latency.from(what, anchor, since))
+    }
 
     /**
      * Whether yapd was turned off or on since it had been turned on or off
@@ -1794,13 +1828,14 @@ export const make = (options: {
       })
 
     /** Says something now, ahead of the rest of the answer, like that it's looking. */
-    const meanwhile = (spoken: string, utterance: Utterance) =>
-      Effect.flatMap(Clock.currentTimeMillis, (at) =>
-        options.tell(
-          { id: mint(at, "a"), kind: "answer", priority: "needs-you", spoken, at, stale: Effect.succeed(false) },
-          utterance.turns,
-        ),
-      )
+    const meanwhile = (spoken: string, thought: Thought) =>
+      Effect.flatMap(Clock.currentTimeMillis, (at) => {
+        const timing = timed(thought, at, { timed: `${thought.decision.act}, meanwhile` })
+        return options.tell(
+          { id: mint(at, "a"), kind: "answer", priority: "needs-you", spoken, at, stale: Effect.succeed(false), ...(timing === undefined ? {} : { timing }) },
+          thought.utterance.turns,
+        )
+      })
 
     /**
      * An answer, which what he said next can be about, decided at once or on a
@@ -1834,7 +1869,7 @@ export const make = (options: {
     /** Reads what a thread is doing now, and answers from it with a second look. */
     const look = (target: Threads.Listed, thought: Thought, said: Lines, step: number) =>
       Effect.gen(function* () {
-        yield* meanwhile(said.checking, thought.utterance)
+        yield* meanwhile(said.checking, thought)
         const detail = yield* threads.detail(target.ref, target.thread.pendingRuntimeRequest?.id).pipe(Effect.either)
         if (Either.isLeft(detail)) {
           yield* Effect.logWarning(`Could not read ${target.called}`, detail.left)
@@ -1975,6 +2010,7 @@ export const make = (options: {
               say: spoken,
               subject: { _tag: "Answer", said: spoken, about: Option.some({ machine: machine.name, id: started.thread }) },
               kind: "done",
+              timed: `start on ${machine.name}, ${started.worktree ? "in a worktree" : "without a worktree"}`,
               changed: { what: "acted", utterance: utterance.id },
               // Only once it's known to play, so a line for going ahead that's dropped as yapd is turned off, or can't be played, never counts as the last one he heard.
               confirmed: persona.said(spoken),
@@ -4567,7 +4603,15 @@ export const make = (options: {
      */
     const listen =
       (open: Open) =>
-      (heard: string, voiced: number, echo?: string, afterPause?: string, unsaid?: string): Effect.Effect<Option.Option<Effect.Effect<void>>> =>
+      (
+        heard: string,
+        voiced: number,
+        echo?: string,
+        afterPause?: string,
+        unsaid?: string,
+        _carried?: boolean,
+        stopped?: number,
+      ): Effect.Effect<Option.Option<Effect.Effect<void>>> =>
       Effect.gen(function* () {
         const at = yield* Clock.currentTimeMillis
         const { turns } = yield* options.power
@@ -4581,6 +4625,7 @@ export const make = (options: {
           at,
           voiced,
           turns,
+          ...(stopped === undefined ? {} : { stopped }),
           ...over,
           ...(unsaid === undefined || unsaid === "" ? {} : { unsaid }),
           // Asked of what was said over an update, anything said back to it, an answer or something new, is held to that update's own
@@ -4642,7 +4687,15 @@ export const make = (options: {
      */
     const followUp =
       (about: Subject, line: Effect.Effect<string>, done?: Brain.Done, own?: Brain.Own) =>
-      (heard: string, voiced: number, echo?: string, afterPause?: string, unsaid?: string, carried?: boolean): Effect.Effect<Option.Option<Effect.Effect<void>>> =>
+      (
+        heard: string,
+        voiced: number,
+        echo?: string,
+        afterPause?: string,
+        unsaid?: string,
+        carried?: boolean,
+        stopped?: number,
+      ): Effect.Effect<Option.Option<Effect.Effect<void>>> =>
         Effect.gen(function* () {
           const at = yield* Clock.currentTimeMillis
           const { turns } = yield* options.power
@@ -4658,6 +4711,7 @@ export const make = (options: {
             at,
             voiced,
             turns,
+            ...(stopped === undefined ? {} : { stopped }),
             ...overItself({ echo, afterPause, echoRoutines: routinesOf(about).routines }),
             ...(echo === undefined || carried !== true ? {} : { carried }),
             ...(done === undefined ? {} : { afterDone: done }),
@@ -4701,6 +4755,8 @@ export const make = (options: {
           turn.withPermits(1)(
             Effect.gen(function* () {
               if (given.instead !== undefined && (yield* given.instead.moot)) return yield* given.instead.late
+              // Worked out as he talked, and taken once he'd stopped.
+              workedOut.set(thought.utterance, { began: thought.utterance.at, decided: yield* Clock.currentTimeMillis })
               if (given.handoff === undefined) yield* Effect.logInfo(`Heard: ${logged(thought.utterance.heard)}`)
               const outcome = yield* acting(thought)
               yield* note(thought, outcome, thought.utterance.at, given.handoff)
@@ -4794,12 +4850,14 @@ export const make = (options: {
         // Of what was said over an update, a follow-up to what came of it is held to that update's own thread as that was: never written
         // to by yapd's own hand unless it's steered, while its hook may still wait.
         const { own } = utterance
+        const timing = "utterance" in of ? timed(of, at, outcome) : undefined
         yield* options.tell(
           {
             id: mint(at, "a"),
             kind,
             priority: "needs-you",
             spoken: outcome.say,
+            ...(timing === undefined ? {} : { timing }),
             ...(instead === undefined ? {} : { instead: { spoken: instead, when: off, used } }),
             ...(withheld ? { withheld } : {}),
             at,
@@ -5395,7 +5453,9 @@ export const make = (options: {
           const answering = Option.isSome(asked) && pending === "answers"
           if (!(answering || (act === "start" && Option.isNone(asked)))) yield* letGo
         }
-        yield* Effect.logInfo(`Routed: ${routed(thought, (yield* Clock.currentTimeMillis) - began)}`)
+        const decided = yield* Clock.currentTimeMillis
+        workedOut.set(utterance, { began, decided })
+        yield* Effect.logInfo(`Routed: ${routed(thought, decided - began)}`)
         const outcome = yield* acting(thought).pipe(Effect.ensuring(letGo))
         yield* note(thought, outcome, began)
         yield* deliver(outcome, thought)
@@ -5555,7 +5615,7 @@ export const make = (options: {
           done,
           own,
         ),
-      over: (update: Conversation.Update, lines: ReadonlyArray<Line>, line: string, given: Over) => (heard: string, voiced: number, echo?: string, afterPause?: string, unsaid?: string) =>
+      over: (update: Conversation.Update, lines: ReadonlyArray<Line>, line: string, given: Over) => (heard: string, voiced: number, echo?: string, afterPause?: string, unsaid?: string, stopped?: number) =>
         Effect.gen(function* () {
           const began = yield* Clock.currentTimeMillis
           const { turns } = yield* options.power
@@ -5569,6 +5629,7 @@ export const make = (options: {
             at: began,
             voiced,
             turns,
+            ...(stopped === undefined ? {} : { stopped }),
             ...overItself({ echo, afterPause }),
             // As said back to a "done" line, so what may all be yapd's own words is let go, or at most asked about in code's own question.
             afterDone: given.done,

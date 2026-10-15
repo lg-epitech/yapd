@@ -2,6 +2,7 @@ import { Clock, Duration, Effect, Either, Option, type Redacted, Schema } from "
 import { realpath } from "node:fs/promises"
 import { homedir } from "node:os"
 import { basename, join } from "node:path"
+import { dated } from "./Latency.ts"
 import { type Catalog, type Launcher, LaunchError, type Request, type Started } from "./Launcher.ts"
 import { run } from "./Process.ts"
 import * as Server from "./T3CodeServer.ts"
@@ -502,6 +503,7 @@ export const launcher = (
 ): Launcher => ({
   start: (request) =>
     Effect.gen(function* () {
+      const began = yield* Clock.currentTimeMillis
       const refuse = (reason: string) => new LaunchError({ reason })
       const { api, call } = yield* reach
 
@@ -547,12 +549,15 @@ export const launcher = (
       const started = request.ids === undefined ? ids() : { ...ids(), ...request.ids }
       /** Whether T3 Code took the launch, after which whatever goes wrong may have left it started. */
       let asked = false
+      /** How many times it was looked at while T3 Code got it ready. */
+      let polls = 0
       const prepared = yield* Effect.gen(function* () {
         let launched = yield* call("orchestration.launchThread", launch(decided, started), Launched, "30 seconds")
         asked = true
         // T3 Code gets the workspace ready after answering. Fetching and checking out can take minutes.
         while (preparing(first(launched))) {
           yield* Effect.sleep("1 second")
+          polls++
           launched = yield* api(`/api/orchestration/threads/${encodeURIComponent(started.thread)}/bounded`, Launched)
         }
         return launched
@@ -572,6 +577,8 @@ export const launcher = (
       if (short(first(prepared))) return yield* new LaunchError({ reason: unready(decided.worktree, scratch ? undefined : project.title) })
       const { thread } = prepared.projection
       const level = effort(thread.modelSelection)
+      const ended = yield* Clock.currentTimeMillis
+      yield* Effect.logInfo(`Launched in ${((ended - began) / 1000).toFixed(2)} s after ${polls} ${polls === 1 ? "poll" : "polls"} ${dated(ended)}`)
       return {
         thread: started.thread,
         project: scratch ? "scratch" : project.title,

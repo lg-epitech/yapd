@@ -748,13 +748,23 @@ export const remembering = (voice: Voice["Type"], dir: string, most = 64) =>
         return made
       }).pipe(Effect.uninterruptible)
 
-    const render = (text: string, path: string) =>
+    const copy = (text: string, path: string) =>
       Effect.gen(function* () {
         if (!keeps(text)) return yield* voice.render(text, path)
         const file = yield* Deferred.await(yield* claim(text))
         yield* Effect.tryPromise(() => Bun.write(path, Bun.file(file))).pipe(
           Effect.catchAll(() => voice.render(text, path)),
         )
+      })
+
+    /** Renders, or copies a line kept, logging how long that took, so the renders lines wait on can be counted. */
+    const render = (text: string, path: string) =>
+      Effect.gen(function* () {
+        const start = yield* Clock.currentTimeMillis
+        const had = kept.has(text)
+        yield* copy(text, path)
+        const took = ((yield* Clock.currentTimeMillis) - start) / 1000
+        yield* Effect.logInfo(`Render: ${words(text)} words, ${had ? "kept" : "whole"} ${took.toFixed(2)} s`)
       })
 
     return {
@@ -776,7 +786,7 @@ export const remembering = (voice: Voice["Type"], dir: string, most = 64) =>
           (text) => {
             const path = `${dir}/warm-${crypto.randomUUID()}${extension}`
             return Effect.sync(() => ahead.add(text)).pipe(
-              Effect.zipRight(render(text, path)),
+              Effect.zipRight(copy(text, path)),
               Effect.ensuring(Effect.promise(() => rm(path, { force: true }))),
               Effect.ignore,
             )

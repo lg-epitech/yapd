@@ -1,6 +1,7 @@
 import type { Subprocess } from "bun"
-import { Cause, Clock, Data, Deferred, Effect, Either, ExecutionStrategy, Exit, Fiber, FiberSet, Option, Schema, Scope, Stream } from "effect"
+import { Cause, Clock, Data, Deferred, Effect, Either, ExecutionStrategy, Exit, Fiber, FiberSet, Option, Runtime, Schema, Scope, Stream } from "effect"
 import { tmpdir } from "node:os"
+import { dated } from "./Latency.ts"
 import { detached, run as command, stop } from "./Process.ts"
 
 // Codex's app-server, kept running between calls, so each summary or reply
@@ -108,6 +109,57 @@ const Completed = Schema.Struct({
 })
 const AgentMessage = Schema.Struct({ item: Schema.Struct({ type: Schema.Literal("agentMessage"), text: Schema.String }) })
 const AgentMessageDelta = Schema.Struct({ itemId: Schema.String, delta: Schema.String })
+
+/**
+ * How a turn's message came, for the log: when it was asked for, when its
+ * first text came and in how many pieces, and whether Codex held it back to
+ * check it as it came, which would come in one batch.
+ */
+interface Pace {
+  readonly asked: number
+  first?: number
+  pieces: number
+  buffered: boolean
+  /** On a thread started ahead, rather than one started for it. */
+  spare: boolean
+}
+
+/** Whether a reply's keys came in its schema's order, which is the order they were written in: none to tell when it isn't an object of them. */
+const ordered = (schema: object, text: string) => {
+  const properties = "properties" in schema && typeof schema.properties === "object" && schema.properties !== null ? Object.keys(schema.properties) : []
+  try {
+    const parsed: unknown = JSON.parse(text)
+    if (properties.length === 0 || typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return undefined
+    const keys = Object.keys(parsed)
+    const wanted = properties.filter((key) => keys.includes(key))
+    return keys.every((key, index) => key === wanted[index])
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Logs how a turn went, with none of what was asked or answered: when its
+ * first text came, when it ended, in how many pieces, whether its keys came in
+ * order, the thread it ran on, and how long what was asked and answered were.
+ * The role that asked is in the log's annotations.
+ */
+const paced = (pace: Pace, turn: Turn, ended: number, outcome: Exit.Exit<string, ServerError | TurnError>) => {
+  const seconds = (at: number) => `${((at - pace.asked) / 1000).toFixed(2)} s`
+  const text = Exit.isSuccess(outcome) ? outcome.value : undefined
+  const keys = text === undefined ? undefined : ordered(turn.schema, text)
+  return Effect.logInfo(
+    `Codex turn: ${[
+      text === undefined ? `failed after ${seconds(ended)}` : `first text ${pace.first === undefined ? "never" : seconds(pace.first)}, done ${seconds(ended)}`,
+      `${pace.pieces} ${pace.pieces === 1 ? "piece" : "pieces"}`,
+      ...(keys === undefined ? [] : [keys ? "keys in order" : "keys out of order"]),
+      ...(pace.buffered ? ["safety buffering"] : []),
+      pace.spare ? "spare thread" : "fresh thread",
+      `prompt ${turn.prompt.length} characters`,
+      ...(text === undefined ? [] : [`reply ${text.length}`]),
+    ].join(", ")} ${dated(ended)}`,
+  )
+}
 
 interface Connection {
   readonly process: Subprocess<"pipe", "pipe", "ignore">
@@ -301,6 +353,9 @@ interface Spare {
 export const make = (settings: Settings, codex: ReadonlyArray<string> = ["codex"], spares = kept) =>
   Effect.gen(function* () {
     const scope = yield* Effect.scope
+    const runtime = yield* Effect.runtime<never>()
+    /** The time, for what Codex says as it says it. */
+    const now = () => Runtime.runSync(runtime)(Clock.currentTimeMillis)
     let current: Connection | undefined
     let failedAt = Number.NEGATIVE_INFINITY
     let ready: Array<Spare> = []
@@ -460,7 +515,7 @@ export const make = (settings: Settings, codex: ReadonlyArray<string> = ["codex"
      * scope closes, it stops a turn that's still going and forgets the thread.
      * `written` hears each piece of a message as the model writes it.
      */
-    const begin = (server: Connection, thread: string, turn: Turn, written?: (message: string, text: string) => void) =>
+    const begin = (server: Connection, thread: string, turn: Turn, pace: Pace, written?: (message: string, text: string) => void) =>
       Effect.gen(function* () {
         const done = yield* Deferred.make<string, ServerError | TurnError>()
         let text: string | undefined
@@ -472,10 +527,17 @@ export const make = (settings: Settings, codex: ReadonlyArray<string> = ["codex"
                 Deferred.unsafeDone(done, message.interrupted === undefined
                   ? Exit.fail(new ServerError({ cause: message.error ?? "Codex's app-server stopped" }))
                   : Exit.failCause(message.interrupted))
-              } else if (message.method === "item/agentMessage/delta" && written !== undefined) {
-                Option.map(Schema.decodeUnknownOption(AgentMessageDelta)(message.params), ({ itemId, delta }) => written(itemId, delta))
+              } else if (message.method === "item/agentMessage/delta") {
+                Option.map(Schema.decodeUnknownOption(AgentMessageDelta)(message.params), ({ itemId, delta }) => {
+                  pace.first ??= now()
+                  pace.pieces++
+                  written?.(itemId, delta)
+                })
+              } else if (message.method === "model/safetyBuffering/updated") {
+                pace.buffered = true
               } else if (message.method === "item/completed") {
                 Option.map(Schema.decodeUnknownOption(AgentMessage)(message.params), ({ item }) => {
+                  pace.first ??= now()
                   text = item.text
                 })
               } else if (message.method === "turn/completed") {
@@ -528,9 +590,27 @@ export const make = (settings: Settings, codex: ReadonlyArray<string> = ["codex"
         return Deferred.await(done)
       })
 
-    const fresh = (turn: Turn, written?: (message: string, text: string) => void) =>
+    const fresh = (turn: Turn, pace: Pace, written?: (message: string, text: string) => void) =>
       connection.pipe(
-        Effect.flatMap((server) => threadFor(server).pipe(Effect.flatMap((thread) => begin(server, thread, turn, written)))),
+        Effect.flatMap((server) =>
+          threadFor(server).pipe(
+            Effect.flatMap((thread) => {
+              pace.spare = false
+              return begin(server, thread, turn, pace, written)
+            }),
+          ),
+        ),
+      )
+
+    /** A turn's pace from now, on a ready thread or not. */
+    const pacing = (spare: Spare | undefined) => Effect.map(Clock.currentTimeMillis, (asked): Pace => ({ asked, pieces: 0, buffered: false, spare: spare !== undefined }))
+
+    /** Logs how the turn went once it's answered or failed, but not when it's given up on, like when the user carries on talking. */
+    const timed = (pace: Pace, turn: Turn) => (answer: Effect.Effect<string, ServerError | TurnError>) =>
+      answer.pipe(
+        Effect.onExit((exit) =>
+          Exit.isFailure(exit) && Cause.isInterruptedOnly(exit.cause) ? Effect.void : Effect.flatMap(Clock.currentTimeMillis, (ended) => paced(pace, turn, ended, exit)),
+        ),
       )
 
     // So the first update doesn't wait for the server or a thread.
@@ -550,14 +630,15 @@ export const make = (settings: Settings, codex: ReadonlyArray<string> = ["codex"
         const spare = yield* take
         // After the turn, so starting threads doesn't compete with it.
         yield* Effect.addFinalizer(() => refill)
+        const pace = yield* pacing(spare)
         const answer =
           spare === undefined
-            ? yield* fresh(turn)
-            : yield* begin(spare.server, spare.thread, turn).pipe(
+            ? yield* fresh(turn, pace)
+            : yield* begin(spare.server, spare.thread, turn, pace).pipe(
                 // Codex may have let a waiting thread go, so a new one takes its place.
-                Effect.catchTag("ServerError", () => fresh(turn)),
+                Effect.catchTag("ServerError", () => fresh(turn, pace)),
               )
-        return yield* answer
+        return yield* timed(pace, turn)(answer)
       }).pipe(Effect.scoped)
 
     /**
@@ -578,13 +659,14 @@ export const make = (settings: Settings, codex: ReadonlyArray<string> = ["codex"
             passed = true
             emit.single({ _tag: "Piece", message, text })
           }
+          const pace = yield* pacing(spare)
           const answer =
             spare === undefined
-              ? yield* fresh(turn, written)
-              : yield* begin(spare.server, spare.thread, turn, written).pipe(
-                  Effect.catchTag("ServerError", (error) => (passed ? Effect.fail(error) : fresh(turn, written))),
+              ? yield* fresh(turn, pace, written)
+              : yield* begin(spare.server, spare.thread, turn, pace, written).pipe(
+                  Effect.catchTag("ServerError", (error) => (passed ? Effect.fail(error) : fresh(turn, pace, written))),
                 )
-          yield* answer.pipe(
+          yield* timed(pace, turn)(answer).pipe(
             Effect.map((text): Written => ({ _tag: "Whole", text })),
             Effect.exit,
             Effect.flatMap((exit) => Effect.sync(() => emit.done(exit))),
