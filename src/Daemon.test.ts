@@ -7718,4 +7718,56 @@ describe("Daemon handing over what's yapd's to do", () => {
     expect(result.at(3)).toContain("Ask me that with the shortcut.")
     expect(result.slice(4)).toEqual(["yapd. The fee table is in.", "Ask me that with the shortcut."])
   }, 30_000)
+
+  test("a dictation after what came of a handoff over a hooked Tezos update is worked out as any dictation, never told 'it' is the update's own session; after a step that went to the Mina one, 'it' is that one, as after the same request dictated", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const t3 = yield* handing
+        const mutes = yield* muting
+        const { handle, talk, wait, nextEvent, nextPlayback, dictating, asked } = yield* assisted(
+          (situation) => {
+            const { heard, via } = situation.utterance
+            // "It", as the model is shown it.
+            const it = Option.match(Brain.focused(situation), { onNone: () => "", onSome: ({ handle }) => handle })
+            if (heard === "Does anything need me?") return Brain.decision({ act: "answer", spoken: "Nothing else needs you." })
+            if (via === "shortcut") return Brain.decision({ act: "send", target: it, text: "Rebase onto master." })
+            if (heard.startsWith("Tell the Mina one")) return Brain.decision({ act: "send", target: handleOf(situation, "t-mina"), text: "Wait for the Tezos migration.", rest: "keep it quiet" })
+            return Brain.decision({ act: "mute", how: "mute", target: it })
+          },
+          {
+            says: "Tell the Mina one to wait and keep it quiet.",
+            hands: t3.hands,
+            t3,
+            mutes,
+            link: () => Effect.succeedSome({ machine: "Rosie", id: "t-tezos" }),
+            handsOver: () => true,
+            handing: {},
+          },
+          [tezos(), minaThread()],
+        )
+        // At hand, so a mute handed over is done.
+        yield* dictating("Does anything need me?")
+        for (let second = 0; second < 20; second++) yield* wait(1)
+        yield* tezosStop(handle, true)
+        yield* nextEvent("Ready:")
+        yield* nextPlayback
+        yield* talk
+        for (let second = 0; second < 30; second++) yield* wait(1)
+        const muted = (yield* mutes.list).map(({ key }) => key)
+        yield* dictating("Tell it to rebase.")
+        for (let second = 0; second < 20; second++) yield* wait(1)
+        const dictation = asked.find(({ utterance }) => utterance.heard === "Tell it to rebase.")
+        return { muted, sent: t3.sent(), dictation }
+      }),
+    )
+    // The rest's "it" was the Mina one, muted.
+    expect(result.muted).toEqual(["t3:Rosie:t-mina"])
+    expect(result.dictation).toBeDefined()
+    const dictation = result.dictation!
+    // Nothing of the handoff's own reaches the dictation's prompt: not the update's own session as "it", nor what goes to its agent.
+    expect(Brain.ownHandle(dictation)).toBeUndefined()
+    expect(Brain.prompt(dictation, Option.none())).not.toContain("He's going on from a step")
+    expect(Brain.prompt(dictation, Option.none())).not.toContain(`never "start"`)
+    expect(result.sent).toEqual(["t-mina: Wait for the Tezos migration.", "t-mina: Rebase onto master."])
+  }, 30_000)
 })

@@ -907,6 +907,22 @@ const routinesOf = (subject: Subject): { readonly routines?: ReadonlyArray<strin
   subject._tag !== "Nothing" && subject.routines !== undefined && subject.routines.length > 0 ? { routines: subject.routines } : {}
 
 /**
+ * What "it" means for what he dictates after what came of something handed
+ * over from an update: never what only what's said back to it goes by, the
+ * update's own session as "it" and the thread a step of it went to, so it's
+ * worked out as any dictation is. Once a step went to another thread, that
+ * one is "it", as after the same request dictated; or else the update, as
+ * after hearing it.
+ */
+const dictated = (subject: Subject): Subject => {
+  if (subject._tag !== "Session") return subject
+  const { own: _, went, ...update } = subject
+  return went === undefined
+    ? update
+    : { _tag: "Answer", said: subject.said, about: Option.some(went), ...routinesOf(subject), ...(subject.withheld === true ? { withheld: true } : {}) }
+}
+
+/**
  * Where what's said of a question came from, when its words hold one of his
  * routines' steps, like an offer of one asked as it comes due: the routine,
  * by its name, which is all a model is told of it.
@@ -1246,7 +1262,7 @@ export const make = (options: {
       if (Option.isSome(update) && (said === undefined || update.value.playing || update.value.at >= said.at)) {
         return { _tag: "Session", update: update.value.update, said: update.value.said } satisfies Subject
       }
-      return said?.subject ?? ({ _tag: "Nothing" } satisfies Subject)
+      return said === undefined ? ({ _tag: "Nothing" } satisfies Subject) : dictated(said.subject)
     })
 
     /**
