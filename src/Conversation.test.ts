@@ -3062,6 +3062,33 @@ describe("A line out in parts", () => {
     expect(Exit.isFailure(talkedOver.ended)).toBe(true)
     expect(talkedOver.files).toEqual([part])
   })
+
+  test.each([
+    ["an update", {}],
+    ["a question", { ask: true }],
+    ["an answer", { answer: true }],
+  ] as const)("'Mute.' over the first part of %s turns yapd off once it's made out, never waiting on the rest to render, unless the words it was saying then were about muting", async (_, given) => {
+    const over = (at: number, spoken?: string) =>
+      overHelperScoped(
+        Effect.gen(function* () {
+          const helper = yield* overHelper([[0.95, "Mute."]], { parts, duration: 12, off: true, ...given, ...(spoken === undefined ? {} : { spoken }) })
+          yield* helper.wait(at)
+          yield* helper.talk(0.95, 10)
+          yield* helper.quiet
+          yield* helper.wait(0.1)
+          const before = helper.offs()
+          yield* helper.whole
+          yield* helper.wait(1)
+          return { offs: [before, helper.offs()], transcribed: helper.transcribed, worked: [...helper.responded, ...helper.offered].map(({ heard }) => heard) }
+        }),
+      )
+    // Once its own voice is learnt, and over its first seconds, saying nothing about muting: off at once, once, his words made out once.
+    expect(await over(3.5)).toEqual({ offs: [1, 1], transcribed: ["Mute."], worked: [] })
+    expect(await over(1)).toEqual({ offs: [1, 1], transcribed: ["Mute."], worked: [] })
+    // Over its first seconds, its words then about muting, the "mute" may be its own: it's worked out, never acted on.
+    const muting = "Muted the loader thread, sir, so it stays quiet until you ask for it again or it needs you for something."
+    expect(await over(1, muting)).toEqual({ offs: [0, 0], transcribed: ["Mute."], worked: ["Mute."] })
+  })
 })
 
 describe("A question out in parts", () => {
