@@ -14571,14 +14571,17 @@ describe("Assistant tidying", () => {
         // He'd asked to hear when it finishes.
         yield* made.reminders!.add({ at: now, heard: "Tell me when the Mina one finishes.", text: "", event: "finished", machine: "Rosie", thread: mina.id, called: "the Mina tickets" })
         yield* made.dictate("Archive the Mina tickets thread.")
+        yield* made.until(() => made.spoken().some((line) => line.startsWith("Archived")))
         const archived = { said: made.spoken().at(-1), pending: (yield* made.reminders!.pending).length }
         // T3 Code archived it, which the shell then shows it as.
         yield* made.becomes({ ...mina, archivedAt: "2026-10-01T02:18:01.000Z" })
         yield* made.dictate("Scratch that.")
+        yield* made.until(() => made.spoken().some((line) => line.startsWith("Unarchived")))
         const restored = { said: made.spoken().at(-1), pending: (yield* made.reminders!.pending).length }
         yield* made.becomes(mina)
         // Taken back already, it's never taken back twice.
         yield* made.dictate("Scratch that.")
+        yield* made.until(() => made.spoken().some((line) => line.startsWith("I couldn't take that back")))
         return { archived, restored, again: made.spoken().at(-1), sent: tidied(made.dispatched) }
       }),
     )
@@ -14607,9 +14610,11 @@ describe("Assistant tidying", () => {
         )
         yield* made.reminders!.add({ at: now, heard: "Tell me when the Mina one finishes.", text: "", event: "finished", machine: "Rosie", thread: mina.id, called: "the Mina tickets" })
         yield* made.dictate("Archive the Mina tickets thread.")
+        yield* made.until(() => made.spoken().some((line) => line.startsWith("Archived")))
         // T3 Code archived it, which the shell then shows it as.
         yield* made.becomes({ ...mina, archivedAt: "2026-10-01T02:18:01.000Z" })
         yield* made.dictate("Unarchive the Mina tickets.")
+        yield* made.until(() => made.spoken().some((line) => line.startsWith("Unarchived")))
         return { said: made.spoken().at(-1), pending: (yield* made.reminders!.pending).length, sent: tidied(made.dispatched) }
       }),
     )
