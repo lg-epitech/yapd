@@ -187,6 +187,11 @@ export const ProviderModel = Layer.scopedContext(
         : described(brain) === described(writer)
           ? writes
           : yield* Effect.zipRight(Effect.logInfo(`Working out what you say with ${described(brain)}`), make(brain))
-    return Context.make(Model, model).pipe(Context.add(WriterModel, writes), Context.add(BrainModel, thinks))
+    // A press gets the brain's own server ready too, as it does when the brain shares the writer's.
+    const pressed =
+      thinks === model || thinks === writes
+        ? writes
+        : { ...writes, prepare: Effect.all([writes.prepare, thinks.prepare], { concurrency: "unbounded", discard: true }) }
+    return Context.make(Model, model).pipe(Context.add(WriterModel, pressed), Context.add(BrainModel, thinks))
   }),
 )
