@@ -242,7 +242,15 @@ export type Outcome =
   /** Which project it's for has to be asked, and the material kept for the answer. */
   | { readonly _tag: "Asked"; readonly question: string; readonly about: string; readonly material: Material }
   /** It was asked for, and T3 Code is getting it ready, which takes minutes for a worktree: `then` is what comes of it, which can be waited for more than once. */
-  | { readonly _tag: "Launching"; readonly about: string; readonly project: string; readonly machine: Machine; readonly then: Effect.Effect<Outcome> }
+  | {
+      readonly _tag: "Launching"
+      readonly about: string
+      readonly project: string
+      readonly machine: Machine
+      /** Asked for in a worktree, which T3 Code can take minutes to get ready. */
+      readonly worktree: boolean
+      readonly then: Effect.Effect<Outcome>
+    }
   /** Nothing started, and this says why, or that there was nothing to start. */
   | { readonly _tag: "Said"; readonly spoken: string; readonly failed: boolean }
 
@@ -434,7 +442,7 @@ export const make = (options: {
           yield* noted(begun)
           return begun
         }).pipe(Effect.interruptible, Effect.forkIn(scope))
-        return { _tag: "Launching", about, project: called(project), machine, then: Fiber.join(launching) } satisfies Outcome
+        return { _tag: "Launching", about, project: called(project), machine, worktree: request.worktree === true, then: Fiber.join(launching) } satisfies Outcome
       }).pipe(Effect.uninterruptible)
 
     /** Carries out what the writer decided: starts it, or says what has to be asked, or why nothing started. */

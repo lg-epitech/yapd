@@ -2048,10 +2048,10 @@ export const make = (options: {
             )
           }
           case "Launching": {
-            // T3 Code can take minutes to get a worktree ready, so what comes of it is said when it's ready, and nothing else waits for it meanwhile:
-            // the speaker stays ready for it as long as it would for anything on its way.
+            // T3 Code can take minutes to get a worktree ready, so what comes of it is said when it's ready, and nothing else waits for it meanwhile.
+            // The speaker stays ready only for a start without one: a worktree takes longer than it would wait for anything on its way.
             const arrived = yield* options.awaiting
-            const letGo = yield* options.coming
+            const letGo = outcome.worktree ? Effect.void : yield* options.coming
             const settled = yield* underWay(utterance, outcome, `Starting ${outcome.about || "it"}, which T3 Code is still getting ready.`)
             // Under way until the launch itself settles, not only until what's said of it stops: turning yapd off stops that, but not the launch.
             yield* outcome.then.pipe(Effect.ensuring(settled), Effect.forkIn(scope))
