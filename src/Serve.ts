@@ -44,7 +44,7 @@ import * as Threads from "./Threads.ts"
 import { Vocabulary, WhisperTranscriber } from "./Transcriber.ts"
 import * as Tunnel from "./Tunnel.ts"
 import { SileroVad } from "./Vad.ts"
-import { KokoroVoice } from "./Voice.ts"
+import { KokoroVoice, Voice } from "./Voice.ts"
 import { ProviderWriter } from "./Writer.ts"
 
 // `yapd serve`, apart from the other commands, since only the daemon needs the
@@ -281,6 +281,8 @@ export const serve = Effect.gen(function* () {
     Option.getOrElse(daemon.controls, () => Mutes.controls({ mutes, silence: daemon.silence, unread: daemon.unread, journal })),
     latest.under,
   )
+  // What's said once work starts is rendered while it starts, as it's likely to be.
+  const { guess } = yield* Voice
   const drafts = yield* Drafts.make({
     machines: everywhere,
     rules: Preferences.load(preferences),
@@ -289,6 +291,7 @@ export const serve = Effect.gen(function* () {
     expect: (yield* Vocabulary).expect,
     ledger,
     find: (machine, id) => threads.find({ machine, id }),
+    ...(guess === undefined ? {} : { guess }),
   })
   yield* Effect.logInfo(`Your rules for new work go in ${preferences}`)
   const show = yield* Show.make(threads.detail)
@@ -319,6 +322,7 @@ export const serve = Effect.gen(function* () {
     reminders,
     memories,
     routines,
+    ...(guess === undefined ? {} : { guess }),
   })
   yield* Deferred.succeed(welcome, assistant.welcome)
   yield* Deferred.succeed(following, assistant.following)

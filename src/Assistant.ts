@@ -1040,6 +1040,8 @@ export const make = (options: {
   readonly memories?: Memory.Memories
   /** The routines he wrote in his preferences, read as they are now. */
   readonly routines?: Effect.Effect<ReadonlyArray<Preferences.Routine>>
+  /** Renders a line ahead on a guess, so it plays at once if it's what's said next: how a thread's question is answered, as it's asked. */
+  readonly guess?: (line: string) => Effect.Effect<boolean>
 }) =>
   Effect.gen(function* () {
     const brain = yield* Brain.Brain
@@ -2123,6 +2125,24 @@ export const make = (options: {
       Option.exists(Brain.focused(situation), ({ ref: focus }) => Threads.same(focus, ref))
         ? Option.none<string>()
         : Option.fromNullable(situation.desk.threads.find((listed) => Threads.same(listed.ref, ref))?.called)
+
+    /**
+     * How the part of a thread's question being asked would be answered by
+     * picking each of its options, as what's done says it of the thread he's
+     * on: only its last part, or its only one, since a pick on a part before
+     * that is followed by the next part instead.
+     */
+    const picks = (open: Open, said: Lines): ReadonlyArray<string> => {
+      const { asks } = open
+      const to = open.candidates[0]
+      if (asks?._tag !== "Question" || to === undefined || asks.part !== asks.questions.length - 1) return []
+      const question = asks.questions[asks.part]
+      if (question === undefined) return []
+      const part = Questions.said(question, Option.none())
+      return part.options.map((_, index) =>
+        Hands.done({ _tag: "Reply", to, requestId: asks.requestId, answers: {}, said: Option.some(Questions.spoken(part, [index])) }, "now", said, Option.none()),
+      )
+    }
 
     /** Two steps' lines as one, "sir" said once. */
     const joined = (first: string, then: string, said: Lines) => {
@@ -4851,6 +4871,10 @@ export const make = (options: {
         // to by yapd's own hand unless it's steered, while its hook may still wait.
         const { own } = utterance
         const timing = "utterance" in of ? timed(of, at, outcome) : undefined
+        // A thread's question, answered by picking one of its options, is answered as he hears it, so each such answer is rendered then, one
+        // after another, on a guess: the one he picks plays at once.
+        const { guess } = options
+        const guessing = open === undefined || guess === undefined ? Effect.void : Effect.forkIn(Effect.forEach(picks(open, yield* persona.lines), guess, { discard: true }), scope)
         yield* options.tell(
           {
             id: mint(at, "a"),
@@ -4888,6 +4912,7 @@ export const make = (options: {
               Effect.zipRight(Effect.suspend(() => (reworded && instead !== undefined && Option.isSome(entry) && !withheld ? journal.reword(entry.value, instead) : Effect.void))),
               // Why a machine can't be reached, once he's heard it, isn't said again until it's been back and gone down again.
               Effect.zipRight(threads.heard(outcome.say)),
+              Effect.zipRight(guessing),
             ),
             // What he missed that it tells him of isn't missed while it waits to be said or is said, nor told again by another catch-up.
             ...(missed === undefined ? {} : { telling: Effect.succeed(missed) }),

@@ -19,6 +19,15 @@ export class Voice extends Context.Tag("yapd/Voice")<
      * fails whatever of it is still awaited with a KokoroError.
      */
     readonly renderFirst?: (text: string, path: string) => Effect.Effect<Rendering, never, Scope.Scope>
+    /**
+     * Renders a short line ahead on a guess at what's said next, like the
+     * confirmation of work that's starting, and keeps it by its words, so
+     * saying it is a copy: one that guessed wrong is never what's played.
+     * Kokoro renders one thing at a time, so it's skipped while another guess
+     * renders, and a line that's needed waits behind one guess at most.
+     * Whether it's kept, once it is.
+     */
+    readonly guess?: (text: string) => Effect.Effect<boolean>
   }
 >() {}
 
@@ -688,6 +697,9 @@ export const withFallback = (
 /** Lines this short are kept once rendered: acknowledgements, questions, notices. */
 const brief = 160
 
+/** How long a line rendered on a guess has to be said, past which it guessed wrong: long enough for a worktree to get ready. */
+const missed = "10 minutes"
+
 /**
  * Keeps what's rendered of short lines, the ones yapd says again and again
  * like "On it.", so saying them again is a copy rather than a render. Those
@@ -748,6 +760,11 @@ export const remembering = (voice: Voice["Type"], dir: string, most = 64) =>
         return made
       }).pipe(Effect.uninterruptible)
 
+    /** Lines rendered on a guess, by when, until they're said or it's clear they won't be. */
+    const guessed = new Map<string, number>()
+    /** One guess at a time, held until its render is done, even for a guesser that stopped waiting. */
+    const guessing = yield* Effect.makeSemaphore(1)
+
     const copy = (text: string, path: string) =>
       Effect.gen(function* () {
         if (!keeps(text)) return yield* voice.render(text, path)
@@ -757,18 +774,62 @@ export const remembering = (voice: Voice["Type"], dir: string, most = 64) =>
         )
       })
 
-    /** Renders, or copies a line kept, logging how long that took, so the renders lines wait on can be counted. */
+    /**
+     * Renders, or copies a line kept, logging how long that took, so the
+     * renders lines wait on can be counted: a copy of one rendered on a guess
+     * is that guess used.
+     */
     const render = (text: string, path: string) =>
       Effect.gen(function* () {
         const start = yield* Clock.currentTimeMillis
         const had = kept.has(text)
+        const guess = guessed.get(text)
+        guessed.delete(text)
         yield* copy(text, path)
         const took = ((yield* Clock.currentTimeMillis) - start) / 1000
-        yield* Effect.logInfo(`Render: ${words(text)} words, ${had ? "kept" : "whole"} ${took.toFixed(2)} s`)
+        yield* Effect.logInfo(`Render: ${words(text)} words, ${had ? "kept" : "whole"} ${took.toFixed(2)} s${guess === undefined ? "" : ", guessed and used"}`)
+      })
+
+    const guess = (text: string): Effect.Effect<boolean> =>
+      Effect.suspend(() => {
+        // One that wouldn't be kept would render for nothing, and one kept already is a copy whenever it's said.
+        if (!keeps(text)) return Effect.succeed(false)
+        if (kept.has(text)) return Effect.succeed(true)
+        return guessing.withPermitsIfAvailable(1)(
+          Effect.gen(function* () {
+            const start = yield* Clock.currentTimeMillis
+            guessed.set(text, start)
+            // Not said by the time it would have been, it guessed wrong.
+            yield* Effect.sleep(missed).pipe(
+              Effect.zipRight(
+                Effect.suspend(() => {
+                  if (guessed.get(text) !== start) return Effect.void
+                  guessed.delete(text)
+                  return Effect.logInfo(`Render: guessed and missed, ${words(text)} words`)
+                }),
+              ),
+              Effect.interruptible,
+              Effect.forkIn(scope),
+            )
+            const rendered = yield* Effect.exit(Deferred.await(yield* claim(text)))
+            if (Exit.isFailure(rendered)) {
+              if (guessed.get(text) === start) guessed.delete(text)
+              return false
+            }
+            yield* Effect.logInfo(`Render: guessed, ${words(text)} words, whole ${(((yield* Clock.currentTimeMillis) - start) / 1000).toFixed(2)} s`)
+            return true
+          }),
+        ).pipe(
+          Effect.interruptible,
+          Effect.forkIn(scope),
+          Effect.flatMap(Fiber.join),
+          Effect.flatMap(Option.match({ onNone: () => Effect.as(Effect.logInfo("Render: guess skipped, since another is rendering"), false), onSome: Effect.succeed })),
+        )
       })
 
     return {
       render,
+      guess,
       /**
        * A line already kept, short or rendered ahead, is copied whole, quicker
        * than any first part of it would render, and one of a single sentence
@@ -821,6 +882,6 @@ export const KokoroVoice = Layer.scopedContext(
           render: say,
         })
     const kept = yield* remembering(plain, dir)
-    return Context.make(Voice, { render: kept.render, renderFirst: kept.renderFirst }).pipe(Context.add(Warmth, { warm: kept.warm }))
+    return Context.make(Voice, { render: kept.render, renderFirst: kept.renderFirst, guess: kept.guess }).pipe(Context.add(Warmth, { warm: kept.warm }))
   }),
 )

@@ -140,15 +140,37 @@ export const outside = (
   return Either.right(placed({ project, catalog, machine }, decision))
 }
 
+/** How a model may be named aloud: by its title, or the title's last word of letters, like "Sol" of "GPT 6.1 Sol" or "Opus" of "Claude Opus 5.5". */
+const callings = (title: string) => {
+  const last = title.split(/[\s-]+/).filter((word) => /^\p{L}{3,}$/u.test(word)).at(-1)
+  return last === undefined ? [title] : [title, last]
+}
+
+/** Whether words say this, as a whole word or words, whatever its case. */
+const says = (words: string, called: string) =>
+  new RegExp(`(?<![\\p{L}\\p{N}])${called.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\p{L}\\p{N}])`, "iu").test(words)
+
+/**
+ * Whether the models the words name, if any, by any model's calling in the
+ * catalog, could only be the one that started: "on Sol" can't be said of
+ * work that started on Opus, nor "on GPT 6 Sol" of work on GPT 6.1 Sol.
+ */
+const namesOnly = (spoken: string, models: Catalog["models"], started: string) => {
+  const own = models.filter(({ name }) => same(name, started)).flatMap(({ title }) => callings(title))
+  return models.flatMap(({ title }) => callings(title)).every((called) => !says(spoken, called) || own.some((one) => same(one, called)))
+}
+
 /**
  * Whether the line for going ahead goes in front of what's said once new work
- * started: only before the writer's own words, when they match what started.
- * An "On it" the writer put in front anyway goes, since the line takes its
- * place, and with only that there are no words of its own.
+ * started: only before the writer's own words, when they match what started,
+ * in its worktree and in the model they name, if any, since that's how he
+ * catches a mishearing. An "On it" the writer put in front anyway goes, since
+ * the line takes its place, and with only that there are no words of its own.
  */
-export const ahead = (spoken: string, { request }: Pick<Resolved, "request">, started: Started, lines: Pick<Lines, "address">) =>
+export const ahead = (spoken: string, { request, catalog }: Pick<Resolved, "request" | "catalog">, started: Started, lines: Pick<Lines, "address">) =>
   started.worktree === request.worktree &&
   (request.model === undefined || same(request.model, started.model)) &&
+  namesOnly(spoken, catalog.models, started.model) &&
   afterOnIt(spoken, lines) !== ""
 
 /**
@@ -170,7 +192,7 @@ export const confirmation = (
   const outside = scratched(project)
   const plain = outside ? `Looking into it${on}, on ${title}.` : `Started in ${project.name}${on}, on ${title}, ${where}.`
   // The writer's own words, or the plain facts: whether they say where it is goes by them alone, not by a line of his that may name a worktree.
-  const own = ahead(spoken, { request }, started, lines)
+  const own = ahead(spoken, { request, catalog }, started, lines)
   const told = own ? afterOnIt(spoken, lines) : plain
   return [
     own ? withOnIt(lines.onIt, told) : plain,
@@ -180,6 +202,25 @@ export const confirmation = (
     ...(started.warning === undefined ? [] : [started.warning]),
   ].join(" ")
 }
+
+/**
+ * The confirmation it's likely to be, before it's known what started: as if
+ * it starts as asked, in the worktree and on the model the request names,
+ * with nothing the launcher had to add. None when it hangs on what only
+ * starting tells, like the model when the request names none.
+ */
+export const expected = (spoken: string, resolved: Resolved, lines: Pick<Lines, "onIt" | "address">) =>
+  resolved.request.model === undefined && !ahead(spoken, resolved, asAsked(resolved), lines) ? undefined : confirmation(spoken, resolved, asAsked(resolved), lines)
+
+/** Work as it starts when it starts as asked, on the model the request names, if any. */
+const asAsked = ({ request, project }: Pick<Resolved, "request" | "project">): Started => ({
+  thread: "",
+  project: called(project),
+  directory: request.project,
+  branch: null,
+  model: request.model ?? "",
+  worktree: request.worktree === true,
+})
 
 /** What the writer made of a request, with what it went by, ready to act on. */
 export interface Written {
@@ -248,6 +289,8 @@ export const make = (options: {
   readonly ledger?: Ledger.Ledger["Type"]
   /** A thread as T3 Code has it now, to look once for new work that was asked for and never said whether it started. */
   readonly find?: (machine: string, thread: string) => Effect.Effect<Option.Option<T3Live.Thread>>
+  /** Renders a line ahead on a guess, so it plays at once if it's what's said: the confirmation, while work starts. */
+  readonly guess?: (line: string) => Effect.Effect<boolean>
 }) =>
   Effect.gen(function* () {
     const writer = yield* Writer
@@ -346,6 +389,15 @@ export const make = (options: {
         )
         yield* Effect.logInfo(`Prompt: ${request.prompt}`)
         const launching = yield* Effect.gen(function* () {
+          // What's likely to be said once it's started, rendered while it starts, with its line for going ahead picked now, so a guess
+          // that's right is word for word what's said. One that's wrong is never played: what's said is rendered as ever.
+          let picked: string | undefined
+          if (options.guess !== undefined) {
+            const lines = yield* persona.lines
+            if (ahead(spoken, resolved, asAsked(resolved), lines)) picked = yield* persona.onIt()
+            const line = expected(spoken, resolved, picked === undefined ? lines : { ...lines, onIt: picked })
+            if (line !== undefined) yield* Effect.forkIn(options.guess(line), scope)
+          }
           const asked = yield* Clock.currentTimeMillis
           const outcome = yield* Effect.either(machine.launcher.start(request))
           // Asked for and not answered, it may have started all the same: it's looked for under the id it was asked for with, and, found,
@@ -367,9 +419,10 @@ export const make = (options: {
           if (Either.isLeft(outcome)) yield* Effect.logInfo(`Found ${started.thread} after all: ${outcome.left.reason}`)
           yield* settle("sent")
           yield* Effect.logInfo(`Started ${started.thread} in ${started.directory}`)
-          // Picked only when it's said, so a pick never played doesn't keep it from coming up, and noted as heard by whoever says it, once it is.
+          // Picked only when it's said, or as it was guessed it would be, so a pick never played rarely keeps it from coming up, and noted
+          // as heard by whoever says it, once it is.
           const written = yield* persona.lines
-          const lines = ahead(spoken, resolved, started, written) ? { ...written, onIt: yield* persona.onIt() } : written
+          const lines = ahead(spoken, resolved, started, written) ? { ...written, onIt: picked ?? (yield* persona.onIt()) } : written
           const begun = {
             _tag: "Started",
             spoken: confirmation(spoken, resolved, started, lines),
