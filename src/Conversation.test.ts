@@ -7,6 +7,7 @@ import {
   Deferred,
   type Duration,
   Effect,
+  Exit,
   Fiber,
   Layer,
   Logger,
@@ -35,7 +36,7 @@ import * as Persona from "./Persona.ts"
 import { ProcessError } from "./Process.ts"
 import * as Settings from "./Settings.ts"
 import * as Store from "./Store.ts"
-import { Voice, Warmth } from "./Voice.ts"
+import { KokoroError, type Started, Voice, Warmth } from "./Voice.ts"
 import * as Words from "./Words.ts"
 
 const update: Conversation.Update = {
@@ -1000,12 +1001,18 @@ const overHelper = (
     /** With `answer`, whether it's followed up only from its end, and how long it's listened to after: as after an answer unless said. */
     readonly after?: boolean
     readonly wait?: Duration.DurationInput
-    /** With `answer`, what's run once it's been said to the end. */
+    /** With `answer`, or for the update, what's run once it's been said to the end. */
     readonly through?: Effect.Effect<void>
     /** Whether an answer he asked for always waits to be said next. */
     readonly asked?: boolean
     /** What's yapd's to do, handed to its assistant: with none, what the Responder answers is all. */
     readonly handing?: NonNullable<Parameters<typeof Conversation.make>[0]["over"]>
+    /**
+     * Whether the update is out in parts: its first part, at `part`, lasting
+     * so many seconds and words, while its whole, `duration` long, renders
+     * until `whole` says.
+     */
+    readonly parts?: { readonly duration: number; readonly words: number }
   } = {},
 ) =>
   Effect.gen(function* () {
@@ -1015,8 +1022,9 @@ const overHelper = (
     const commands: Array<string> = []
     /** Each command with when it came, in seconds since the first line started playing, and the volume it asked for. */
     const timeline: Array<{ readonly type: string; readonly at: number; readonly value?: number }> = []
-    /** Where each line was played from, in seconds. */
+    /** Where each line was played from, in seconds, and its file. */
     const plays: Array<number> = []
+    const files: Array<string> = []
     const transcribed: Array<string> = []
     const sent: Array<string> = []
     /** All a reply was worked out from, in order. */
@@ -1027,6 +1035,16 @@ const overHelper = (
     const offered: Array<{ readonly heard: string; readonly echo?: string; readonly afterPause?: string; readonly carried?: true }> = []
     const unheard: Array<string | undefined> = []
     let first: number | undefined
+    /** The update's first part, when it's out in parts, and its whole as it renders. */
+    const part = "/tmp/update.first.wav"
+    const whole = yield* Deferred.make<number, KokoroError>()
+    const render: Started = {
+      first: Effect.succeed(part),
+      words: Effect.succeed(Option.fromNullable(options.parts?.words)),
+      whole: Deferred.await(whole),
+      done: Deferred.isDone(whole),
+      abandon: Effect.void,
+    }
     let connection: Socket<Helper.Decoder> | undefined
     let running = false
     let playing: { readonly id: string; readonly since: number; readonly from: number } | undefined
@@ -1066,6 +1084,7 @@ const overHelper = (
                   const command = JSON.parse(new TextDecoder().decode(message.payload)) as {
                     readonly type: string
                     readonly id?: string
+                    readonly path?: string
                     readonly from?: number
                     readonly value?: number
                   }
@@ -1077,7 +1096,8 @@ const overHelper = (
                     running = true
                     playing = { id: command.id ?? "", since: now(), from: command.from ?? 0 }
                     plays.push(playing.from)
-                    send({ type: "playing", id: command.id, duration: options.duration ?? 10 })
+                    files.push(command.path ?? "")
+                    send({ type: "playing", id: command.id, duration: command.path === part ? (options.parts?.duration ?? 0) : (options.duration ?? 10) })
                   } else if (command.type === "stop") {
                     send({
                       type: "stopped",
@@ -1197,7 +1217,7 @@ const overHelper = (
             })
           : options.tell === true
             ? Effect.as(made.tell({ audio: "/tmp/notice.wav", spoken }), false)
-            : made.converse({ ...long, spoken }),
+            : made.converse({ ...long, spoken, ...(options.parts === undefined ? {} : { first: part, render }) }, options.through ?? Effect.void),
     )
     yield* flush
     yield* flush
@@ -1207,6 +1227,7 @@ const overHelper = (
       commands,
       timeline,
       plays,
+      files,
       transcribed,
       sent,
       responded,
@@ -1223,6 +1244,9 @@ const overHelper = (
         if (playing !== undefined) send({ type: "finished", id: playing.id })
         playing = undefined
       }).pipe(Effect.zipRight(flush)),
+      /** The update's whole rendered, or not. */
+      whole: Deferred.succeed(whole, options.duration ?? 10).pipe(Effect.zipRight(flush)),
+      unrendered: Deferred.fail(whole, new KokoroError({ cause: "Kokoro's process stopped" })).pipe(Effect.zipRight(flush)),
       replies: Effect.map(Effect.flatMap(Journal.Journal, (journal) => journal.since(0)), (entries) => entries.map(({ text }) => text)).pipe(
         Effect.provide(context),
       ),
@@ -2892,6 +2916,148 @@ describe("A line listened to from its end", () => {
     expect(await over("So the plan for the rollout is to ship the loader and…", 100)).toEqual({ offs: 1, worked: [] })
     // Trailed off into it, it's the rest of what he was saying, like a thread to mute, for the model to work out.
     expect(await over("Can you…", 10)).toEqual({ offs: 0, worked: ["Can you Mute."] })
+  })
+})
+
+describe("A line out in parts", () => {
+  /** Its first part plays four seconds of the twelve all of it does, and says its first seven words. */
+  const parts = { duration: 4, words: 7 }
+  /** Talk with someone else, which it carries on from a little before where it stopped. */
+  const elsewhere = (): Responder.Reply => ({ intent: "resume", spoken: "", message: "" })
+  /** What the model was told yapd had said of the line when he cut in, and what it hadn't yet. */
+  const told = (responded: ReadonlyArray<Responder.Interruption>) => responded.map(({ lines, unsaid }) => [lines.at(-1)?.text, unsaid])
+  const part = "/tmp/update.first.wav"
+
+  test("cutting in maps to the right place in the whole: during the first part, during the whole after it, and between them", async () => {
+    const at = (fraction: number) => [cut(long.spoken, fraction), unsaid(long.spoken, fraction)]
+    // During its first part, three and a half seconds in: a place in the whole too, which it carries on from a little before.
+    const during = await overHelperScoped(
+      Effect.gen(function* () {
+        const helper = yield* overHelper([[0.9, "Sam, dinner's ready."]], { parts, duration: 12, reply: elsewhere })
+        yield* helper.whole
+        yield* helper.wait(3.5)
+        yield* helper.talk(0.9, 10)
+        yield* helper.quiet
+        yield* helper.wait(1)
+        return { told: told(helper.responded), files: helper.files, plays: helper.plays.map(seconds) }
+      }),
+    )
+    expect(during).toEqual({ told: [at(3.5 / 12)], files: [part, long.audio], plays: [0, 2] })
+    // During the whole, a second past the first part's end: the whole took over inside the quiet that part ends in, and the helper
+    // counts from the whole's own start, so the first part's length isn't added again.
+    const after = await overHelperScoped(
+      Effect.gen(function* () {
+        const helper = yield* overHelper([[0.9, "Sam, dinner's ready."]], { parts, duration: 12, reply: elsewhere })
+        yield* helper.whole
+        yield* helper.wait(3.85)
+        yield* helper.wait(1.15)
+        yield* helper.talk(0.9, 10)
+        yield* helper.quiet
+        yield* helper.wait(1)
+        return { told: told(helper.responded), files: helper.files, plays: helper.plays.map(seconds) }
+      }),
+    )
+    expect(after).toEqual({ told: [at(5 / 12)], files: [part, long.audio, long.audio], plays: [0, 3.85, 3.5] })
+    // Once the first part has played to its end, with the whole still rendering: where that part ended, and the whole never starts
+    // from there, only from a little before, as after any talk not meant for it.
+    const between = await overHelperScoped(
+      Effect.gen(function* () {
+        const helper = yield* overHelper([[0.9, "Sam, dinner's ready."]], { parts, duration: 12, reply: elsewhere })
+        yield* helper.wait(4)
+        yield* helper.finish
+        yield* helper.wait(0.5)
+        yield* helper.talk(0.9, 10)
+        yield* helper.quiet
+        yield* helper.whole
+        yield* helper.wait(1)
+        return { told: told(helper.responded), files: helper.files, plays: helper.plays.map(seconds) }
+      }),
+    )
+    expect(between).toEqual({ told: [at(4 / 12)], files: [part, long.audio], plays: [0, 2.5] })
+  })
+
+  test("the first part ending carries on in the whole from where it ended: no linger between them, ducked when he's talking, and the update heard only at the whole's end", async () => {
+    // Its whole in by then, it takes over inside the quiet the first part ends in, turned down as that part was for his sound.
+    const inside = await overHelperScoped(
+      Effect.gen(function* () {
+        const heard: Array<number> = []
+        const helper = yield* overHelper([], { parts, duration: 12, through: Effect.sync(() => void heard.push(1)) })
+        yield* helper.whole
+        yield* helper.wait(3.8)
+        yield* helper.talk(0.9, 1)
+        yield* helper.wait(0.05)
+        yield* helper.talk(0, defaults.abandon)
+        yield* helper.wait(8.15)
+        const before = heard.length
+        yield* helper.finish
+        return { timeline: helper.timeline.map(({ type, at, value }) => [type, seconds(at), value]), plays: helper.plays.map(seconds), before, heard: heard.length }
+      }),
+    )
+    expect(inside).toEqual({
+      timeline: [
+        ["play", 0, undefined],
+        ["volume", 3.8, 0.25],
+        ["play", 3.85, undefined],
+        ["volume", 3.85, 0.25],
+        ["volume", 3.85, 1],
+      ],
+      plays: [0, 3.85],
+      before: 0,
+      heard: 1,
+    })
+    // Its whole later than its first part's end, it waits there, never lingering for a reply, and carries on from that end.
+    const later = await overHelperScoped(
+      Effect.gen(function* () {
+        const heard: Array<number> = []
+        const helper = yield* overHelper([], { parts, duration: 12, through: Effect.sync(() => void heard.push(1)) })
+        yield* helper.wait(4)
+        yield* helper.finish
+        yield* helper.wait(5)
+        const waiting = { heard: heard.length, over: Option.isSome(yield* Fiber.poll(helper.fiber)) }
+        yield* helper.whole
+        yield* helper.wait(8)
+        const before = heard.length
+        yield* helper.finish
+        return { waiting, commands: helper.commands, plays: helper.plays.map(seconds), before, heard: heard.length }
+      }),
+    )
+    expect(later).toEqual({ waiting: { heard: 0, over: false }, commands: ["play", "play"], plays: [0, 4], before: 0, heard: 1 })
+  })
+
+  test("a whole that fails once the first part has played breaks the line off unheard; talked over first, what he said is worked out as cut short in that part, never as all of it heard", async () => {
+    const played = await overHelperScoped(
+      Effect.gen(function* () {
+        const heard: Array<number> = []
+        const helper = yield* overHelper([], { parts, duration: 12, through: Effect.sync(() => void heard.push(1)) })
+        yield* helper.unrendered
+        yield* helper.wait(4)
+        yield* helper.finish
+        return { heard: heard.length, ended: yield* Fiber.await(helper.fiber), files: helper.files }
+      }),
+    )
+    expect(played.heard).toBe(0)
+    expect(Exit.isFailure(played.ended)).toBe(true)
+    expect(played.files).toEqual([part])
+    const talkedOver = await overHelperScoped(
+      Effect.gen(function* () {
+        const heard: Array<number> = []
+        const helper = yield* overHelper([[0.9, "Sam, dinner's ready."]], { parts, duration: 12, reply: elsewhere, through: Effect.sync(() => void heard.push(1)) })
+        yield* helper.wait(3.5)
+        yield* helper.talk(0.9, 10)
+        yield* helper.quiet
+        yield* helper.unrendered
+        yield* helper.wait(1)
+        return { told: told(helper.responded), heard: heard.length, ended: yield* Fiber.await(helper.fiber), files: helper.files }
+      }),
+    )
+    // Three and a half seconds of the four its first seven words take, of all twenty-six: six of them, and never all of it.
+    const fraction = (3.5 / 4) * (7 / long.spoken.split(/\s+/).length)
+    expect(talkedOver.told).toEqual([[cut(long.spoken, fraction), unsaid(long.spoken, fraction)]])
+    expect(cut(long.spoken, fraction)).toBe("Over in yapd, the tests pass…")
+    // It would carry on from further in than a line rendered again would line up with, so it breaks off, unheard.
+    expect(talkedOver.heard).toBe(0)
+    expect(Exit.isFailure(talkedOver.ended)).toBe(true)
+    expect(talkedOver.files).toEqual([part])
   })
 })
 

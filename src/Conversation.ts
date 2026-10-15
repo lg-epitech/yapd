@@ -14,7 +14,7 @@ import * as T3Actions from "./T3Actions.ts"
 import type * as Threads from "./Threads.ts"
 import { type TranscribeError, Transcriber } from "./Transcriber.ts"
 import { Vad } from "./Vad.ts"
-import { extension, Voice } from "./Voice.ts"
+import { type Early, extension, type Started, Voice } from "./Voice.ts"
 import { again as sayAgain, agreed, gist, halts, type Line, noted, pardon, question } from "./Words.ts"
 
 /** An update, rendered and ready to be read out. */
@@ -28,7 +28,15 @@ export interface Update {
   readonly spoken: string
   /** The rest, said when he asks for more, when only its headline is said. */
   readonly more?: string
+  /** Its whole, which is what it is, however it starts playing. */
   readonly audio: string
+  /**
+   * How it was rendered, when that was started on its own, which whoever's
+   * done with it gives up, removing its files: with its first part, `first`,
+   * when that was out before the whole, which it then starts playing from.
+   */
+  readonly render?: Started
+  readonly first?: string
   readonly thread: Thread
   /** When its turn stopped. */
   readonly at: number
@@ -71,6 +79,17 @@ type Signal =
   | { readonly _tag: "Lingered"; readonly id: number }
   /** The reply is whatever the one who asked for it works out: what to do about an update, or an answer to a question. */
   | { readonly _tag: "Replied"; readonly id: number; readonly reply: unknown }
+
+/**
+ * A line as it plays, which may be its first part, then on into its whole, as
+ * one: `at` is how far into the whole it has got, always a place in it, and
+ * `length` how long the whole is, once that's known. A plain playback's are
+ * its own.
+ */
+interface Playing extends Playback {
+  readonly at?: Effect.Effect<number>
+  readonly length?: Effect.Effect<number>
+}
 
 /**
  * The microphone for a whole update, so nothing the user says is missed
@@ -204,6 +223,14 @@ const brink = 700
 const beat = 100
 /** Volume while it's still unclear whether the user is talking. */
 const ducked = 0.25
+/**
+ * How far before its first part ends a line's whole takes over, in seconds:
+ * inside the quiet that part ends in, after its last word, where both have
+ * the very same samples, so the switch falls where nothing is heard.
+ */
+const handover = 0.15
+/** How long the rest of a line is waited for once it's needed, as when its first part has played, before the line breaks off. */
+const slowest = "10 seconds"
 /** How far back to pick up after talk that wasn't meant for yapd. */
 const rewind = 1.5
 /**
@@ -754,6 +781,137 @@ export const make = (options: {
     }
 
     /**
+     * Plays a line's first part, then its whole from where that ends, as one
+     * playback, once the whole is rendered: from inside the quiet the first
+     * part ends in, where both have the same samples, so the helper's switch
+     * falls where nothing is heard; or, when the whole comes later than that,
+     * or nothing says when the first part began, as with afplay, from the
+     * first part's end, waiting there for the whole as long as `slowest`. Only
+     * the whole's end finishes it, and it fails when either file can't be
+     * played, or the whole isn't rendered. Stopped, it never plays on, and
+     * where it got to is a place in the whole, as the first part's places
+     * already are. How long the whole is comes from its render, never from a
+     * file. Should it never be rendered, it's taken to be as long as makes the
+     * first part's words fall where they do in it, so what he heard of it is
+     * reckoned from those words alone, and never as all of it.
+     */
+    const chained = (first: Early, path: string, text: string) =>
+      Effect.gen(function* () {
+        const scope = yield* Effect.scope
+        const part = yield* audio.play(first.path, 0)
+        const began = yield* Clock.currentTimeMillis
+        const paced = (part.duration * text.split(/\s+/).length) / Math.max(1, Option.getOrElse(yield* first.render.words, () => 1))
+        const whole = first.render.whole.pipe(
+          Effect.timeoutFail({ duration: slowest, onTimeout: () => new AudioError({ message: "The rest of the line didn't render in time" }) }),
+          Effect.catchAll((cause) => (cause instanceof AudioError ? Effect.fail(cause) : Effect.fail(new AudioError({ message: "The rest of the line didn't render", cause })))),
+        )
+        let level = 1
+        /** The whole, once it's playing, from where, and when it began, by the clock. */
+        let rest: { readonly playback: Playback; readonly from: number; readonly began: number } | undefined
+        /** The first part played to its end, and the whole not playing yet. */
+        let ended = false
+        let stopped: number | undefined
+        const halted = yield* Deferred.make<void>()
+        // Starting the whole and stopping are one at a time, so a stop never misses what just started.
+        const lock = yield* Effect.makeSemaphore(1)
+        const playing = Effect.gen(function* () {
+          const inside =
+            part.confirmed && part.duration > handover
+              ? yield* Effect.raceFirst(
+                  Effect.sleep(Math.max(0, (part.duration - handover) * 1000 - ((yield* Clock.currentTimeMillis) - began))).pipe(
+                    Effect.zipRight(first.render.done),
+                    // Rendered by then, or not, as failing it's only known once the first part has played to its end.
+                    Effect.flatMap((done) => (done ? Effect.isSuccess(first.render.whole) : Effect.succeed(false))),
+                  ),
+                  Effect.as(part.finished, false),
+                )
+              : false
+          if (!inside) {
+            yield* part.finished
+            ended = true
+          }
+          yield* whole
+          const from = inside ? part.duration - handover : part.duration
+          const started = yield* lock.withPermits(1)(
+            Effect.suspend(() =>
+              stopped !== undefined
+                ? Effect.succeed(undefined)
+                : Effect.tap(audio.play(path, from).pipe(Scope.extend(scope)), (playback) =>
+                    Effect.map(Clock.currentTimeMillis, (now) => {
+                      rest = { playback, from, began: now }
+                    }),
+                  ),
+            ),
+          )
+          if (started === undefined) return yield* Effect.never
+          // The helper starts every play at full volume.
+          if (level !== 1) yield* started.volume(level)
+          yield* started.finished
+        })
+        // Stopped, it never finishes, as a line stopped never does.
+        const going = yield* Effect.raceFirst(Effect.as(playing, true), Effect.as(Deferred.await(halted), false)).pipe(
+          Effect.flatMap((played) => (played ? Effect.void : Effect.never)),
+          Effect.forkScoped,
+        )
+        return {
+          duration: part.duration,
+          confirmed: part.confirmed,
+          finished: Fiber.join(going),
+          stop: lock.withPermits(1)(
+            Effect.gen(function* () {
+              if (stopped !== undefined) return stopped
+              // Where the first part stopped, or ended, or where the whole did, which the helper counts from its own start.
+              const at = rest === undefined ? yield* part.stop : yield* rest.playback.stop
+              stopped = at
+              yield* Deferred.succeed(halted, undefined)
+              return at
+            }),
+          ),
+          volume: (value: number) =>
+            Effect.suspend(() => {
+              level = value
+              return (rest?.playback ?? part).volume(value)
+            }),
+          at: Effect.flatMap(Clock.currentTimeMillis, (now) =>
+            Effect.sync(() => {
+              if (stopped !== undefined) return stopped
+              if (rest !== undefined) return Math.min(rest.playback.duration, rest.from + (now - rest.began) / 1000)
+              return ended ? part.duration : Math.min(part.duration, (now - began) / 1000)
+            }),
+          ),
+          length: whole.pipe(
+            Effect.map((length) => length ?? paced),
+            Effect.orElseSucceed(() => paced),
+          ),
+        } satisfies Playing
+      })
+
+    /** Lines rendered again once their whole failed, by their render, so it's done once. */
+    const renderedAgain = new WeakSet<Early["render"]>()
+
+    /**
+     * Plays a line, `text`, from `from` seconds in. One out in parts, `first`,
+     * played from its start while its whole renders, plays its first part on
+     * into its whole; played otherwise, it plays its whole, waited for as long
+     * as `slowest`. Its whole failed, it's rendered again and played whole
+     * from its start, maybe with say; but never from further in, which a line
+     * rendered again wouldn't carry on from where the first one stopped: then
+     * it breaks off.
+     */
+    const play = (path: string, text: string, from: number, first?: Early): Effect.Effect<Playing, AudioError, Scope.Scope> =>
+      Effect.gen(function* () {
+        if (first === undefined || renderedAgain.has(first.render)) return yield* audio.play(path, from)
+        if (from === 0 && !(yield* first.render.done)) return yield* chained(first, path, text)
+        const whole = yield* Effect.exit(first.render.whole.pipe(Effect.timeout(slowest)))
+        if (Exit.isSuccess(whole)) return yield* audio.play(path, from)
+        if (from > 0 || !(yield* first.render.done)) return yield* new AudioError({ message: "The rest of the line didn't render", cause: whole.cause })
+        yield* Effect.logWarning("The rest of the line didn't render, so all of it is rendered again", whole.cause)
+        yield* voice.render(text, path).pipe(Effect.mapError((cause) => new AudioError({ message: "Could not render the line again", cause })))
+        renderedAgain.add(first.render)
+        return yield* audio.play(path, 0)
+      })
+
+    /**
      * Plays a line, `text`, from `from` seconds, listening if there's an ear,
      * then `wait` longer for a reply. `begun` runs once it's playing, never
      * when it can't be played, `confirmed` once it's known to be, which with
@@ -779,11 +937,13 @@ export const make = (options: {
         readonly heeding?: boolean
         readonly replying?: boolean
         readonly cut?: Effect.Effect<void>
+        /** Its first part, when it's out in parts. */
+        readonly first?: Early
       } = {},
     ) =>
       Effect.gen(function* () {
         const { wait = linger, begun = Effect.void, confirmed = Effect.void, through = Effect.void, heeding = false, replying = false, cut } = given
-        const playback = yield* audio.play(path, from)
+        const playback = yield* play(path, text, from, given.first)
         yield* begun
         if (playback.confirmed) yield* confirmed
         // Otherwise it's known only as it plays to the end, so it goes with what runs then, holding nothing up meanwhile.
@@ -836,12 +996,13 @@ export const make = (options: {
      * still going is handed on as it is, to be heard out there, as "Mute."
      * too.
      */
-    const heed = (playback: Playback, ear: Ear, text: string, from: number, through: Effect.Effect<void>, replying = false) =>
+    const heed = (playback: Playing, ear: Ear, text: string, from: number, through: Effect.Effect<void>, replying = false) =>
       Effect.gen(function* () {
         const { signals } = ear
         const id = fresh()
         const began = yield* Clock.currentTimeMillis
-        const position = Effect.map(Clock.currentTimeMillis, (now) => Math.min(playback.duration, from + (now - began) / 1000))
+        const position = playback.at ?? Effect.map(Clock.currentTimeMillis, (now) => Math.min(playback.duration, from + (now - began) / 1000))
+        const length = playback.length ?? Effect.succeed(playback.duration)
         /** How far into the line he began what he's saying, when by the clock, and whether that was while yapd's own voice could still get into the microphone. */
         let onset: number | undefined
         let since = 0
@@ -900,11 +1061,13 @@ export const make = (options: {
               Effect.forkScoped,
             )
         /** Replying, the wait for a reply follows from its end, once `through` has run, with what's still going then, if anything. */
-        const ending = (open?: Ended["open"]) =>
-          Effect.as(Deferred.await(ran), {
+        const ending = (open?: Ended["open"]) => {
+          const ended = finished
+          return Effect.zipWith(Deferred.await(ran), length, (_, duration) => ({
             _tag: "Finished",
-            ended: { duration: playback.duration, finished, ...(open === undefined ? {} : { open }) },
-          } satisfies Outcome)
+            ended: { duration, finished: ended, ...(open === undefined ? {} : { open }) },
+          }) satisfies Outcome)
+        }
         /**
          * Whether what he began at `at` is heard out once that moment is over,
          * at `over`: begun in it or just before the line ended, however long
@@ -944,7 +1107,7 @@ export const make = (options: {
         while (true) {
           if (replying && over !== undefined) {
             // Begun as it ended, though looked at just before its end was noted, it's his reply.
-            if (onset !== undefined && since >= over) return yield* ending({ onset: playback.duration, since, echo: echoing, over: false })
+            if (onset !== undefined && since >= over) return yield* ending({ onset: yield* length, since, echo: echoing, over: false })
             // Begun before its last moment and still going as it ended, it's handed on as it is, never waited for.
             if (onset !== undefined && since < over - brink) return yield* ending({ onset, since, echo: echoing, over: true })
             if (played && onset === undefined) return yield* ending()
@@ -960,7 +1123,7 @@ export const make = (options: {
             case "Onset":
               // Replying, begun as it ended or after, it's his reply, even while `through` is still running.
               if (replying && over !== undefined && signal.at >= over) {
-                return yield* ending({ onset: playback.duration, since: signal.at, echo: signal.echo, over: false })
+                return yield* ending({ onset: yield* length, since: signal.at, echo: signal.echo, over: false })
               }
               // Begun once that moment is over, but not heeded, it's more of other talk, like a TV's, which holds nothing up.
               if (!replying && over !== undefined && !heeded(signal.at, over)) return { _tag: "Finished" } satisfies Outcome
@@ -978,7 +1141,7 @@ export const make = (options: {
               ended = yield* Clock.currentTimeMillis
               const at = yield* position
               const begun = onset ?? at
-              const echo = echoing ? between(text, playback.duration, begun - reach, Math.max(at, begun) + reach) : undefined
+              const echo = echoing ? between(text, yield* length, begun - reach, Math.max(at, begun) + reach) : undefined
               onset = undefined
               echoing = false
               // Longer than "Mute." could be, it isn't, so Whisper isn't asked, and nothing waits on it; nor while Whisper can't hear yet,
@@ -1000,15 +1163,16 @@ export const make = (options: {
               // Replying, with yapd's own voice maybe in it, and still going as the line ended, it's his reply that its own voice ran
               // into, worked out as what he said over it, with the line's words as what may be its own: never dropped.
               if (replying && over !== undefined && echo !== undefined) {
+                const duration = yield* length
                 return yield* Effect.as(Deferred.await(ran), {
                   _tag: "Interrupted",
-                  at: playback.duration,
-                  duration: playback.duration,
+                  at: duration,
+                  duration,
                   audio: signal.audio,
                   ...(signal.heard === undefined ? {} : { heard: signal.heard }),
                   ear,
                   echo,
-                  onset: Math.min(playback.duration, begun),
+                  onset: Math.min(duration, begun),
                   finished,
                   lateBy: 0,
                   stopped: ended - Latency.quiet,
@@ -1042,7 +1206,7 @@ export const make = (options: {
      * ended, nor while he's talking.
      */
     const listen = (
-      playback: Playback,
+      playback: Playing,
       ear: Ear,
       text: string,
       from: number,
@@ -1151,8 +1315,12 @@ export const make = (options: {
               )
             : Queue.take(signals),
         )
-        /** How far into the line yapd has got, in seconds. */
-        const position = Effect.map(Clock.currentTimeMillis, (now) => stoppedAt ?? Math.min(playback.duration, from + (now - began) / 1000))
+        /** How far into the line yapd has got, in seconds: into its whole, when it plays from its first part on into that. */
+        const position = Effect.suspend(() =>
+          stoppedAt !== undefined
+            ? Effect.succeed(stoppedAt)
+            : (playback.at ?? Effect.map(Clock.currentTimeMillis, (now) => Math.min(playback.duration, from + (now - began) / 1000))),
+        )
 
         while (true) {
           const signal = yield* next
@@ -1203,18 +1371,20 @@ export const make = (options: {
                 }
                 break
               }
-              const at = stoppedAt ?? playback.duration
+              // All of the line, however it was played, so where he cut in is a place in all it says.
+              const duration = yield* (playback.length ?? Effect.succeed(playback.duration))
+              const at = stoppedAt ?? duration
               const begun = onset ?? at
               return {
                 _tag: "Interrupted",
                 at,
-                duration: playback.duration,
+                duration,
                 audio: signal.audio,
                 ...(signal.heard === undefined ? {} : { heard: signal.heard }),
                 ear,
                 // To where it stopped, or where he began, should the helper put that a moment before.
                 onset: Math.min(at, begun),
-                ...(echoing ? { echo: between(text, playback.duration, begun - reach, Math.max(at, begun) + reach) } : {}),
+                ...(echoing ? { echo: between(text, duration, begun - reach, Math.max(at, begun) + reach) } : {}),
                 ...(finished === undefined ? {} : { finished }),
                 lateBy: finished === undefined || since === undefined ? 0 : Math.max(0, since - finished) / 1000,
                 stopped: (yield* Clock.currentTimeMillis) - Latency.quiet,
@@ -1606,6 +1776,9 @@ export const make = (options: {
           const lines: Array<Line> = []
           let text = update.spoken
           let path = update.audio
+          /** The first parts of what's said, by the line's file, when they're out before their whole. */
+          const parts = new Map<string, Early>()
+          if (update.first !== undefined && update.render !== undefined) parts.set(update.audio, { path: update.first, render: update.render })
           let from = given.from ?? 0
           let missed = 0
           /** What the line being said is, which tells what "scratch that" said over it or right after can take back. */
@@ -1664,11 +1837,13 @@ export const make = (options: {
             const heeding = missed >= misses
             const begun = opening
             opening = Effect.void
+            const part = parts.get(path)
             const outcome: Outcome =
               ended === undefined
                 ? yield* speak(path, text, from, heeding ? heedful(ear) : ear, {
                     begun,
                     wait: window.wait,
+                    ...(part === undefined ? {} : { first: part }),
                     // Noted only once it's known to play, so a line for going ahead that fails to render or play, or that a dictation cuts in before, never counts as the last one he heard.
                     confirmed: path === update.audio ? Effect.void : persona.said(text),
                     through: path === update.audio ? through : Effect.void,
