@@ -2,13 +2,21 @@
 
 I'm tired of reading my agent outputs. So I have another agent yap instead!
 
-When a Claude Code or Codex session finishes, yapd sums up the reply in a headline and says it, keeping the rest for when you say "more". If several finish together you hear them one at a time, and whatever needs you goes first, in full. Talk over it to [cut it short, ask about it, or tell the agent what to do next](#interrupting), or press a shortcut and [tell yapd what to start next](#starting-new-work).
+When a Claude Code or Codex session finishes, yapd tells you what it did in a headline, and the rest if you say "more". Talk back to cut it short, ask a question or tell the agent what to do next. Your eyes can stay wherever they were.
 
-Needs a Mac with Apple silicon, [Bun](https://bun.sh), Xcode's command line tools (`xcode-select --install`) and any of the [available providers](#providers). The agents can also run [on other machines](#agents-on-another-machine), Linux included.
+Press a shortcut and you get one assistant that knows all your [T3 Code](https://github.com/pingdotgg/t3code) threads. Ask "what's going on?", "who needs me?" or "catch me up", say "show me that PR", tell a thread what to do, or ramble out the next job and it starts it.
 
-The voice is [Kokoro](https://huggingface.co/hexgrad/Kokoro-82M), which runs locally, on your Mac's GPU when it can, and downloads on first start. It only speaks English, so yapd translates updates written in other languages, and has any other words that slip through translated before it says them. It also keeps to what can be said aloud: it says "the wallet address" or "its ID" rather than reading one out.
+When an agent asks you something, yapd reads the question out and you answer by voice.
 
-With [ffmpeg](https://ffmpeg.org) installed it sounds a bit like Jarvis.
+When you need some peace, mute a noisy thread, say "focus" or "goodnight", or turn yapd off. Off, it keeps everything for when you ask to be caught up.
+
+It also sets reminders, remembers what you tell it to, runs your own routines and tidies threads. The agents can run on another machine too.
+
+It needs a Mac with Apple silicon, [Bun](https://bun.sh) and Xcode's command line tools. The voice and the listening both run on your Mac.
+
+With [ffmpeg](https://ffmpeg.org) installed it sounds a bit like Jarvis :)
+
+Every setting, and how it all works, is in [the long version](docs/guide.md).
 
 ## Setup
 
@@ -17,292 +25,44 @@ bun add -g @launatic/yapd
 yapd setup
 ```
 
-This adds yapd's hooks to Claude Code and Codex, whichever you have, next to any of your own, and keeps each file as it was beside it, ending in `.before-yapd`. Codex asks you to accept its hooks on your next session. Claude Code's Stop hook runs in the background and waits while yapd reads the update, and after, until the session does something else or nine minutes have passed, so it can hand the session [your reply](#where-follow-ups-go), even to an update you [hear again](#menu-bar).
+That hooks yapd into Claude Code and Codex without touching your own hooks, keeps it running in the background and runs `yapd doctor` to tell you what's still missing. Codex asks you to trust the new hooks. Settings go in `~/.yapd/.env`, and `yapd install` applies them.
 
-Then it runs yapd in the background with launchd, starts it at login and restarts it if it stops. Logs go to `~/Library/Logs/yapd.log`. It keeps the `PATH` of the shell you set it up from, so run `yapd install` after changing your settings or moving a CLI. `yapd uninstall` stops it. To run it in the foreground instead, uninstall it and use `yapd serve`.
+The assistant, agents' questions, reminders about threads and tidying all go through T3 Code. yapd needs T3 Code 0.0.46 or later, for now the nightly, and [a token from it](docs/guide.md#t3-code) as `YAPD_T3CODE_TOKEN`. Without one, replies still reach Claude Code and Codex, and new work starts from the command line.
 
-Last, it runs `yapd doctor`, which checks all of that and says how to fix what's missing. Run it whenever yapd seems off.
-
-Doctor also checks whether Codex trusts yapd's hooks. If they're untrusted or have changed, run `codex` and review them in `/hooks` on the machine running the agent. Trust survives logins and restarts, but changing a hook definition, including its command, requires approval again.
-
-Your settings go in `~/.yapd/.env`, where yapd also keeps what it downloads and remembers.
-
-On first start yapd asks for the microphone, so you can interrupt it.
-
-To update, then restart it:
-
-```sh
-bun add -g @launatic/yapd@latest
-yapd install
-```
-
-To run it from a clone instead, `bun install` and `bun link` in it, then `yapd setup`. The hooks and the service then run the clone. A `.env` or `preferences.md` in the clone moves to `~/.yapd` the first time yapd runs.
+To update, run `bun add -g @launatic/yapd@latest` and then `yapd install`.
 
 ## Menu bar
 
-The menu bar app turns yapd off and on, and shows what it's doing without opening the menu. Take `yapd-menu-bar-<version>.zip` from the [latest release](https://github.com/lg-epitech/yapd/releases/latest) and move `yapd.app` into Applications. It isn't notarized, so macOS blocks it the first time you open it: choose Open Anyway in System Settings, Privacy & Security. From then on it opens at login, which System Settings, General, Login Items can stop.
+The menu bar app, in the [latest release](https://github.com/lg-epitech/yapd/releases/latest), turns yapd off and on, sets focus or quiet, catches you up and lists your threads, to hear again or mute. Cards you ask for, like "show me that PR", go up under it. Its arc reactor shows whether yapd is talking, listening or off, and whether a thread waits on you. It isn't notarized, so macOS blocks it the first time. Choose Open Anyway in Privacy & Security.
 
-From a clone, `bun run app` builds it with Xcode into `~/Applications` and opens it instead. If `xcodebuild` says it needs Xcode, point the command line tools at it with `sudo xcode-select -s /Applications/Xcode.app`.
+## Talking back
 
-| Icon | |
-| --- | --- |
-| Arc reactor | On, and quiet |
-| Arc reactor with a moon | On, in focus or quiet |
-| Arc reactor with a dot | On, and a thread waits on you |
-| Speaker | Speaking |
-| Microphone | Listening, for your reply or while you dictate |
-| Arc reactor gone dark, just its casing and an empty core | Off |
-| Faded arc reactor | yapd isn't running |
+Talk while yapd is talking and it stops. "Got it" ends the update, "which PR was that?" gets an answer, and "merge it" goes to the agent as your next message. "Mute." on its own turns yapd off. If you were talking to someone else, it picks up where it left off.
 
-Off, yapd says nothing of its own accord and never opens the microphone to listen for a reply, but the shortcut still works: ask it something and it answers, then goes quiet again. Turning it off drops what you asked that hasn't started yet, a dictation and new work it was still writing up or asking you about, and keeps what it was about to say. Updates that finish meanwhile are still summed up and kept, unheard, never said on their own; turned back on, it offers them once ("You missed five, sir. Want the rundown?"), and asks what agents still wait on you for. It stays off when it restarts, until you turn it on again. The menu also lists the threads with the latest updates, each with its project's icon as T3 Code draws it, how long ago it finished and whether it's muted: click one to hear its latest update again and reply to it, or hover over it for a panel beside it with what the thread is doing, its branch and pull request, and the latest it told you, where you can mute a noisy one, until you take the mute off or for an hour, and open its pull request. With the keyboard, → or Return on a thread opens its panel, and Hear Again there says it again. Muting keeps its progress and finished work quiet, but anything that needs you still comes through. With a yapd from before that, it has the last few updates to hear again instead.
-
-The Mode menu puts yapd in focus for an hour or quiet until the morning, or back to normal, and the menu says when focus or quiet ends. While a thread waits on you, the menu says how many do: choose it and yapd tells you who, aloud. While there's anything you haven't heard, the menu offers "Catch Me Up (N)", and each thread says how many of its updates you haven't heard unless it's muted: choose it and yapd catches you up, aloud, even while it's off. With the app update, Clear Catch-Up under it sets all of that aside as heard without reading any of it, as "clear the catch-up" does, at once and with no asking first: "scratch that" by voice within two minutes brings back what you haven't heard since. A Reminders menu lists what you've asked yapd to tell you later, each with its time or its thread, even while it's off: hover over one and choose Cancel, as "cancel the bank reminder" does, and "scratch that" by voice keeps it again. You set them by voice.
-
-Ask yapd to show you something, like "show me what's running" or "show me that PR", and the card goes up in a panel under the icon, to read only, until a while after yapd has finished talking about it. "Hide that" takes it down sooner, and Show Last Card in the menu brings it back.
-
-The app only uses yapd's [API](docs/api.md), so you can make your own, on Linux too.
-
-## Interrupting
-
-Say anything while yapd is talking and it stops. The model that writes the summaries then works out what you meant:
-
-- "Mute." on its own turns yapd off at once, as Turn Off in the menu does, with no model and not a word back, over anything it says or just after, its first seconds and a notice too, and by the [shortcut](#dictating). What was waiting stays unheard for your catch-up, and nothing reaches an agent: one whose question it was reading still waits on you in T3 Code. Turn it back on from the menu, or press the shortcut and say "unmute" or "turn on". "Mute it" still mutes the thread.
-- "Got it", "sounds good" or "quiet" and it stays quiet. Agreeing only goes to the agent when it asked you something, and "leave it as it is" never does.
-- "Mute it" keeps that thread's progress and finished work to yourself, for good or "for an hour", while anything that needs you still comes through, and asking what it said catches you up on it. "Unmute it", "what's muted?" and "unmute everything" work too, by the shortcut as well, and "scratch that" takes a mute back. Nothing about it reaches the agent.
-- "Read me its subagents" and "stop reading its subagents" change whether you hear that thread's [subagents](#subagents). Nothing about it reaches the agent; "have a subagent review it" still does.
-- "More" over a headline, or just after it, says the rest at once.
-- "Focus", "goodnight", "I'm back", "talk shorter" and "give me everything" change how yapd talks, as in [Focus and quiet](#focus-and-quiet). Nothing about them reaches the agent.
-- Ask something the update answers, like "which PR was that?", and it answers.
-- Tell the agent something, like "merge it" or "look again", and it goes to the session as your message. You hear the reply like any other update, even a quick one, unless the agent only says it understood.
-- If you were talking to someone else, it picks up where it left off. If that keeps happening, say with a TV on, it reads the rest without stopping for anything but "Mute.".
-
-You can also reply just after it finishes, so "yes, merge it" works when an update ends on a question. The replies people give most are taken at once: a plain "yes" or "go ahead" to an update that asked something goes straight to the agent, and "thanks", "got it", "skip it" or "quiet" just end the update. Anything more, yapd takes about as long to work out as it does to write a summary, around two seconds with Codex.
-
-Pausing to think doesn't cut you off. yapd keeps listening while it works out what you meant, and if you carry on, it takes in all of it. If you trail off mid-sentence, like "and tell it to…", it waits a few seconds more. When it passes something on, it just says it's on it, without repeating what you asked. With `YAPD_STYLE` set, the few lines it says most, like that one, are written once in your style and kept, and they're rendered ahead so they play the moment they're needed.
-
-You can send several follow-ups to the same update, including one you hear again. If the session is still on an earlier voice reply, yapd says it queued the next one. It sends queued replies in order as each turn finishes, and tells you when each goes through or fails. Typing unrelated work into the session cancels its queued replies and makes the old update stale. The queue is kept by the running daemon: turning yapd off or restarting it drops replies that haven't started delivery.
-
-The microphone is only on while yapd has something to say and for a few seconds after, and while you [dictate](#dictating). It uses FaceTime's echo cancellation, so speakers are fine. That starts over each time the microphone comes on and needs the first three seconds yapd says to learn its voice. Talking over those stops it all the same, over an update, an answer or a question of yapd's, and the model is told your first words may be yapd's own, so a message or an answer that may be cut off gets you asked to say it again. If only yapd's own voice stopped it, it picks up again a word or two back, without a word, and logs "Stopped for its own voice over its first seconds" in `~/Library/Logs/yapd.log`, so you can count how often that happens on your speakers; an update it ended on what may have been only its own voice is left for "what did I miss?". [Whisper](https://huggingface.co/onnx-community/whisper-base) transcribes you on your Mac and only the words go to the provider. It downloads on first start.
-
-Whisper assumes English, so set `YAPD_LANGUAGE=french` or whichever language you speak. yapd still answers in English, but what it passes on to the agent stays in yours. `YAPD_WHISPER` picks another model, like `onnx-community/whisper-small`, which is more accurate but slower. `YAPD_LISTEN=false` never opens the microphone.
-
-### Where follow-ups go
-
-yapd hands a follow-up to the session the update came from, through whatever that agent offers outside tools, so it doesn't matter which terminal or editor you use:
-
-- Claude Code, anywhere it runs: the terminal, an editor or the desktop app. The Stop hook above wakes the session with your reply. Claude sees it as a message relayed from you rather than one you typed.
-- Codex 0.157 or later in the terminal, through `codex queue`. It shows up as your next message.
-- [T3 Code](https://github.com/pingdotgg/t3code) 0.0.46 or later, for now the nightly, through its API, so the message shows up in the thread as if you'd typed it. This needs a token from the app's own CLI, which matches its version:
-
-  ```sh
-  ELECTRON_RUN_AS_NODE=1 "/Applications/T3 Code (Nightly).app/Contents/MacOS/T3 Code (Nightly)" \
-    "/Applications/T3 Code (Nightly).app/Contents/Resources/app.asar/apps/server/dist/bin.mjs" \
-    auth session issue --label yapd --ttl 365d --token-only
-  ```
-
-  Put it in `~/.yapd/.env` as `YAPD_T3CODE_TOKEN=...` and run `yapd install` again. If yapd says T3 Code turned down its token, issue a new one. `yapd doctor` says whether it takes the one you have.
-
-A session another app drives, like T3 Code, only gets follow-ups through that app, so its own view stays in step. Queued follow-ups use the session's latest reply to find its thread. yapd won't send anything from an old update after you've started unrelated work, and says so when it can't reach a session.
-
-## Focus and quiet
-
-Updates that only say how running work is going, like another review round, are held for a digest: a short catch-up once nothing has been said for a minute, at most every twenty minutes. "Give me everything" has yapd say each update in full and hold none, and "talk shorter" goes back to headlines.
-
-"Focus" holds everything that doesn't need you for an hour, or as long as you say ("focus for two hours"), and "goodnight" until 8:00 in the morning. A thread's question, a failure, a usage limit and the answer to your own message still come through, as with a muted thread. So does the answer to something you asked yapd to [find out](#finding-things-out) in focus; in quiet it waits for the morning's rundown. "I'm back" ends either and catches you up; one that ends on its own offers you the rundown once. Work that finished or failed while yapd was down isn't told when it starts again, though a thread's question still waiting is. Turning yapd off is still the way to hear nothing of its own accord. Both are kept through a restart, and the [API](docs/api.md#modes) sets them too.
-
-## Catching up
-
-yapd keeps every update it sums up, and knows which you heard to the end. Ask it to catch you up, however you put it, "catch me up", "what did I miss on Distribox?" or "anything from rig since lunch?", and the model decides that's what you want and what about; yapd first reads you what needs you as it was kept, a failure or an agent's question with its options, and the answer to what you asked a thread, then briefs you on the rest in about ninety words and eight threads at most. "More" gets the threads it left out, or the detail of the ones it told you of. What it told you counts as heard only once you've heard it to the end. Muted threads are left out unless you ask about one. Nothing it does reaches an agent. "Clear the catch-up", "skip the catch-up" or "mark everything as heard" sets it all aside without reading it, "Cleared, sir: fifty-three updates set aside.", and "scratch that" within two minutes brings back what you haven't heard since. Agents' questions still waiting are never cleared.
-
-## Subagents
-
-The reviews and other work T3 Code runs for a thread as its subagents are kept to yapd unless you ask for them: summed up and kept, but never said, whatever they say, and left out of what you missed. The thread's own turns, like the one where it takes in a review, are said as ever. "Read me its subagents" over or after one of its updates, or "read me the Tezos migration's subagents" with the shortcut, has them read to you from now on, each led by the thread: "For the Tezos migration: one release blocker is left." "Stop reading its subagents" keeps them to yapd again, and "scratch that" right after either takes it back. "Mute it" over one of them mutes that one only; muting the thread mutes its subagents too. "What did its subagents say?" catches you up on what they kept. Subagents a provider runs inside the thread's own session, like Claude's Agent tool, never reach yapd: their results come in the thread's own turn. With the app update, the menu does the same: Read Subagents in a T3 Code thread's own panel, checked while they're read, has them read or keeps them to yapd again. A subagent's row, which Recent lists only while they're read, says which thread it's part of and has no Read Subagents, since it would stop them all: that's for the thread's panel. Its Mute and Mute for an Hour mute that subagent only; while its thread is muted, it says so instead, since only unmuting the thread unmutes it. The [API](docs/api.md#hearing-a-threads-subagents) does the same by a thread's key.
-
-## Reminders
-
-Ask yapd to remind you of something later, however you put it: "remind me at three to call the bank", "tell me when the Tezos one finishes", "let me know when the Mina one asks me something". It says what it kept, like "I'll remind you at 3:00 PM, sir: call the bank.", and tells you then, naming the time, so a reminder that came due while yapd was down or off still reads right; one due while yapd was off is kept for when you catch up rather than said. When a thread you're waiting on finishes, you hear that first, then its update, as one, whatever you muted. "At five, offer to tell the std fix to ship it" asks you then, "Shall I tell the std fix: ship it, sir?", and only your yes sends it. "What reminders do I have?", "cancel the bank reminder" (asked which, when two could be meant) and "scratch that" right after setting or cancelling one work too. yapd doesn't watch pull requests. Reminders need a [T3 Code token](#where-follow-ups-go) for anything about a thread. The menu bar app lists them too, to cancel.
-
-yapd also says when a provider's limit passes 95 percent of a window, once a window, and keeps 80 percent for the next digest.
-
-## Memories and routines
-
-Ask yapd to keep something in mind, like "remember that rig's T3 Code runs the nightly", and it says "Noted, sir: rig's T3 Code runs the nightly.", reading back what it kept, or naming it by its first words when some of it can't be read aloud, like a link. It goes by it from then on as what's so, never as something to do: "what do you know about rig?" answers from it, and new work you start leans on it only where it needs to. It keeps your words as you said them, symbols and all: everything you said after "remember that", "note that" or "keep in mind", with an everyday way of asking before it, like "hey Jarvis, can you", left out, and a "thanks", "please" or "Jarvis" after it only when a pause sets it off, so "the magic word is please" keeps its "please". Another request after it, like "remember that the Mina repo uses pnpm, and tell the Mina one to rebase", is done as usual once the fact is kept, as long as you join it on with "and", "then" or "also" and the fact is all you said before that word: a comma or full stop alone never splits them, so "remember that the deploy script is safe, unless it's Friday" is never kept as less than you said. That's the only way to add another request: anything else the model takes for one beside a fact or routine you said whole is never done, and yapd tells you it left it. One the model copied any other way, like "C" for your "C++", or with words of yours left out, like a "never", isn't kept, and it tells you; with more of yours around it, like a request before "remember that", it tells you to say it on its own. Saying it again keeps it once, while "rig uses C" is kept beside "rig uses C++". "Forget that one about rig" gives "Forgotten, sir: rig's T3 Code runs the nightly.", and "scratch that" right after keeping or forgetting one takes it back. A bare "forget it" still only stops yapd talking.
-
-A routine is steps sent to a thread whenever you say its name. "When I say review it, have Sol review it until it's clean" gives "Noted, sir. Review it: have Sol review it until it's clean.", so you hear exactly what's kept, and saying it again with other steps changes it and reads the new ones back. Say it on its own, the name then the steps or the steps then the name, as "when I say", "whenever I say" or "if I say" puts it, with an everyday way of asking before it if you like, such as "hey Jarvis, can you remember that": a "thanks" or "Jarvis" is left out of the steps only when a pause sets it off, so "when I say ping, ask Jarvis" keeps "ask Jarvis". Anything the steps leave out, like "if the checks are green" or a "don't", or another request in the same breath, keeps nothing and does nothing, and yapd tells you to say it as one request. The name is everything you say up to your first pause, never where the model takes it to end, so say the name, pause, then the steps: in "when I say ship, if green, merge the PR" the "if green" stays in the steps, but in "when I say ship if green, merge the PR" it's part of the name, which then sends "merge the PR" with no condition when you say "ship if green". A name the model ends anywhere but that pause keeps nothing, and yapd says "Pause after its name, sir: when I say ship, then the steps." A name is three words at most, as you'd say them, so "let's ship it" is three: a longer one gets "Keep the name short, sir: when I say ship, then the steps." The steps are kept as they were heard, symbols and names too, never as the model copied them, since they go to an agent as they are: when speech recognition gets a name in them wrong, like "Saul" for Sol, yapd keeps nothing and tells you, and you can type that routine in your rules instead. Then "review it", said with the shortcut, sends those steps, word for word, to the thread you're on, or to one you name, as any message you send goes: the same steps to the same thread within ten minutes ask you first. Only the whole name sends them: "ship" never sends a routine called "ship deploy", whatever the model makes of it, and a name said in one part of a request never sends them for the next part. The model knows a routine by its name alone, never its steps, so only yapd puts them in, and asked what a routine does, it says it can't read the steps out. What it's told of lately, like the steps read back as you saved it, sent or offered, names the routine in their place, though you still hear them. The one that writes prompts for new work never sees a routine at all. Said with more that changes what it asks, like "review it for typos", it's your own words that go, never the steps. A name yapd already answers to, like "scratch that", "yes", "ship it" or "turn on", can't be one. You can also write routines in your [rules](#your-rules), and one there wins over one you said.
-
-yapd keeps forty at most, about four thousand characters in all, since everything you ask reads them; past that it asks you to forget something first, rather than leave any out. Nothing faint, said over yapd's own voice or that looks like a secret is kept, and it tells you why. yapd won't keep a fact that mentions a password, PIN, passphrase, recovery phrase, login, key, token, secret, code or the like, even ones that aren't secret. A fact with the word "pass" in it is refused too, whether "my Windows pass" or "the tests pass", so say "the tests work on Node 22" rather than "pass"; a pass rate is kept. That's a best effort: it can't recognise every way a secret might be said, like a door code said without the word code, so don't ask it to remember one. A routine is refused for what looks like a value, like a key or token given with its value, since steps to an agent use those words every day: "when I say ship, push the code" is kept. A routine that mentions a password, PIN or a door or alarm code is refused too, value or not, and so is one with a word like key, token, login, PIN or code that has a digit within three words after it, as in "use the API key abc123", even "rotate the deploy key for Node 22". A message to an agent is held back while its thread waits on a secret, or, when it looks like one, on a question you'd type an answer to. Said over an update, keeping or forgetting something, or a routine's name, gets you asked to use the shortcut, never sent to its agent, unless it's a plain yes like "ship it" to what the agent just asked. They're kept through restarts, and work while yapd is off.
-
-## Tidying threads
-
-Ask yapd to tidy a T3 Code thread, however you put it: "archive the Mina tickets thread" gives "Archived, sir: the Mina tickets.", and "unarchive it" or "scratch that" brings it back. "Rename it to Mina fee tables", "snooze the Tezos one until tomorrow morning", "settle it", "pin the std fix", and "unsnooze", "unsettle" and "unpin" work too. The line always names the thread. Archiving one drops the reminders you set on it, and says so; unarchiving it, or taking it back, brings them back.
-
-Several at once, to archive, settle or snooze them, up to six: "archive all the finished Tezos threads" gives "That's four threads, sir: the Tezos importer, the Tezos fees, the Tezos wallets and the Tezos docs. Archive them all?", with the list on your screen when the app is there. "Yes" archives all four, each once, and "yes, but not the Tezos fees" the other three. One that started working again before your yes, or went, is left out, and said, as is one that starts working just before it's archived.
-
-A thread at work is never archived without your yes, since archiving it stops what it's doing: "The Tezos importer is still working, sir, and archiving it stops what it's doing. Archive it anyway?" One that's busy, or waiting on you, can't be settled, and yapd says so. A title that isn't your words as heard, or a thread yapd isn't sure you meant, is asked about first. "Scratch that" right after takes a tidy back as far as T3 Code lets it: a snooze or a settle that pinning cleared is put back, but what archiving stopped stays stopped, and unsettling marks a thread active rather than as T3 Code would have it. Tidying never deletes a thread, and needs a [T3 Code token](#where-follow-ups-go).
-
-## Dictating
-
-Press ctrl+option+cmd+space from any app and talk to yapd, then press it again to send, or Escape to drop it. A short rising sound says it's listening, a higher one that it's sent, a falling one that it's dropped. Take your time: pausing to think doesn't end it, only the shortcut does. What you said becomes [new work](#starting-new-work).
-
-If yapd is reading an update when you press it, it stops, and reads it again from the start once you're done, along with anything that came in meanwhile. If you forget about it, it stops listening after five minutes and drops what it heard. It doesn't need any permission beyond the microphone.
-
-Whisper hears dictation with a larger model than interruptions, [whisper-small](https://huggingface.co/onnx-community/whisper-small), since a misheard prompt costs more than a misheard "merge it". It downloads when yapd first starts, about a gigabyte, and loads the first time you dictate. `YAPD_DICTATION_WHISPER` picks another, like `onnx-community/whisper-large-v3-turbo`, which is more accurate but a few times slower. `YAPD_LANGUAGE` applies here too.
-
-Set `YAPD_SHORTCUT` to use other keys, like `YAPD_SHORTCUT=ctrl+option+cmd+d`, or `none` to turn it off. It needs ctrl, option or cmd, unless it's a function key. If another app or macOS already uses it, yapd says so in its log. Dictating needs the microphone, so there's no shortcut with `YAPD_LISTEN=false`.
+Replies reach Claude Code wherever it runs, Codex in a terminal and T3 Code threads. It cancels its own echo, so speakers are fine. yapd only speaks English, but `YAPD_LANGUAGE=french` lets you answer in French.
 
 ## Starting new work
 
-You talk to yapd, not to the agent. Say what you want the way you'd say it to a colleague, false starts and all, and yapd works out which project it's for, writes the prompt and starts the session. Then it tells you what it did, like "Started in yapd, on Fable, in a worktree." It doesn't ask you to confirm first.
+Press ctrl+option+cmd+space, ramble like you would to a colleague, and press it again. yapd works out the project, writes a proper prompt, starts the session and tells you where it went. It never guesses the project. If it can't tell, it asks. "Find out whether…" starts an agent that looks into it and reports back.
 
-The prompt keeps what you meant and everything you asked for, tidied up, with what you left out because it was obvious filled in: "follow up on what the std agent just finished" becomes a prompt that says what that was. It adds nothing you didn't ask for. Whisper is told the names of your projects, models and machines before it listens, and what it still mangles, like "yap D", is matched against what exists. Short words are what it gets wrong most, so "no worktree" can come out as "on a work tree": yapd reads for what you'd have said, always tells you whether it made a worktree, and says so when it couldn't tell which you wanted and went by your rules.
-
-Where the work goes is settled by the first of these that says:
-
-1. What you said: "in yapd", "with Fable on low", "in a worktree", "on rig".
-2. Your [rules](#your-rules).
-3. What the project last used.
-
-The one thing yapd won't guess is the project. It goes by a project you named, earlier work you pointed at, like "the same in std", or a subject only one project has. That a request looks like your last one isn't enough. When it can't tell, it asks, and you answer by talking right after the question, as you would after an update. Say "never mind" to drop it. If you don't answer, it asks once more a minute later, then drops the request and says so. What you dictated is in the log either way, along with what yapd decided, why, and the prompt as it wrote it.
-
-Nothing waits on this. Updates keep being read while a prompt is written, and you can dictate the next request before the last one has started. The shortcut only ever starts a new request, so answer questions by talking.
-
-### Finding things out
-
-"Find out whether Apple shipped an API for third-party glucose sensors on the Watch" or "look into why rig's tunnel drops overnight" is new work too: an agent finds out and tells you. One about a project starts there, like any other. One about none of them, like something on the web, starts in T3 Code's scratch project, in a folder of its own, with the agent told to report back and change nothing on your machine. yapd then says "Looking into it, on Sol." rather than "Started in yapd…", so you hear which it was. Anything about code, a build, tests, a branch or a pull request is never taken for that: with no project named, yapd asks which, and when a request could go either way it asks too, like "For the glucose question, is that for yapd, or shall I just look into it?"
-
-Its first answer, as with any work yapd starts, is read to you as the answer to what you asked, headline first, then "more": however quick or slight, whatever you muted, and even after yapd restarted in between. In focus it's said at once; in quiet it waits for the morning's rundown; with yapd off it's kept for your catch-up.
-
-Work outside your projects needs a [T3 Code token](#where-follow-ups-go) and a T3 Code with a scratch project. Asked for on another machine, like "on rig", that machine's yapd has to be new enough to say it has one; otherwise yapd asks which project it's for.
-
-### Your rules
-
-Put what yapd should go by in `~/.yapd/preferences.md`, in your own words. A model reads it with each request, so there's no format to follow, but for [routines](#memories-and-routines), and changes apply to the next thing you dictate:
-
-```md
-Fable on high for design work and hard bugs. Opus 5.5 on high for everyday features and fixes.
-
-A worktree for features and fixes. None for questions and anything that only reads.
-
-When I say "the rig" I mean rig.
-
-## Routines
-
-- land it: Merge the PR once checks pass, then update the dev worktree and reinstall yapd.
-```
-
-Routines go under a `## Routines` heading, one a line, as `- name: steps`, up to the next heading. Saying "land it" with the shortcut then sends those steps, as you wrote them, to the thread you're on, only when you say all of its name. Unlike the rest, they're read from the whole file, can't be forgotten by voice, and are never shown to the model that writes prompts for new work. A name yapd already answers to, like "ship it", which is a yes to whatever was just asked, can't be one here either: yapd goes without it, and its log says so.
-
-`YAPD_PREFERENCES` in your settings points to a file somewhere else. Keep it short, since every prompt waits on it being read: past 6,000 characters, the rest is left out.
-
-### Where sessions start
-
-With a [T3 Code token](#where-follow-ups-go) in your settings, new work starts as a T3 Code thread, in the projects T3 Code knows and with its defaults.
-
-Without one, yapd starts Claude Code or Codex from the command line, headless. It finds your projects in the folders you list, and in any repository an agent has run in since the hooks were set up:
-
-```sh
-YAPD_PROJECTS=~/projects,~/work
-YAPD_WORKTREE=true
-```
-
-`YAPD_WORKTREE` is whether work gets a worktree when nothing else says. Worktrees go in `~/.yapd/worktrees`, and what each session printed in `~/.yapd/sessions`.
-
-Approvals stay on for the sessions yapd starts. Nobody is there to answer them, so whatever would have asked is refused, and yapd tells you what the session tried to do and how to pick it up in a terminal. Those sessions are always read out, however short their turn, since you weren't watching. To let them do more, say so:
-
-```sh
-YAPD_CLAUDE_PERMISSIONS=acceptEdits
-YAPD_CODEX_SANDBOX=workspace-write
-```
-
-The first is Claude Code's `--permission-mode` and the second Codex's sandbox. Left unset, each runs as you've set it up yourself. For Codex that means it can read but not change anything, unless your own Codex config says otherwise, and yapd tells you so when it starts one that way.
-
-You reply to a headless session like to any other. It has no terminal to type into, so yapd picks the session up again for one more turn.
-
-### On other machines
-
-Work starts on the machine the project is on. yapd asks every machine in `YAPD_REMOTES` what it can start as you press the shortcut, so that it knows by the time you've finished talking, and starts the session there over SSH, as with follow-ups.
-
-Tell yapd what you call this Mac, since its hostname is rarely that:
-
-```sh
-YAPD_NAME=rosie
-```
-
-Then "on rosie" means here. Without it, this Mac answers to its hostname.
-
-### The writer's model
-
-Prompts are written by the model that writes summaries. To use another one, set any of `YAPD_WRITER_PROVIDER`, `YAPD_WRITER_MODEL`, `YAPD_WRITER_EFFORT` and `YAPD_WRITER_TIER`, which work like the [provider settings](#providers). With Codex and the same settings as for summaries, the two share the threads yapd keeps ready.
+Put your habits in `~/.yapd/preferences.md` in plain words, like "Fable on high for hard bugs, a worktree for features", and it goes by them.
 
 ## Agents on another machine
 
-yapd speaks on one Mac, but the agents can run anywhere, like on a Linux server you SSH into. Set yapd up there too. Only the hooks go in, since that machine never speaks:
-
-```sh
-bun add -g @launatic/yapd
-yapd setup
-```
-
-The hooks send to `127.0.0.1:4747`, so forward that port to the Mac, however you like. From the Mac, a reverse tunnel does it:
-
-```sh
-ssh -N -R 127.0.0.1:4747:127.0.0.1:4747 me@server
-```
-
-Updates then come through, named after each session's repository. For follow-ups, the Mac reaches back over SSH and runs `yapd relay` on the server, which sends them there. List the server in the Mac's settings, by the hostname it reports and how to SSH into it, then run `yapd install` again:
-
-```sh
-YAPD_REMOTES=server=me@server.example.com
-```
-
-A bare `YAPD_REMOTES=server` uses `ssh server`, so an alias from `~/.ssh/config` works. Separate several with commas. yapd SSHes in with `BatchMode`, so it needs a key that works without a password prompt, and `yapd` has to be on the `PATH` that non-interactive SSH commands get: `ssh server yapd` should print yapd's usage, not "command not found". Adding `~/.bun/bin` to `PATH` in `~/.zshenv`, or at the top of `~/.bashrc`, is usually enough. `yapd doctor` on the Mac tries each server this way.
-
-Claude Code sessions in a terminal on the server get replies through their waiting hook, as they do on the Mac. T3 Code threads and Codex sessions there get them through `yapd relay`, so a T3 Code token for the server's own T3 Code goes in `~/.yapd/.env` on the server. [New work](#on-other-machines) starts there the same way, with the server's own settings.
-
-While it runs, yapd also keeps one SSH connection to each server open, asks `yapd t3` there where its T3 Code listens and for that token, which it keeps in memory only, and forwards a port on the Mac's `127.0.0.1` to it. The server's threads then show up beside the Mac's, by machine, and take messages and stops by voice the same way, and follow-ups and new work go through that connection rather than a fresh login. A server that can't be reached is tried again in the background, and said to be out of reach once you ask for something there. The server's yapd needs to be one with `yapd t3`.
+yapd talks on your Mac, but the agents can run anywhere, Linux included. Install it on the server too and forward port 4747 back to the Mac. Updates come in, your replies go back out, and its T3 Code threads show up beside yours. [Here's how](docs/guide.md#agents-on-another-machine).
 
 ## Providers
 
-The summaries are written by a coding agent CLI you're already signed in to. The default is Codex with GPT-6 Luna on high, on its fast tier, which for Luna costs no extra usage. yapd keeps Codex running between calls, with a thread ready for the next one and without your MCP servers, apps or plugins, which saves a few seconds each time. To use a different one, put this in `~/.yapd/.env` and run `yapd install` again:
-
-```sh
-YAPD_PROVIDER=claude
-YAPD_MODEL=sonnet
-YAPD_EFFORT=low
-```
-
-Leave out the model or the effort to get that CLI's default. Both are passed through as is, so use the names that CLI expects. Codex only defaults to Luna on high and the fast tier when no model is set. For Codex, `YAPD_TIER=priority` picks the fast tier for another model, like `YAPD_MODEL=gpt-6-sol` with `YAPD_EFFORT=low`.
-
-| `YAPD_PROVIDER` | CLI | Effort |
-| --- | --- | --- |
-| `codex` | [Codex](https://github.com/openai/codex) | `model_reasoning_effort` |
-| `claude` | [Claude Code](https://code.claude.com) | `--effort` |
-| `grok` | [Grok Build](https://docs.x.ai/build/cli/reference) | `--effort` |
-| `antigravity` | [Antigravity](https://antigravity.google/docs/cli/headless/) | `--effort` |
-| `opencode` | [OpenCode](https://opencode.ai), models as `provider/model` | `--variant` |
-| `cursor` | [Cursor](https://cursor.com/cli) | in the model name |
-| `gemini` | [Gemini CLI](https://github.com/google-gemini/gemini-cli) | a model alias from its settings |
-
-What you say to yapd, by the shortcut or back to something it said, is worked out by the same model. To have a faster one decide what you meant, set any of `YAPD_BRAIN_MODEL`, `YAPD_BRAIN_EFFORT` and `YAPD_BRAIN_TIER`, which go to the same CLI. A model of its own keeps the effort and tier you set for summaries unless you give it its own, so with `YAPD_MODEL=gpt-6-sol`, `YAPD_EFFORT=low` and `YAPD_TIER=priority`, `YAPD_BRAIN_MODEL=gpt-6.1-sol` alone runs on low and the fast tier. It then gets a Codex of its own, with its own threads kept ready. Summaries, digests and catch-ups stay with the summaries' model.
+yapd doesn't bring its own model. It borrows a coding agent CLI you're already signed in to: Codex by default, or Claude Code, Grok Build, Antigravity, OpenCode, Cursor or Gemini CLI. Pick one with `YAPD_PROVIDER`, and a faster model for working out what you say with `YAPD_BRAIN_MODEL`. [The details](docs/guide.md#providers).
 
 ## Style
 
-yapd talks plainly unless you tell it otherwise. Describe how it should talk in `~/.yapd/.env` and run `yapd install` again:
+yapd talks plainly until you give it a personality:
 
 ```sh
 YAPD_STYLE="Talk like Jarvis from Iron Man: calm, precise, with a dry British wit. Call me sir."
 ```
 
-The style applies to the summaries, to its answers when you interrupt, and to what it says about new work. It doesn't change what it passes on to the agent or the prompts it writes, and summaries stay a sentence or two.
-
-To choose what it says once you've asked for something, when it passes a reply on, sends a message by voice or starts new work, rather than the line written in your style, list your own, separated by `|`. It says a different one from the last you heard, and from one about to be said, and renders them all ahead:
-
-```sh
-YAPD_ON_IT="Right away, sir.|Very good, sir.|Consider it done, sir.|Very well, sir."
-```
-
-A line that asks something is left out, since you'd answer it.
-
 ## Quick turns
 
-yapd skips turns that finish in under 20 seconds, since you were probably watching. Set `YAPD_MIN_SECONDS` in `~/.yapd/.env` to change the cutoff, or to `0` to hear every turn.
+yapd skips turns shorter than 20 seconds, since you were watching anyway. `YAPD_MIN_SECONDS=0` makes it say every one.
