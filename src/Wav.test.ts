@@ -21,7 +21,8 @@ const samples = (path: string) => {
   throw new Error(`${path} has no samples`)
 }
 
-describe("Wav", () => {
+// afplay, and say and afinfo that check what it plays, are macOS's own.
+describe.skipIf(Bun.which("afinfo") === null)("Wav", () => {
   test("a slice plays from where it's asked, and the length read from each kind of file afplay may play is its true length", async () => {
     const dir = mkdtempSync(Path.join(tmpdir(), "yapd-wav-"))
     try {
