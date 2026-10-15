@@ -1424,6 +1424,75 @@ export const make = (
   const reads = (head: Option.Option<Threads.Ref>) =>
     Option.isNone(head) || options.mutes === undefined ? Effect.succeed(false) : options.mutes.reads(Mutes.key.thread(head.value))
 
+  /** What a finished turn is tied to, by what its hook's lookup came to. */
+  const tiedBy = (finished: Finished, linked: Option.Option<Threads.Linked>) => {
+    const { finding } = finished
+    const threadOf = Option.flatMap(linked, (linked) => (linked._tag === "Thread" ? Option.some(linked.ref) : Option.none()))
+    /** The thread it's from, here or, only for what's kept, shown and muted, on another machine. */
+    const about = finding === undefined ? Option.fromNullable(finished.known) : finding.here ? threadOf : Option.none<Threads.Ref>()
+    const owner = finding !== undefined && !finding.here ? threadOf : Option.none<Threads.Ref>()
+    /** The subagent of T3 Code's own it's from, here or on another machine, for what's kept, shown and muted of it only. */
+    const part = Option.flatMap(linked, (linked) => (linked._tag === "Subagent" ? Option.some(linked) : Option.none()))
+    const ties = {
+      ...Option.match(about, { onNone: () => ({}), onSome: (about) => ({ about }) }),
+      ...(Option.isSome(about) ? {} : Option.match(owner, { onNone: () => ({}), onSome: (owner) => ({ owner }) })),
+      ...Option.match(part, {
+        onNone: () => ({}),
+        onSome: ({ child, called, head }) => ({
+          subagent: { child, called, ...Option.match(head, { onNone: () => ({}), onSome: (head) => ({ head }) }) },
+        }),
+      }),
+    }
+    // A subagent's, led by the thread it's part of rather than the project, which says whose it is.
+    return { tied: Option.orElse(about, () => owner), part, head: Option.flatMap(part, ({ head }) => head), ties }
+  }
+
+  /**
+   * Whether what he asked to hear of a thread's finishing by `before` would
+   * lead its turn's update, by what's set, without reading how the turn ended.
+   */
+  const reminds = (tied: Option.Option<Threads.Ref>, before: number) =>
+    Option.isNone(tied) || options.finishing === undefined
+      ? Effect.succeed(false)
+      : Effect.map(options.finishing(tied.value, before, Effect.succeed<Reminders.Ending>({ _tag: "Unknown" })), (leading) => leading.length > 0)
+
+  /**
+   * What's got ready for an update while its summary is written. Once its
+   * priority is, the speaker wakes for it, held through `hold`, unless as far
+   * as can be told by then, with its thread found in time, it won't be said:
+   * trivial, yapd off, or, unless it needs him, muted or held whatever it
+   * turns out to answer. Once its headline is too, a brief one's is rendered
+   * ahead, on a guess that it's all that's said, so saying it is a copy if it
+   * is, and never otherwise: not when what he asked to hear of its thread's
+   * finishing would lead it. Nothing for a Stop of a turn kept in its hook's
+   * place, nor a subagent's.
+   */
+  const early = (
+    finished: Finished,
+    project: string,
+    written: { readonly priority: Deferred.Deferred<Summary["priority"]>; readonly headline: Deferred.Deferred<string> },
+    linking: Fiber.Fiber<Option.Option<Option.Option<Threads.Linked>>>,
+    hold: (letGo: Effect.Effect<void>) => void,
+  ) =>
+    Effect.gen(function* () {
+      const { needsYou, session, thread, turns, arrivedAt } = finished
+      const priority = yield* Deferred.await(written.priority)
+      const first = yield* Fiber.join(linking)
+      if (priority === "trivial" || finished.over !== undefined || Option.isNone(first)) return
+      const { tied, part, ties } = tiedBy(finished, first.value)
+      if (Option.isSome(part)) return
+      const full = needsYou || priority === "needs-you" || (yield* options.detail ?? Effect.succeed<Modes.Detail>("brief")) === "full"
+      const rank = needsYou ? "needs-you" : full && priority === "progress" ? "done" : priority
+      if (rank !== "needs-you" && Option.isSome(yield* muting(Mutes.covering({ session, thread, ...ties }, called)))) return
+      if (rank !== "needs-you" && Option.isSome(yield* holds(rank, full))) return
+      // Last, just before the hold is taken: turning yapd off after lets go of it.
+      if (yield* offSince(turns)) return
+      yield* Effect.uninterruptible(Effect.map(soon, hold))
+      const headline = yield* Deferred.await(written.headline)
+      if (full || voice.guess === undefined || (yield* reminds(tied, arrivedAt))) return
+      yield* voice.guess(introduce(project, headline))
+    })
+
   const prepare = (finished: Finished) => {
     const { session, turn, thread, arrivedAt, generation, hook, needsYou, turns } = finished
     if (hook !== undefined) summing.set(session, hook)
@@ -1431,6 +1500,13 @@ export const make = (
     let unsaid: Effect.Effect<void> | undefined
     /** Its render, once it's queued, which is then the inbox's to let go of. */
     let handed = false
+    /** The speaker's hold taken as its summary was written, let go of once it's queued or comes to nothing, or condensing fails. */
+    let woken: Effect.Effect<void> | undefined
+    const rested = Effect.suspend(() => {
+      const letGo = woken
+      woken = undefined
+      return letGo ?? Effect.void
+    })
     return Effect.gen(function* () {
       // What was said or held of the same work lately, by its session or its thread, read here rather than once its thread is found,
       // which can take seconds: so "another review round" is told from news. Meanwhile, whether it's in T3 Code's scratch folder,
@@ -1447,26 +1523,35 @@ export const make = (
       const { finding } = finished
       const promising = yield* Deferred.make<void>()
       const looking = finding === undefined ? undefined : yield* Effect.fork(finding.find(promising))
+      // What that came to in the time it's given, which what the summary says as it's written waits on too.
+      const linking = yield* Effect.fork(looking === undefined ? Effect.succeedSome(Option.none<Threads.Linked>()) : Effect.timeoutOption(found(looking), lookup))
+      const written = { priority: yield* Deferred.make<Summary["priority"]>(), headline: yield* Deferred.make<string>() }
+      const ahead = yield* Effect.forkScoped(
+        early(finished, project, written, linking, (letGo) => {
+          woken = letGo
+        }),
+      )
       const [[summary, summarized], first] = yield* Effect.all(
         [
-          condenser.condense(project, Option.match(previous, { onNone: () => turn, onSome: (previous) => ({ ...turn, previous }) })).pipe(
-            Effect.retry({ times: 1 }),
-            Effect.map((summary) => [summary, true] as const),
-            Effect.catchAll((error) => Effect.logWarning("Could not condense", error).pipe(Effect.as([unsummarized(project), false] as const))),
-          ),
-          looking === undefined ? Effect.succeedSome(Option.none<Threads.Linked>()) : Effect.timeoutOption(found(looking), lookup),
+          condenser
+            .condense(project, Option.match(previous, { onNone: () => turn, onSome: (previous) => ({ ...turn, previous }) }), {
+              priority: (priority) => Effect.asVoid(Deferred.succeed(written.priority, priority)),
+              headline: (_, headline) => Effect.asVoid(Deferred.succeed(written.headline, headline)),
+            })
+            .pipe(
+              // Failed, it lets the speaker rest at once, and gets nothing more ready as it's written, tried again or not.
+              Effect.tapError(() => Effect.zipRight(Fiber.interrupt(ahead), rested)),
+              Effect.retry({ times: 1 }),
+              Effect.map((summary) => [summary, true] as const),
+              Effect.catchAll((error) => Effect.logWarning("Could not condense", error).pipe(Effect.as([unsummarized(project), false] as const))),
+            ),
+          Fiber.join(linking),
         ],
         { concurrency: 2 },
       )
       const summedAt = yield* Clock.currentTimeMillis
       const linked = finding === undefined || looking === undefined ? Option.none<Threads.Linked>() : yield* settled(finding, looking, first, promising, arrivedAt)
-      const threadOf = Option.flatMap(linked, (linked) => (linked._tag === "Thread" ? Option.some(linked.ref) : Option.none()))
-      /** The thread it's from, here or, only for what's kept, shown and muted, on another machine. */
-      const about = finding === undefined ? Option.fromNullable(finished.known) : finding.here ? threadOf : Option.none<Threads.Ref>()
-      const owner = finding !== undefined && !finding.here ? threadOf : Option.none<Threads.Ref>()
-      const tied = Option.orElse(about, () => owner)
-      /** The subagent of T3 Code's own it's from, here or on another machine, for what's kept, shown and muted of it only. */
-      const part = Option.flatMap(linked, (linked) => (linked._tag === "Subagent" ? Option.some(linked) : Option.none()))
+      const { tied, part, head, ties } = tiedBy(finished, linked)
       // What it answers of what yapd sent its thread for him, if anything: the first turn of work yapd started is what he asked for. And
       // whether that was told by id, which it can't be with no thread found in time.
       const { answers, told } = Option.isSome(tied) ? yield* asked(tied.value, finished) : { answers: Option.none<"start" | "sent">(), told: false }
@@ -1499,8 +1584,6 @@ export const make = (
       // summed up may be either, as far as yapd can tell, so it's said.
       const mutable = priority !== "needs-you" && !answering && summarized && !reminded
       const summed = full ? [summary.spoken, summary.more ?? ""].map((part) => part.trim()).filter((part) => part !== "").join(" ") : summary.spoken
-      // A subagent's, led by the thread it's part of rather than the project, which says whose it is.
-      const head = Option.flatMap(part, ({ head }) => head)
       const spoken = Option.match(head, { onNone: () => introduce(project, summed), onSome: ({ called }) => `For ${called}: ${summed}` })
       // All it would tell, its rest too, as what was kept of its turn is weighed against it word for word.
       const all = Missed.whole(spoken, more)
@@ -1561,16 +1644,6 @@ export const make = (
         said: spoken,
         text: turn.message,
         detail,
-      }
-      const ties = {
-        ...Option.match(about, { onNone: () => ({}), onSome: (about) => ({ about }) }),
-        ...(Option.isSome(about) ? {} : Option.match(owner, { onNone: () => ({}), onSome: (owner) => ({ owner }) })),
-        ...Option.match(part, {
-          onNone: () => ({}),
-          onSome: ({ child, called, head }) => ({
-            subagent: { child, called, ...Option.match(head, { onNone: () => ({}), onSome: (head) => ({ head }) }) },
-          }),
-        }),
       }
       // Its own keys, which a session's mute moves to, and those that keep it quiet, a subagent's by the thread it's part of too.
       const own = Mutes.keysOf({ session, thread, ...ties }, called)
@@ -1708,6 +1781,8 @@ export const make = (
       yield* Effect.logInfo(`Ready: ${spoken}`)
     }).pipe(
       Effect.scoped,
+      // Kept quiet, trivial or queued, the hold taken as it was written is let go of, as the one taken to render it is.
+      Effect.ensuring(rested),
       workers.withPermits(1),
       // Its hook is let go of at once should yapd be turned off meanwhile, while it's still summed up and kept.
       Effect.ensuring(

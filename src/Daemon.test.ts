@@ -96,6 +96,14 @@ const make = (says?: string, options: {
   readonly urgentMessages?: ReadonlyArray<string>
   /** Messages that can't be summed up, as when the model is down. */
   readonly unsummarizable?: ReadonlyArray<string>
+  /**
+   * What the summary of each message says as the model writes it, its
+   * priority and headline, before it takes so many seconds to write the rest:
+   * the summary it gives once it has is as ever.
+   */
+  readonly writing?: Readonly<Record<string, { readonly priority: "needs-you" | "done" | "progress" | "trivial"; readonly headline: string; readonly seconds: number }>>
+  /** Where the lines rendered ahead on a guess go, in order. */
+  readonly guessed?: Array<string>
   /** What yapd sent each thread for him, as the ledger has it. */
   readonly sent?: (to: Threads.Ref, since: number) => Effect.Effect<ReadonlyArray<{ readonly at: number; readonly digest: string | null }>>
   /** The message each thread's latest run began with, as T3 Code has it. */
@@ -196,21 +204,28 @@ const make = (says?: string, options: {
         }),
     options.journal === undefined ? Journal.memory : Layer.succeed(Journal.Journal, options.journal),
     Layer.succeed(Condenser, {
-      condense: (project, turn) => options.unsummarizable?.includes(turn.message) ? Effect.fail(new CondenseError({ cause: "the model is down" })) : Effect.sync(() => {
-        condensed.push(turn)
-        projects.push(project)
-        return {
-          priority: options.trivialMessages?.includes(turn.message)
-            ? "trivial" as const
-            : options.urgentMessages?.includes(turn.message)
-              ? "needs-you" as const
-              : options.progressMessages?.includes(turn.message)
-                ? "progress" as const
-                : "done" as const,
-          spoken: turn.message,
-          ...(options.mores?.[turn.message] === undefined ? {} : { more: options.mores[turn.message] }),
-        }
-      }),
+      condense: (project, turn, early) => {
+        const writing = options.writing?.[turn.message]
+        // Its priority and headline as they're written, then the rest a while after.
+        const written = writing === undefined || early === undefined
+          ? Effect.void
+          : Effect.all([early.priority(writing.priority), early.headline(writing.priority, writing.headline), Effect.sleep(`${writing.seconds} seconds`)], { discard: true })
+        return Effect.zipRight(written, options.unsummarizable?.includes(turn.message) ? Effect.fail(new CondenseError({ cause: "the model is down" })) : Effect.sync(() => {
+          condensed.push(turn)
+          projects.push(project)
+          return {
+            priority: options.trivialMessages?.includes(turn.message)
+              ? "trivial" as const
+              : options.urgentMessages?.includes(turn.message)
+                ? "needs-you" as const
+                : options.progressMessages?.includes(turn.message)
+                  ? "progress" as const
+                  : "done" as const,
+            spoken: turn.message,
+            ...(options.mores?.[turn.message] === undefined ? {} : { more: options.mores[turn.message] }),
+          }
+        }))
+      },
       ask: (request) => Effect.succeed({ spoken: `wants to ${request.what}`, risk: "low" as const }),
       question: () => Effect.succeed({ spoken: "Which one should it use?" }),
     }),
@@ -228,6 +243,7 @@ const make = (says?: string, options: {
                 parting.renderFirst!(text, path),
               ),
           }),
+      ...(options.guessed === undefined ? {} : { guess: (text: string) => Effect.sync(() => options.guessed!.push(text) > 0) }),
     }),
     Layer.succeed(Audio, {
       play: (path, from = 0) =>
@@ -7884,5 +7900,59 @@ describe("Daemon with lines in parts", () => {
     )
     // Stopped two seconds into the ten its first word, "yapd.", takes: that word, cut short, and all the rest still to come.
     expect(talkedOver).toEqual([["yapd.…", "The tests pass. The PR is ready."]])
+  })
+})
+
+describe("Daemon with summaries read as they're written", () => {
+  test("a headline rendered while the summary is written is said only once the whole summary is in, never when it's muted, held or trivial, and only in the words of the whole", async () => {
+    const message = "The tests pass."
+    /** An update whose summary has its priority and headline written at once and the rest two seconds after, as `how` has it. */
+    const told = (how: "brief" | "reworded" | "asks" | "muted" | "held" | "trivial" | "turns trivial" | "fails") =>
+      run(
+        Effect.gen(function* () {
+          const guessed: Array<string> = []
+          const mutes = yield* muting
+          const { finish, wait, warms, rests, played } = yield* make(undefined, {
+            guessed,
+            mutes,
+            writing: {
+              [message]: {
+                priority: how === "trivial" ? "trivial" : how === "asks" ? "needs-you" : "done",
+                headline: how === "reworded" ? "The tests all pass." : message,
+                seconds: 2,
+              },
+            },
+            ...(how === "asks" ? { urgentMessages: [message] } : {}),
+            ...(how === "trivial" || how === "turns trivial" ? { trivialMessages: [message] } : {}),
+            ...(how === "fails" ? { unsummarizable: [message] } : {}),
+            ...(how === "held" ? { holding: Effect.succeedSome("focus" as const) } : {}),
+          })
+          if (how === "muted") yield* mutes.mute({ key: sessionKey("s") })
+          yield* finish("s", message)
+          const writing = { guessed: [...guessed], woke: warms() > 0, played: [...played] }
+          const resting = rests()
+          // The whole summary is in, or condensing failed and is tried again.
+          yield* wait(2)
+          const rested = rests() > resting
+          yield* wait(2)
+          return { writing, rested, played: [...played] }
+        }),
+      )
+    const said = ["yapd. The tests pass."]
+    expect(await told("brief")).toEqual({ writing: { guessed: said, woke: true, played: [] }, rested: false, played: said })
+    // Rendered ahead in other words, it's said in those of the whole all the same.
+    expect(await told("reworded")).toEqual({ writing: { guessed: ["yapd. The tests all pass."], woke: true, played: [] }, rested: false, played: said })
+    // Said in full, its headline is never all that's said, but the speaker wakes for it all the same.
+    expect(await told("asks")).toEqual({ writing: { guessed: [], woke: true, played: [] }, rested: false, played: said })
+    for (const how of ["muted", "held", "trivial"] as const) {
+      expect([how, await told(how)]).toEqual([how, { writing: { guessed: [], woke: false, played: [] }, rested: false, played: [] }])
+    }
+    // Woken for what turned out trivial, or couldn't be summed up, the speaker rests at once.
+    expect(await told("turns trivial")).toEqual({ writing: { guessed: said, woke: true, played: [] }, rested: true, played: [] })
+    expect(await told("fails")).toEqual({
+      writing: { guessed: said, woke: true, played: [] },
+      rested: true,
+      played: ["yapd finished a turn, but I couldn't summarize it."],
+    })
   })
 })
