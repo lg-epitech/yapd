@@ -1,8 +1,10 @@
-import type { Duration, Effect } from "effect"
+import { type Duration, Effect } from "effect"
+import { rm } from "node:fs/promises"
 import type { Ticket } from "./ClaudeCode.ts"
 import type { Priority } from "./Condenser.ts"
 import type { Answer, Question, Update } from "./Conversation.ts"
 import type { Timing } from "./Latency.ts"
+import type { Started } from "./Voice.ts"
 
 /** An update that is condensed, rendered, and waiting for its turn to be spoken. */
 export interface Ready {
@@ -123,7 +125,15 @@ export interface Said {
   readonly priority: Exclude<Priority, "trivial">
   readonly arrivedAt: number
   readonly notice: Notice
+  /** Its whole, which is what it is, however it starts playing. */
   readonly audio: string
+  /**
+   * How it was rendered, when that was started on its own, which whoever's
+   * done with it gives up, removing its files: with its first part, `first`,
+   * when that was out before the whole, which it then starts playing from.
+   */
+  readonly render?: Started
+  readonly first?: string
   /** As the notice's, or from when it was told, with its render too, logged as it starts to play. */
   readonly timing?: Timing
 }
@@ -137,6 +147,14 @@ export const empty: Inbox = new Map()
 
 /** The file that's played for it. */
 export const audio = (entry: Entry) => ("update" in entry ? entry.update.audio : entry.audio)
+
+/**
+ * Lets go of what's played for it once it's done with: its render, given up
+ * if it's still under way, with its files, when it was started on its own,
+ * else its file. Never for one put back to be said again.
+ */
+export const release = (entry: Entry) =>
+  ("update" in entry ? entry.update.render : entry.render)?.abandon ?? Effect.promise(() => rm(audio(entry), { force: true }))
 
 /** Adds an update, replacing any older one from the same session. */
 export const add = (inbox: Inbox, ready: Entry): Inbox => new Map(inbox).set(ready.session, ready)

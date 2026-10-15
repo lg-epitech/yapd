@@ -178,13 +178,45 @@ const load = (repo: string, without: string) =>
     ))
   })
 
-/** `patience` includes waiting for the model to load. `expected` is the vocabulary to listen for, if any, unless what's heard is given its own `terms`. */
+/** Runs Whisper, as `transcribe` does each time it's asked. */
+type Run = <A>(run: () => Promise<A>) => Effect.Effect<A, unknown>
+
+/**
+ * One of Whisper's runs at a time on a model, each holding its turn until
+ * ORT is done with it, even once whoever asked has stopped waiting, since
+ * stopping them doesn't stop ORT: what was transcribed as he paused, then
+ * let go of as he carried on, never runs alongside what comes after it.
+ */
+const oneAtATime = Effect.gen(function* () {
+  const scope = yield* Effect.scope
+  const turn = yield* Effect.makeSemaphore(1)
+  const run: Run = <A>(work: () => Promise<A>) =>
+    Effect.uninterruptibleMask((restore) =>
+      Effect.gen(function* () {
+        yield* restore(turn.take(1))
+        const running = new Promise<A>((resolve) => resolve(work()))
+        yield* Effect.promise(() => running.then(() => undefined, () => undefined)).pipe(
+          Effect.ensuring(turn.release(1)),
+          Effect.interruptible,
+          Effect.forkIn(scope),
+        )
+        return yield* restore(Effect.tryPromise(() => running))
+      }),
+    )
+  return run
+})
+
+/**
+ * `patience` includes waiting for the model to load. `expected` is the vocabulary to listen for, if any, unless what's heard is given
+ * its own `terms`. Each of Whisper's runs goes through `run`.
+ */
 export const transcribe =
   (
     model: Effect.Effect<AutomaticSpeechRecognitionPipeline, Hub.LoadError>,
     language: string,
     patience: Duration.DurationInput,
     expected?: () => ReadonlyArray<string>,
+    run: Run = (run) => Effect.tryPromise(run),
   ) =>
   (audio: Float32Array, terms?: ReadonlyArray<string>) =>
     Effect.suspend(() => {
@@ -202,12 +234,12 @@ export const transcribe =
             const told =
               listening === undefined
                 ? undefined
-                : yield* Effect.tryPromise(() => prompted(asr, audio, language, listening())).pipe(
+                : yield* run(() => prompted(asr, audio, language, listening())).pipe(
                     Effect.catchAll((error) => Effect.logWarning("Could not give Whisper its glossary", error).pipe(Effect.as(undefined))),
                   )
             if (told !== undefined) return told
             // Whisper doesn't detect the language here; left alone, it assumes English and translates.
-            const output = yield* Effect.tryPromise(() => asr(audio, { language, task: "transcribe" }))
+            const output = yield* run(() => asr(audio, { language, task: "transcribe" }))
             return (Array.isArray(output) ? output : [output]).map(({ text }) => text).join(" ")
           }),
         ),
@@ -241,6 +273,8 @@ export const WhisperTranscriber = Layer.scopedContext(
       ),
     )
     const dictation = dictationRepo === repo ? model : yield* load(dictationRepo, "Can't hear dictation")
+    const runs = yield* oneAtATime
+    const dictationRuns = dictationRepo === repo ? runs : yield* oneAtATime
     if (yield* Config.listen) {
       yield* Effect.forkScoped(model.pipe(Effect.ignore))
       // Left for the first dictation to try again when it fails.
@@ -251,14 +285,14 @@ export const WhisperTranscriber = Layer.scopedContext(
       )
     }
     let expected: ReadonlyArray<string> = []
-    const interruption = transcribe(model, language, "30 seconds")
+    const interruption = transcribe(model, language, "30 seconds", undefined, runs)
     return Context.make(Transcriber, {
       transcribe: (audio, terms) => interruption(audio, terms).pipe(Effect.mapError(({ cause }) => new TranscribeError({ cause }))),
       ready: Effect.sync(() => loaded),
     }).pipe(
       Context.add(DictationTranscriber, {
         // Long enough for the model to finish downloading, when they dictate as soon as yapd starts.
-        transcribe: transcribe(dictation, language, "2 minutes", () => expected),
+        transcribe: transcribe(dictation, language, "2 minutes", () => expected, dictationRuns),
         prepare: Effect.ignore(dictation),
       }),
       Context.add(Vocabulary, {

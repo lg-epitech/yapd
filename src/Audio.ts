@@ -26,6 +26,7 @@ import * as Config from "./Config.ts"
 import * as Helper from "./Helper.ts"
 import { run } from "./Process.ts"
 import * as Shortcut from "./Shortcut.ts"
+import * as Wav from "./Wav.ts"
 
 export class AudioError extends Data.TaggedError("AudioError")<{ readonly message: string; readonly cause?: unknown }> {}
 
@@ -101,38 +102,95 @@ export class Activity extends Context.Tag("yapd/Activity")<
   }
 >() {}
 
+/**
+ * How long "speaking" holds once what plays ends, in milliseconds, so what
+ * plays on from it right after, like the rest of a line from its first part,
+ * doesn't have the menu's icon flicker.
+ */
+const between = 250
+
 /** Turns whether something plays and whether the microphone is open into what they're doing, for whoever watches. */
 const reporter = Effect.gen(function* () {
   const ref = yield* SubscriptionRef.make<Doing>("idle")
-  const runSync = Runtime.runSync(yield* Effect.runtime<never>())
+  const runtime = yield* Effect.runtime<never>()
+  const runSync = Runtime.runSync(runtime)
+  const runFork = Runtime.runFork(runtime)
   let last: Doing = "idle"
+  /** What it's doing once speaking is over, told only once nothing has played for a moment. */
+  let after: { doing: Doing } | undefined
+  const set = (doing: Doing) => {
+    if (doing === last) return
+    last = doing
+    runSync(SubscriptionRef.set(ref, doing))
+  }
   return {
     activity: { changes: ref.changes } satisfies Activity["Type"],
     report: (speaking: boolean, listening: boolean) => {
-      const doing = speaking ? "speaking" : listening ? "listening" : "idle"
+      const doing: Doing = speaking ? "speaking" : listening ? "listening" : "idle"
+      if (after !== undefined) {
+        // Playing again in that moment, it never stopped speaking.
+        if (doing === "speaking") after = undefined
+        else after.doing = doing
+        return
+      }
       if (doing === last) return
-      last = doing
-      runSync(SubscriptionRef.set(ref, doing))
+      if (last !== "speaking") return set(doing)
+      const held = { doing }
+      after = held
+      runFork(
+        Effect.sleep(between).pipe(
+          Effect.zipRight(
+            Effect.sync(() => {
+              if (after !== held) return
+              after = undefined
+              set(held.doing)
+            }),
+          ),
+        ),
+      )
     },
   }
 })
 
-/** Plays with afplay, counting each one as it starts and ends. */
-const afplay = (playing: (count: 1 | -1) => void) => (path: string) =>
+/**
+ * Plays with afplay, counting each one as it starts and ends. afplay plays a
+ * file from its start, so from `from` it plays a copy of it from there,
+ * removed once it's played.
+ */
+const afplay = (playing: (count: 1 | -1) => void) => (path: string, from = 0) =>
   Effect.gen(function* () {
+    // Not one it can read, it's played all the same, of a length it can't tell.
+    const duration = yield* Wav.duration(path).pipe(Effect.orElseSucceed(() => 0))
+    const file = from > 0 ? join(tmpdir(), `yapd-from-${crypto.randomUUID()}.wav`) : path
+    const removed = Effect.promise(() => rm(file, { force: true }))
+    if (from > 0) {
+      yield* Effect.acquireRelease(
+        Wav.slice(path, from, file).pipe(Effect.mapError((cause) => new AudioError({ message: "Could not play it from where it's asked", cause }))),
+        () => removed,
+      )
+    }
     const start = yield* Clock.currentTimeMillis
     playing(1)
-    const fiber = yield* Effect.forkScoped(run(["afplay", path]).pipe(Effect.ensuring(Effect.sync(() => playing(-1)))))
+    const fiber = yield* Effect.forkScoped(
+      run(["afplay", file]).pipe(
+        Effect.ensuring(Effect.sync(() => playing(-1))),
+        Effect.ensuring(from > 0 ? removed : Effect.void),
+      ),
+    )
     return {
-      duration: 0,
+      duration,
       confirmed: false,
       finished: Fiber.join(fiber).pipe(
         Effect.asVoid,
         Effect.mapError((cause) => new AudioError({ message: "Could not play", cause })),
       ),
+      // How far into the file it got, as the helper counts it.
       stop: Fiber.interrupt(fiber).pipe(
         Effect.zipRight(Clock.currentTimeMillis),
-        Effect.map((now) => (now - start) / 1000),
+        Effect.map((now) => {
+          const at = from + (now - start) / 1000
+          return duration > 0 ? Math.min(duration, at) : at
+        }),
       ),
       volume: () => Effect.void,
     } satisfies Playback

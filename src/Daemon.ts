@@ -30,7 +30,7 @@ import type { Handle } from "./Server.ts"
 import * as T3Actions from "./T3Actions.ts"
 import * as T3Code from "./T3Code.ts"
 import * as Threads from "./Threads.ts"
-import { extension, Voice } from "./Voice.ts"
+import { extension, startRender, Voice } from "./Voice.ts"
 import type { Line } from "./Words.ts"
 
 const squash = (text: string) => text.replace(/\s+/g, " ").trim()
@@ -274,7 +274,6 @@ export const make = (
     Effect.promise(() => mkdtemp(join(tmpdir(), "yapd-"))),
     (dir) => Effect.promise(() => rm(dir, { recursive: true, force: true })),
   )
-  const removeFile = (path: string) => Effect.promise(() => rm(path, { force: true }))
 
   const inbox = yield* STM.commit(TRef.make(Inbox.empty))
   const preparing = yield* FiberMap.make<string>()
@@ -482,18 +481,22 @@ export const make = (
   /**
    * Queues something to say, unless yapd was turned off or on since `turns`,
    * or is off and it isn't what he asked for, and returns whether it did.
-   * What it's timed by notes it's ready now.
+   * What it's timed by notes it's ready now. What it takes the place of, of
+   * the same session, is let go of.
    */
   const enqueue = (entry: Inbox.Entry, turns: number) =>
-    Effect.flatMap(Clock.currentTimeMillis, (now) => {
+    Effect.gen(function* () {
+      const now = yield* Clock.currentTimeMillis
       const ready: Inbox.Entry = entry.timing === undefined ? entry : { ...entry, timing: { ...entry.timing, ready: now } }
-      return STM.commit(
+      const queued = yield* STM.commit(
         STM.flatMap(TRef.get(power), (current) =>
           current.turns === turns && (current.on || askedFor(ready))
-            ? STM.as(TRef.update(inbox, (queued) => Inbox.add(queued, ready)), true)
-            : STM.succeed(false),
+            ? TRef.modify(inbox, (queued) => [{ replaced: queued.get(ready.session) }, Inbox.add(queued, ready)] as const)
+            : STM.succeed(undefined),
         ),
       )
+      if (queued?.replaced !== undefined) yield* Inbox.release(queued.replaced)
+      return queued !== undefined
     })
 
   /**
@@ -516,10 +519,21 @@ export const make = (
       const audio = join(dir, `${crypto.randomUUID()}${extension}`)
       yield* Effect.acquireRelease(soon, (letGo) => letGo)
       const rendering = yield* Clock.currentTimeMillis
-      yield* voice.render(notice.spoken, audio).pipe(Effect.onError(() => removeFile(audio)))
+      // Said from its first sentences as soon as they're out, while the rest renders: given up, files and all, unless it's queued.
+      const render = yield* Effect.acquireRelease(startRender(voice, notice.spoken, audio, lifetime), (render) => (queued ? Effect.void : render.abandon))
+      const lead = yield* render.first
       // Timed from what it came of, when that's known, or else from now.
       const timing = Latency.stage(notice.timing ?? Latency.from(notice.kind, rendering, "when it was told"), "rendered", (yield* Clock.currentTimeMillis) - rendering)
-      const said = { session: notice.id, priority: notice.priority, arrivedAt: notice.at, notice, audio, timing }
+      const said: Inbox.Said = {
+        session: notice.id,
+        priority: notice.priority,
+        arrivedAt: notice.at,
+        notice,
+        audio,
+        render,
+        ...(lead === audio ? {} : { first: lead }),
+        timing,
+      }
       // Noted in the same breath as it's queued, so nothing can stop it in between.
       yield* enqueue(said, turns).pipe(
         Effect.tap((taken) =>
@@ -529,10 +543,7 @@ export const make = (
         ),
         Effect.uninterruptible,
       )
-      if (!queued) {
-        yield* removeFile(audio)
-        return yield* Effect.logInfo(`Not saying ${what}, since yapd is off`)
-      }
+      if (!queued) return yield* Effect.logInfo(`Not saying ${what}, since yapd is off`)
       yield* Effect.logInfo(`Ready: ${revealing ? "something that could give a secret away" : notice.spoken}`)
     }).pipe(
       Effect.scoped,
@@ -669,7 +680,7 @@ export const make = (
         }),
       )
       if (answered === undefined) return
-      yield* removeFile(Inbox.audio(answered))
+      yield* Inbox.release(answered)
       yield* release(answered.hook)
     })
 
@@ -1413,11 +1424,89 @@ export const make = (
   const reads = (head: Option.Option<Threads.Ref>) =>
     Option.isNone(head) || options.mutes === undefined ? Effect.succeed(false) : options.mutes.reads(Mutes.key.thread(head.value))
 
+  /** What a finished turn is tied to, by what its hook's lookup came to. */
+  const tiedBy = (finished: Finished, linked: Option.Option<Threads.Linked>) => {
+    const { finding } = finished
+    const threadOf = Option.flatMap(linked, (linked) => (linked._tag === "Thread" ? Option.some(linked.ref) : Option.none()))
+    /** The thread it's from, here or, only for what's kept, shown and muted, on another machine. */
+    const about = finding === undefined ? Option.fromNullable(finished.known) : finding.here ? threadOf : Option.none<Threads.Ref>()
+    const owner = finding !== undefined && !finding.here ? threadOf : Option.none<Threads.Ref>()
+    /** The subagent of T3 Code's own it's from, here or on another machine, for what's kept, shown and muted of it only. */
+    const part = Option.flatMap(linked, (linked) => (linked._tag === "Subagent" ? Option.some(linked) : Option.none()))
+    const ties = {
+      ...Option.match(about, { onNone: () => ({}), onSome: (about) => ({ about }) }),
+      ...(Option.isSome(about) ? {} : Option.match(owner, { onNone: () => ({}), onSome: (owner) => ({ owner }) })),
+      ...Option.match(part, {
+        onNone: () => ({}),
+        onSome: ({ child, called, head }) => ({
+          subagent: { child, called, ...Option.match(head, { onNone: () => ({}), onSome: (head) => ({ head }) }) },
+        }),
+      }),
+    }
+    // A subagent's, led by the thread it's part of rather than the project, which says whose it is.
+    return { tied: Option.orElse(about, () => owner), part, head: Option.flatMap(part, ({ head }) => head), ties }
+  }
+
+  /**
+   * Whether what he asked to hear of a thread's finishing by `before` would
+   * lead its turn's update, by what's set, without reading how the turn ended.
+   */
+  const reminds = (tied: Option.Option<Threads.Ref>, before: number) =>
+    Option.isNone(tied) || options.finishing === undefined
+      ? Effect.succeed(false)
+      : Effect.map(options.finishing(tied.value, before, Effect.succeed<Reminders.Ending>({ _tag: "Unknown" })), (leading) => leading.length > 0)
+
+  /**
+   * What's got ready for an update while its summary is written. Once its
+   * priority is, the speaker wakes for it, held through `hold`, unless as far
+   * as can be told by then, with its thread found in time, it won't be said:
+   * trivial, yapd off, or, unless it needs him, muted or held whatever it
+   * turns out to answer. Once its headline is too, a brief one's is rendered
+   * ahead, on a guess that it's all that's said, so saying it is a copy if it
+   * is, and never otherwise: not when what he asked to hear of its thread's
+   * finishing would lead it. Nothing for a Stop of a turn kept in its hook's
+   * place, nor a subagent's.
+   */
+  const early = (
+    finished: Finished,
+    project: string,
+    written: { readonly priority: Deferred.Deferred<Summary["priority"]>; readonly headline: Deferred.Deferred<string> },
+    linking: Fiber.Fiber<Option.Option<Option.Option<Threads.Linked>>>,
+    hold: (letGo: Effect.Effect<void>) => void,
+  ) =>
+    Effect.gen(function* () {
+      const { needsYou, session, thread, turns, arrivedAt } = finished
+      const priority = yield* Deferred.await(written.priority)
+      const first = yield* Fiber.join(linking)
+      if (priority === "trivial" || finished.over !== undefined || Option.isNone(first)) return
+      const { tied, part, ties } = tiedBy(finished, first.value)
+      if (Option.isSome(part)) return
+      const full = needsYou || priority === "needs-you" || (yield* options.detail ?? Effect.succeed<Modes.Detail>("brief")) === "full"
+      const rank = needsYou ? "needs-you" : full && priority === "progress" ? "done" : priority
+      if (rank !== "needs-you" && Option.isSome(yield* muting(Mutes.covering({ session, thread, ...ties }, called)))) return
+      if (rank !== "needs-you" && Option.isSome(yield* holds(rank, full))) return
+      // Last, just before the hold is taken: turning yapd off after lets go of it.
+      if (yield* offSince(turns)) return
+      yield* Effect.uninterruptible(Effect.map(soon, hold))
+      const headline = yield* Deferred.await(written.headline)
+      if (full || voice.guess === undefined || (yield* reminds(tied, arrivedAt))) return
+      yield* voice.guess(introduce(project, headline))
+    })
+
   const prepare = (finished: Finished) => {
     const { session, turn, thread, arrivedAt, generation, hook, needsYou, turns } = finished
     if (hook !== undefined) summing.set(session, hook)
     /** What he asked to hear of its finishing, once fired to lead it, until it's queued or kept: said on its own should it be neither. */
     let unsaid: Effect.Effect<void> | undefined
+    /** Its render, once it's queued, which is then the inbox's to let go of. */
+    let handed = false
+    /** The speaker's hold taken as its summary was written, let go of once it's queued or comes to nothing, or condensing fails. */
+    let woken: Effect.Effect<void> | undefined
+    const rested = Effect.suspend(() => {
+      const letGo = woken
+      woken = undefined
+      return letGo ?? Effect.void
+    })
     return Effect.gen(function* () {
       // What was said or held of the same work lately, by its session or its thread, read here rather than once its thread is found,
       // which can take seconds: so "another review round" is told from news. Meanwhile, whether it's in T3 Code's scratch folder,
@@ -1434,26 +1523,35 @@ export const make = (
       const { finding } = finished
       const promising = yield* Deferred.make<void>()
       const looking = finding === undefined ? undefined : yield* Effect.fork(finding.find(promising))
+      // What that came to in the time it's given, which what the summary says as it's written waits on too.
+      const linking = yield* Effect.fork(looking === undefined ? Effect.succeedSome(Option.none<Threads.Linked>()) : Effect.timeoutOption(found(looking), lookup))
+      const written = { priority: yield* Deferred.make<Summary["priority"]>(), headline: yield* Deferred.make<string>() }
+      const ahead = yield* Effect.forkScoped(
+        early(finished, project, written, linking, (letGo) => {
+          woken = letGo
+        }),
+      )
       const [[summary, summarized], first] = yield* Effect.all(
         [
-          condenser.condense(project, Option.match(previous, { onNone: () => turn, onSome: (previous) => ({ ...turn, previous }) })).pipe(
-            Effect.retry({ times: 1 }),
-            Effect.map((summary) => [summary, true] as const),
-            Effect.catchAll((error) => Effect.logWarning("Could not condense", error).pipe(Effect.as([unsummarized(project), false] as const))),
-          ),
-          looking === undefined ? Effect.succeedSome(Option.none<Threads.Linked>()) : Effect.timeoutOption(found(looking), lookup),
+          condenser
+            .condense(project, Option.match(previous, { onNone: () => turn, onSome: (previous) => ({ ...turn, previous }) }), {
+              priority: (priority) => Effect.asVoid(Deferred.succeed(written.priority, priority)),
+              headline: (_, headline) => Effect.asVoid(Deferred.succeed(written.headline, headline)),
+            })
+            .pipe(
+              // Failed, it lets the speaker rest at once, and gets nothing more ready as it's written, tried again or not.
+              Effect.tapError(() => Effect.zipRight(Fiber.interrupt(ahead), rested)),
+              Effect.retry({ times: 1 }),
+              Effect.map((summary) => [summary, true] as const),
+              Effect.catchAll((error) => Effect.logWarning("Could not condense", error).pipe(Effect.as([unsummarized(project), false] as const))),
+            ),
+          Fiber.join(linking),
         ],
         { concurrency: 2 },
       )
       const summedAt = yield* Clock.currentTimeMillis
       const linked = finding === undefined || looking === undefined ? Option.none<Threads.Linked>() : yield* settled(finding, looking, first, promising, arrivedAt)
-      const threadOf = Option.flatMap(linked, (linked) => (linked._tag === "Thread" ? Option.some(linked.ref) : Option.none()))
-      /** The thread it's from, here or, only for what's kept, shown and muted, on another machine. */
-      const about = finding === undefined ? Option.fromNullable(finished.known) : finding.here ? threadOf : Option.none<Threads.Ref>()
-      const owner = finding !== undefined && !finding.here ? threadOf : Option.none<Threads.Ref>()
-      const tied = Option.orElse(about, () => owner)
-      /** The subagent of T3 Code's own it's from, here or on another machine, for what's kept, shown and muted of it only. */
-      const part = Option.flatMap(linked, (linked) => (linked._tag === "Subagent" ? Option.some(linked) : Option.none()))
+      const { tied, part, head, ties } = tiedBy(finished, linked)
       // What it answers of what yapd sent its thread for him, if anything: the first turn of work yapd started is what he asked for. And
       // whether that was told by id, which it can't be with no thread found in time.
       const { answers, told } = Option.isSome(tied) ? yield* asked(tied.value, finished) : { answers: Option.none<"start" | "sent">(), told: false }
@@ -1486,8 +1584,6 @@ export const make = (
       // summed up may be either, as far as yapd can tell, so it's said.
       const mutable = priority !== "needs-you" && !answering && summarized && !reminded
       const summed = full ? [summary.spoken, summary.more ?? ""].map((part) => part.trim()).filter((part) => part !== "").join(" ") : summary.spoken
-      // A subagent's, led by the thread it's part of rather than the project, which says whose it is.
-      const head = Option.flatMap(part, ({ head }) => head)
       const spoken = Option.match(head, { onNone: () => introduce(project, summed), onSome: ({ called }) => `For ${called}: ${summed}` })
       // All it would tell, its rest too, as what was kept of its turn is weighed against it word for word.
       const all = Missed.whole(spoken, more)
@@ -1549,16 +1645,6 @@ export const make = (
         text: turn.message,
         detail,
       }
-      const ties = {
-        ...Option.match(about, { onNone: () => ({}), onSome: (about) => ({ about }) }),
-        ...(Option.isSome(about) ? {} : Option.match(owner, { onNone: () => ({}), onSome: (owner) => ({ owner }) })),
-        ...Option.match(part, {
-          onNone: () => ({}),
-          onSome: ({ child, called, head }) => ({
-            subagent: { child, called, ...Option.match(head, { onNone: () => ({}), onSome: (head) => ({ head }) }) },
-          }),
-        }),
-      }
       // Its own keys, which a session's mute moves to, and those that keep it quiet, a subagent's by the thread it's part of too.
       const own = Mutes.keysOf({ session, thread, ...ties }, called)
       const keys = Mutes.covering({ session, thread, ...ties }, called)
@@ -1599,8 +1685,10 @@ export const make = (
       // Rendering takes about as long as the speaker takes to get ready, which it stays for until it's queued or comes to nothing.
       yield* Effect.acquireRelease(soon, (letGo) => letGo)
       const rendering = yield* Clock.currentTimeMillis
-      yield* voice.render(said, audio).pipe(Effect.onError(() => removeFile(audio)))
-      // From its Stop: summed up, tied to its thread and what was said of the same work, then rendered.
+      // Said from its first sentences as soon as they're out, while the rest renders: given up, files and all, unless it's queued.
+      const render = yield* Effect.acquireRelease(startRender(voice, said, audio, lifetime), (render) => (handed ? Effect.void : render.abandon))
+      const lead = yield* render.first
+      // From its Stop: summed up, tied to its thread and what was said of the same work, then rendered, as far as it's first said.
       const steps: ReadonlyArray<readonly [string, number]> = [
         ["summed up", summedAt - arrivedAt],
         ["tied", rendering - summedAt],
@@ -1615,6 +1703,8 @@ export const make = (
         spoken: said,
         ...(more === "" ? {} : { more }),
         audio,
+        render,
+        ...(lead === audio ? {} : { first: lead }),
         thread,
         at: arrivedAt,
         ...ties,
@@ -1629,7 +1719,6 @@ export const make = (
       const { fallback } = finished
       // Given way since to a Stop of its own, or its thread started again or went, it isn't said.
       if (fallback !== undefined && (fallbacks.get(fallback.key) !== fallback || !(yield* fallback.current))) {
-        yield* removeFile(audio)
         return yield* Effect.logInfo("Skipped a turn no hook told of, since its hook came or its thread started again")
       }
       // Its entry is noted as it's kept, so giving way to a Stop of its own notes it as dealt with, however soon that comes.
@@ -1645,32 +1734,27 @@ export const make = (
               ),
             )
       if (claimed !== undefined && Option.isNone(claimed)) {
-        yield* removeFile(audio)
         return yield* Effect.logInfo(`Skipped update, said already: ${spoken}`)
       }
       // Its subagents no longer read to him while it was rendered, a subagent's is kept to yapd all the same.
       if (yield* unread) {
-        yield* removeFile(audio)
         return yield* hush(finished, entry, detail, own, { _tag: "Subagent", child: Option.getOrThrow(part).child, head }, claimed === undefined ? undefined : Option.flatten(claimed))
       }
       // Muted while it was rendered, it's kept quiet all the same, and held all the same once focus or quiet began meanwhile.
       const late = mutable ? yield* muting(keys) : Option.none<Mutes.Mute>()
       if (Option.isSome(late)) {
-        yield* removeFile(audio)
         return yield* hush(finished, entry, detail, own, { _tag: "Muted", mute: late.value }, claimed === undefined ? undefined : Option.flatten(claimed))
       }
       // Turned off meanwhile, it's held for when he catches up, whatever mode began too, which would otherwise have the digest say it, and
       // what he asked to hear of its finishing with it.
       const off = { _tag: "Held", why: "off" } as const
       if (yield* offSince(turns)) {
-        yield* removeFile(audio)
         yield* journal.hold(remindRows, "off")
         unsaid = undefined
         return yield* hush(finished, entry, detail, own, off, claimed === undefined ? undefined : Option.flatten(claimed))
       }
       const lateHeld: Option.Option<Held> = reminded ? Option.none() : yield* heldFor(priority, full, mutable, opening)
       if (Option.isSome(lateHeld)) {
-        yield* removeFile(audio)
         return yield* hush(finished, entry, detail, own, { _tag: "Held", why: lateHeld.value }, claimed === undefined ? undefined : Option.flatten(claimed))
       }
       if (fallback !== undefined) standing.set(update, fallback)
@@ -1679,14 +1763,15 @@ export const make = (
       const queued = yield* enqueue({ session, priority, arrivedAt, update, timing, ...(hook === undefined ? {} : { hook }) }, turns).pipe(
         Effect.tap((queued) =>
           Effect.sync(() => {
-            if (queued) unsaid = undefined
+            if (!queued) return
+            unsaid = undefined
+            handed = true
           }),
         ),
         Effect.uninterruptible,
       )
       if (!queued) {
         // Turned off just now, it's kept unheard all the same.
-        yield* removeFile(audio)
         yield* journal.hold(remindRows, "off")
         unsaid = undefined
         return yield* hush(finished, entry, detail, own, off, claimed === undefined ? undefined : Option.flatten(claimed))
@@ -1696,6 +1781,8 @@ export const make = (
       yield* Effect.logInfo(`Ready: ${spoken}`)
     }).pipe(
       Effect.scoped,
+      // Kept quiet, trivial or queued, the hold taken as it was written is let go of, as the one taken to render it is.
+      Effect.ensuring(rested),
       workers.withPermits(1),
       // Its hook is let go of at once should yapd be turned off meanwhile, while it's still summed up and kept.
       Effect.ensuring(
@@ -1738,7 +1825,7 @@ export const make = (
       const dropped = yield* STM.commit(
         TRef.modify(inbox, (current) => [current.get(session), Inbox.remove(current, session)] as const),
       )
-      if (dropped !== undefined) yield* removeFile(Inbox.audio(dropped))
+      if (dropped !== undefined) yield* Inbox.release(dropped)
       // What led it, he never heard, so it's said on its own.
       if (dropped !== undefined && "update" in dropped) yield* parted(dropped.update)
       // Its hook, if one waits, won't be getting a reply.
@@ -2196,21 +2283,35 @@ export const make = (
 
   /**
    * What's played for a notice: its own words, or those it says in their
-   * place when it asks for them just before it's played, rendered then and
-   * removed once it's said. Should rendering fail, its own words go after all.
-   * What tells it that it gets those in their place comes with them, to run
-   * once it's known it's still to be played.
+   * place when it asks for them just before it's played, rendered then, from
+   * their first sentences while the rest renders, and given up, files and
+   * all, once it's said. Should rendering fail, its own words go after all.
+   * Each with its first part, when that was out before its whole. What tells
+   * it that it gets those in their place comes with them, to run once it's
+   * known it's still to be played.
    */
   const words = (said: Inbox.Said) =>
     Effect.gen(function* () {
       const { instead } = said.notice
-      const own = { path: said.audio, spoken: said.notice.spoken, used: Effect.void }
+      const own = {
+        path: said.audio,
+        spoken: said.notice.spoken,
+        used: Effect.void,
+        ...(said.first === undefined || said.render === undefined ? {} : { first: { path: said.first, render: said.render } }),
+      }
       if (instead === undefined || !(yield* instead.when)) return own
       const path = join(dir, `${crypto.randomUUID()}${extension}`)
       // What could give a secret away, or came of a request held back as one, is logged nowhere, as for its own words.
       const what = said.notice.withheld === true || T3Actions.revealing(instead.spoken) ? "something that could give a secret away" : `"${instead.spoken}"`
-      return yield* Effect.acquireRelease(voice.render(instead.spoken, path).pipe(Effect.onError(() => removeFile(path))), () => removeFile(path)).pipe(
-        Effect.as({ path, spoken: instead.spoken, used: Effect.zipRight(Effect.logInfo(`Saying instead: ${what}`), instead.used ?? Effect.void) }),
+      return yield* Effect.acquireRelease(startRender(voice, instead.spoken, path, lifetime), (render) => render.abandon).pipe(
+        Effect.flatMap((render) =>
+          Effect.map(render.first, (lead) => ({
+            path,
+            spoken: instead.spoken,
+            used: Effect.zipRight(Effect.logInfo(`Saying instead: ${what}`), instead.used ?? Effect.void),
+            ...(lead === path ? {} : { first: { path: lead, render } }),
+          })),
+        ),
         Effect.catchAll((error) => Effect.as(Effect.logWarning(`Could not say ${what} instead`, error), own)),
       )
     })
@@ -2238,14 +2339,16 @@ export const make = (
             )
       const saying = Effect.zipRight(Effect.zipRight(begun, timed), said.notice.saying ?? Effect.void)
       const confirmed = said.notice.confirmed ?? Effect.void
-      const { path: played, spoken, used } = yield* words(said)
+      const { path: played, spoken, used, first } = yield* words(said)
+      /** Its first part, when it starts from that. */
+      const opening = first === undefined ? {} : { first }
       // Settled while its words were rendered, like a question closed by what he said meanwhile, it's dropped all the same.
       if (yield* said.notice.stale) return yield* dealtWith
       yield* used
       // Off, what he asked is answered, but the microphone stays closed: yapd is quiet again once it's said. A question it asks is
       // answered with the shortcut, as it's left open.
       if (!listening) {
-        const playback = yield* audio.play(played).pipe(Effect.onError(() => (question === undefined ? Effect.void : Effect.zipRight(dealtWith, question.unanswered))))
+        const playback = yield* conversation.playLine(played, spoken, first).pipe(Effect.onError(() => (question === undefined ? Effect.void : Effect.zipRight(dealtWith, question.unanswered))))
         yield* saying
         if (playback.confirmed) yield* confirmed
         yield* playback.finished.pipe(
@@ -2274,6 +2377,7 @@ export const make = (
         // followed up only from its end, which plays through what's said over it as a notice does.
         const followed = yield* conversation.answer({
           audio: played,
+          ...opening,
           spoken,
           saying,
           confirmed,
@@ -2294,12 +2398,13 @@ export const make = (
         // listens for a moment after it too, only as long as the pause between lines once something waits to be said next, which hears
         // it itself: heard as soon as it's said to the end, so a dictation then neither puts it back nor finds it missed.
         const heard = Effect.zipRight(Effect.zipRight(said.notice.heard ?? Effect.void, dealtWith), ended).pipe(Effect.uninterruptible)
-        return yield* conversation.tell({ audio: played, spoken, saying, confirmed, through: heard })
+        return yield* conversation.tell({ audio: played, ...opening, spoken, saying, confirmed, through: heard })
       }
       const answer = (heard: string, voiced: number, echo?: string, afterPause?: string, unsaid?: string, carried?: boolean, stopped?: number) =>
         question.answer(heard, voiced, echo, afterPause, unsaid, carried, stopped).pipe(Effect.map(Option.map((proceed) => Effect.zipRight(dealtWith, proceed))))
       const asked = {
         audio: played,
+        ...opening,
         spoken,
         saying,
         confirmed,
@@ -2450,7 +2555,7 @@ export const make = (
       const { heard } = yield* SubscriptionRef.get(state)
       const kept: Array<number> = []
       for (const entry of dropped) {
-        yield* removeFile(Inbox.audio(entry))
+        yield* Inbox.release(entry)
         if (!heardAlready(heard, entry.update)) yield* release(entry.hook)
         const fallback = standing.get(entry.update)
         if (fallback !== undefined) {
@@ -2481,7 +2586,7 @@ export const make = (
         }),
       )
       if (dropped !== undefined && "update" in dropped) {
-        yield* removeFile(Inbox.audio(dropped))
+        yield* Inbox.release(dropped)
         if (!heardAlready((yield* SubscriptionRef.get(state)).heard, update)) yield* release(dropped.hook)
         if (dropped.replay !== undefined) yield* replayed(dropped.replay)
       }
@@ -2568,7 +2673,7 @@ export const make = (
     // A turn said in its hook's place is the turn's as he hears it, unless it gave way to a Stop of its own, or its thread was on another run, by now.
     const fallback = "update" in ready ? standing.get(ready.update) : undefined
     if (fallback !== undefined && !(yield* begin(fallback))) {
-      yield* removeFile(Inbox.audio(ready))
+      yield* Inbox.release(ready)
       yield* STM.commit(TRef.set(floor.reading, false))
       if ("update" in ready) yield* parted(ready.update)
       return yield* Effect.logInfo("Not saying a turn no hook told of, since its hook came or its thread started again")
@@ -2702,7 +2807,7 @@ export const make = (
           kept
             ? Effect.void
             : Effect.zipRight(
-                removeFile(Inbox.audio(ready)),
+                Inbox.release(ready),
                 "update" in ready ? (ready.replay === undefined ? Effect.void : replayed(ready.replay)) : (ready.notice.gone ?? Effect.void),
               ),
         ),
@@ -2770,7 +2875,7 @@ export const make = (
       const { heard } = yield* SubscriptionRef.get(state)
       const kept: Array<number> = []
       for (const entry of dropped) {
-        yield* removeFile(Inbox.audio(entry))
+        yield* Inbox.release(entry)
         if (!("update" in entry)) {
           yield* entry.notice.gone ?? Effect.void
           continue
@@ -2827,13 +2932,17 @@ export const make = (
   const again = (found: HeardUpdate, asked: Inbox.Replay) =>
     Effect.gen(function* () {
       const audio = join(dir, `${crypto.randomUUID()}${extension}`)
-      const { more, ...was } = found.update
+      // Never with what it was said from before: its first part, or its render, which is let go of once that's said.
+      const { more, render: _render, first: _first, ...was } = found.update
       const spoken = Missed.whole(was.spoken, more)
       const ask = yield* Clock.currentTimeMillis
       yield* Effect.acquireRelease(soon, (letGo) => letGo)
-      yield* voice.render(spoken, audio).pipe(Effect.onError(() => removeFile(audio)))
+      /** Its render, once it's queued, which is then the inbox's to let go of. */
+      let handed = false
+      const render = yield* Effect.acquireRelease(startRender(voice, spoken, audio, lifetime), (render) => (handed ? Effect.void : render.abandon))
+      const first = yield* render.first
       const timing = Latency.stage(Latency.from("update again", ask, "the ask"), "rendered", (yield* Clock.currentTimeMillis) - ask)
-      const update: Conversation.Update = { ...was, spoken, audio }
+      const update: Conversation.Update = { ...was, spoken, audio, render, ...(first === audio ? {} : { first }) }
       // Replays keep both the hook generation and the original chain of voice replies.
       const generation = generations.get(found.update)
       if (generation !== undefined) generations.set(update, generation)
@@ -2843,9 +2952,15 @@ export const make = (
       if (row !== undefined) rows.set(update, row)
       const arrivedAt = yield* Clock.currentTimeMillis
       const session = `replay:${found.id}`
-      if (yield* enqueue({ session, priority: "needs-you", arrivedAt, update, replay: asked, timing }, asked.turns)) return "queued" as const
-      yield* removeFile(audio)
-      return "off" as const
+      const queued = yield* enqueue({ session, priority: "needs-you", arrivedAt, update, replay: asked, timing }, asked.turns).pipe(
+        Effect.tap((queued) =>
+          Effect.sync(() => {
+            handed = queued
+          }),
+        ),
+        Effect.uninterruptible,
+      )
+      return queued ? ("queued" as const) : ("off" as const)
     }).pipe(Effect.scoped)
 
   return {

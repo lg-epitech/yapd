@@ -70,9 +70,31 @@ describe("Endpointer", () => {
     expect(audio.at(-1)).toBe(29 + defaults.tail)
   })
 
+  test("the audio at a pause is the utterance's, sample for sample, when nothing voiced follows; a voiced frame after it resumes, and the utterance holds all of it", () => {
+    const samples = (event: Event | undefined) => (event?._tag === "Pause" || event?._tag === "Utterance" ? [...event.audio] : [])
+    const stopped = feed([...quiet(20), ...voiced(10), ...quiet(defaults.silence)])
+    expect(stopped.map(({ at, event }) => [at, event._tag])).toEqual([
+      [20, "Onset"],
+      [20 + defaults.confirm - 1, "Speech"],
+      [29 + defaults.pause, "Pause"],
+      [29 + defaults.silence, "Utterance"],
+    ])
+    const [, , pause, utterance] = stopped.map(({ event }) => event)
+    expect(samples(pause)).toEqual(samples(utterance))
+    expect(utterance).toMatchObject({ paused: true })
+    const resumed = feed([...quiet(20), ...voiced(10), ...quiet(defaults.pause), ...voiced(5), ...quiet(defaults.silence)])
+    expect(resumed.map(({ event }) => event._tag)).toEqual(["Onset", "Speech", "Pause", "Resumed", "Pause", "Utterance"])
+    const last = resumed.at(-1)?.event
+    expect(samples(last)).toEqual(samples(resumed.at(-2)?.event))
+    expect(samples(last)[0]).toBe(20 - defaults.lead)
+    expect(samples(last).at(-1)).toBe(29 + defaults.pause + 5 + defaults.tail)
+    // Cut off for going on too long, it isn't what any pause heard.
+    expect(feed(voiced(defaults.longest)).at(-1)?.event).toMatchObject({ _tag: "Utterance", paused: false })
+  })
+
   test("waits out a pause between words", () => {
     const events = feed([...voiced(10), ...quiet(defaults.silence - 1), ...voiced(5)])
-    expect(events.map(({ event }) => event._tag)).toEqual(["Onset", "Speech"])
+    expect(events.map(({ event }) => event._tag)).toEqual(["Onset", "Speech", "Pause", "Resumed"])
   })
 
   test("doesn't end on frames that are only a little less sure", () => {
