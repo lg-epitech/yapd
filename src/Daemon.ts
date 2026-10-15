@@ -2138,6 +2138,14 @@ export const make = (
   const nothingComing = STM.flatMap(onItsWay, (way) => (way ? STM.retry : STM.void))
 
   /**
+   * Waits as `wait` says, having looked at all it hangs on first, so a change
+   * to any of it tries it again: one way tried and given up on in favour of
+   * another is forgotten, with what it looked at.
+   */
+  const watching = <A>(wait: STM.STM<A>) =>
+    STM.commit(STM.zipRight(STM.all([TRef.get(power), TRef.get(floor.dictations), TRef.get(inbox), TRef.get(awaited), TRef.get(coming)]), wait))
+
+  /**
    * Puts back what a dictation cut off, to be said again from the start: an
    * update unless it was read to the end, like when the dictation only cut
    * off the wait for a reply, or the session has moved on or been answered
@@ -2490,17 +2498,25 @@ export const make = (
    * gets ready, or stays so, until it's queued; and when none of it comes
    * after all, like an update that turned out trivial or a reply that says
    * nothing, there's nothing to say for now, and the speaker rests at once.
+   * Kept `awake` for what was on its way, it's let rest the next time round
+   * should nothing be on its way by now.
    */
-  const nextUp = Effect.gen(function* () {
-    const first = yield* STM.commit(STM.orElse(STM.map(takeNext, Option.some), () => STM.as(expected, Option.none())))
-    if (Option.isSome(first)) return first
-    const { turns } = yield* switched
-    yield* floor.device.withPermits(1)(audio.warm)
-    // Turned off meanwhile, nothing will come, so the speaker rests at once rather than after a while.
-    return yield* STM.commit(STM.orElse(STM.map(takeNext, Option.some), () => STM.as(nothingComing, Option.none()))).pipe(
-      Effect.raceFirst(Effect.as(turnedOff(turns), Option.none())),
-    )
-  })
+  const nextUp = (awake: boolean) =>
+    Effect.gen(function* () {
+      const first = yield* watching(
+        STM.orElse(STM.map(takeNext, Option.some), () =>
+          STM.orElse(STM.as(expected, Option.none()), () => (awake ? STM.as(nothingComing, undefined) : STM.retry)),
+        ),
+      )
+      if (first === undefined) return Option.none()
+      if (Option.isSome(first)) return first
+      const { turns } = yield* switched
+      yield* floor.device.withPermits(1)(audio.warm)
+      // Turned off meanwhile, nothing will come, so the speaker rests at once rather than after a while.
+      return yield* watching(STM.orElse(STM.map(takeNext, Option.some), () => STM.as(nothingComing, Option.none()))).pipe(
+        Effect.raceFirst(Effect.as(turnedOff(turns), Option.none())),
+      )
+    })
 
   /** When the last line yapd said ended, or when it started, for how long it's been quiet. */
   let lastEnded = yield* Clock.currentTimeMillis
@@ -2540,8 +2556,7 @@ export const make = (
     const next = yield* Option.match(queued, {
       // Nothing left to say, so the microphone goes off until there is, once no dictation is using it: unless something is on its way,
       // which it stays on for.
-      onNone: () =>
-        Effect.flatMap(STM.commit(onItsWay), (way) => (way ? Effect.void : Floor.use(floor, audio)(Effect.void))).pipe(Effect.zipRight(nextUp)),
+      onNone: () => Effect.flatMap(STM.commit(onItsWay), (way) => (way ? nextUp(true) : Effect.zipRight(Floor.use(floor, audio)(Effect.void), nextUp(false)))),
       onSome: (ready) => Effect.succeed(Option.some(ready)),
     })
     // What was about to be ready never came, so the speaker rests again, the next time round.
