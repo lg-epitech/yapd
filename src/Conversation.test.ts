@@ -1001,14 +1001,14 @@ const overHelper = (
     /** With `answer`, whether it's followed up only from its end, and how long it's listened to after: as after an answer unless said. */
     readonly after?: boolean
     readonly wait?: Duration.DurationInput
-    /** With `answer`, or for the update, what's run once it's been said to the end. */
+    /** With `answer` or `ask`, or for the update, what's run once it's been said to the end. */
     readonly through?: Effect.Effect<void>
     /** Whether an answer he asked for always waits to be said next. */
     readonly asked?: boolean
     /** What's yapd's to do, handed to its assistant: with none, what the Responder answers is all. */
     readonly handing?: NonNullable<Parameters<typeof Conversation.make>[0]["over"]>
     /**
-     * Whether the update is out in parts: its first part, at `part`, lasting
+     * Whether what it says is out in parts: its first part, at `part`, lasting
      * so many seconds and words, while its whole, `duration` long, renders
      * until `whole` says.
      */
@@ -1203,12 +1203,15 @@ const overHelper = (
         Effect.zipRight(Effect.sleep(`${options.responding ?? 0} seconds`)),
         Effect.as((options.follow?.(heard, echo, afterPause) ?? true) ? Option.some(Effect.sync(() => void followed.push(heard))) : Option.none()),
       )
+    /** Its first part, when it's out in parts, of whatever it says. */
+    const opening = options.parts === undefined ? {} : { first: { path: part, render } }
     const fiber = yield* Effect.fork(
       options.ask === true
-        ? made.ask({ audio: "/tmp/question.wav", spoken, answer: respond })
+        ? made.ask({ audio: "/tmp/question.wav", ...opening, spoken, answer: respond, ...(options.through === undefined ? {} : { through: options.through }) })
         : options.answer === true
           ? made.answer({
               audio: "/tmp/answer.wav",
+              ...opening,
               spoken,
               followUp: respond,
               ...(options.after === true ? { after: true } : {}),
@@ -1216,7 +1219,7 @@ const overHelper = (
               ...(options.through === undefined ? {} : { through: options.through }),
             })
           : options.tell === true
-            ? Effect.as(made.tell({ audio: "/tmp/notice.wav", spoken }), false)
+            ? Effect.as(made.tell({ audio: "/tmp/notice.wav", ...opening, spoken }), false)
             : made.converse({ ...long, spoken, ...(options.parts === undefined ? {} : { first: part, render }) }, options.through ?? Effect.void),
     )
     yield* flush
@@ -3058,6 +3061,40 @@ describe("A line out in parts", () => {
     expect(talkedOver.heard).toBe(0)
     expect(Exit.isFailure(talkedOver.ended)).toBe(true)
     expect(talkedOver.files).toEqual([part])
+  })
+})
+
+describe("A question out in parts", () => {
+  test("a question whose first sentence played to its end isn't heard in full: it's heard only at its whole's end, and a yes there is worked out against what was still to come", async () => {
+    /** Its first part plays four seconds of the twelve all of it does, and says its first seven words. */
+    const parts = { duration: 4, words: 7 }
+    const spoken = "Shall I merge the pull request now? It changes the loader, the config and the tests, and nothing else needs you first."
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        const through: Array<number> = []
+        const helper = yield* overHelper([[0.9, "Yes."]], { ask: true, spoken, parts, duration: 12, through: Effect.sync(() => void through.push(1)) })
+        yield* helper.wait(4)
+        yield* helper.finish
+        // Right after its first sentence, with the rest still rendering.
+        const ended = through.length
+        yield* helper.wait(0.2)
+        yield* helper.talk(0.9, 10)
+        yield* helper.quiet
+        yield* helper.whole
+        yield* helper.held
+        return { ended, through: through.length, unheard: helper.unheard, followed: helper.followed, answered: yield* Fiber.join(helper.fiber), files: helper.files }
+      }),
+    )
+    // He'd heard as far as a moment before he began, which is where its first part ended, of all twelve seconds of it.
+    expect(result).toEqual({
+      ended: 0,
+      through: 0,
+      unheard: [unsaid(spoken, (4 - 0.3) / 12)],
+      followed: ["Yes."],
+      answered: true,
+      files: ["/tmp/update.first.wav"],
+    })
+    expect(unsaid(spoken, (4 - 0.3) / 12)).toBe("It changes the loader, the config and the tests, and nothing else needs you first.")
   })
 })
 

@@ -14,7 +14,7 @@ import * as T3Actions from "./T3Actions.ts"
 import type * as Threads from "./Threads.ts"
 import { type TranscribeError, Transcriber } from "./Transcriber.ts"
 import { Vad } from "./Vad.ts"
-import { type Early, extension, type Started, Voice } from "./Voice.ts"
+import { type Early, early as inParts, extension, type Started, Voice } from "./Voice.ts"
 import { again as sayAgain, agreed, gist, halts, type Line, noted, pardon, question } from "./Words.ts"
 
 /** An update, rendered and ready to be read out. */
@@ -535,7 +535,10 @@ const handedOver = (handed: Handed, replied?: Worked["replied"]): Worked => {
 
 /** Something yapd asks the user for itself, like which project new work is for, rendered and ready to be asked. */
 export interface Question {
+  /** Its whole, which is what it is, however it starts playing. */
   readonly audio: string
+  /** Its first part, when that's out before its whole, which it then starts playing from. */
+  readonly first?: Early
   /** What it says, so its own voice getting into the microphone as it starts isn't taken for an answer. */
   readonly spoken: string
   /** Run once it starts playing the first time, which is when the user hears of it: never when it can't be played. */
@@ -2134,7 +2137,13 @@ export const make = (options: {
             else {
               path = join(options.dir, `${crypto.randomUUID()}${extension}`)
               rendered.push(path)
-              yield* voice.render(text, path)
+              // Said from its first sentences as soon as they're out, while the rest renders, given up should the talk end first.
+              const rendering = yield* inParts(voice, text, path)
+              const lead = yield* rendering.first
+              if (lead !== path) {
+                rendered.push(lead)
+                parts.set(path, { path: lead, render: rendering })
+              }
             }
             const ready = yield* Clock.currentTimeMillis
             reached([...(reply.intent === "send" ? [["sent", passed - passing] as const] : []), ["rendered", ready - passed]], ready)
@@ -2206,6 +2215,7 @@ export const make = (options: {
                   wait,
                   begun,
                   confirmed,
+                  ...(said.first === undefined ? {} : { first: said.first }),
                   through: said.through ?? Effect.void,
                   heeding: heeding || after,
                   replying: after,
@@ -2313,7 +2323,7 @@ export const make = (options: {
      * over after the pause between lines once something waits to be said
      * next. Fails when it can't be played or breaks off.
      */
-    const tell = (said: Pick<Answer, "audio" | "spoken" | "saying" | "confirmed" | "through">) =>
+    const tell = (said: Pick<Answer, "audio" | "first" | "spoken" | "saying" | "confirmed" | "through">) =>
       Effect.gen(function* () {
         const ear = heedful(hearing(yield* Effect.scope))
         yield* speak(said.audio, said.spoken, 0, ear, {
@@ -2321,6 +2331,7 @@ export const make = (options: {
           confirmed: said.confirmed ?? Effect.void,
           through: said.through ?? Effect.void,
           heeding: true,
+          ...(said.first === undefined ? {} : { first: said.first }),
         })
       }).pipe(Effect.scoped)
 
@@ -2329,6 +2340,11 @@ export const make = (options: {
       ask,
       answer,
       tell,
+      /**
+       * Plays a line without listening, as when yapd is off: from its first
+       * part on into its whole, when it's out in parts, as any line is.
+       */
+      playLine: (path: string, text: string, first?: Early) => play(path, text, 0, first),
       /** Whether a follow-up to the session, or this particular update, is on its way. */
       sending: (session: string, update?: Update) => Effect.sync(() =>
         update === undefined ? [...sending.keys()].some((update) => update.session === session) : sending.has(update),
