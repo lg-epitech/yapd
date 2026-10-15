@@ -1398,6 +1398,8 @@ export const make = (options: {
                 }
                 break
               }
+              // When he stopped, as he did: neither making out what he said nor waiting on the rest's render is counted as his talking.
+              const stoppedTalking = (yield* Clock.currentTimeMillis) - Latency.quiet
               // "Mute." is acted on once it's made out, never once the rest of a line playing from its first part has rendered, which can take
               // seconds: only a line about muting needs its words around when he began, and so its length, to tell whose "mute" it was. Made
               // out here, what he said isn't made out again.
@@ -1427,7 +1429,7 @@ export const make = (options: {
                 ...(echoing ? { echo: between(text, duration, begun - reach, Math.max(at, begun) + reach) } : {}),
                 ...(finished === undefined ? {} : { finished }),
                 lateBy: finished === undefined || since === undefined ? 0 : Math.max(0, since - finished) / 1000,
-                stopped: (yield* Clock.currentTimeMillis) - Latency.quiet,
+                stopped: stoppedTalking,
                 ...(carried === "echo" ? { carried: true } : {}),
               } satisfies Outcome
             }
@@ -1983,7 +1985,7 @@ export const make = (options: {
              * What he handed over that's acted on, run as soon as it's known, so a dictation starting then can't drop it: logged, then
              * registered, and the update put back to be read again from a moment before where he cut in, when it needs him, he cut it off
              * before its end, and it doesn't aim at it, or when all of it may be yapd's own words. Otherwise it ends there, and he's heard
-             * it. Whether it was put back.
+             * it, unless its rest never rendered once he'd talked over its first part. Whether it was put back.
              */
             const handOver = (heard: string, worked: Worked & { readonly ms: number; readonly began: number }, handed: Extract<Handed, { readonly _tag: "Act" }>) =>
               Effect.gen(function* () {
