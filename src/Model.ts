@@ -1,18 +1,32 @@
-import { ConfigError, Context, Data, Effect, JSONSchema, Layer, Option, Schema } from "effect"
+import { ConfigError, Context, Data, Effect, JSONSchema, Layer, Option, Schema, Stream } from "effect"
 import { rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import * as CodexServer from "./CodexServer.ts"
 import * as Config from "./Config.ts"
+import * as Partial from "./Partial.ts"
 import { run } from "./Process.ts"
 import { json, type Name, type Provider, providers } from "./Provider.ts"
 
 export class ModelError extends Data.TaggedError("ModelError")<{ readonly cause: unknown }> {}
 
+/** A top-level field of an answer, told as soon as the model has written it. */
+export type Field = (key: string, value: Partial.Value) => Effect.Effect<void>
+
 /** Writes everything yapd says: summaries of turns, and replies when the user interrupts. */
 export class Model extends Context.Tag("yapd/Model")<
   Model,
-  { readonly ask: <A, I>(schema: Schema.Schema<A, I>, prompt: string) => Effect.Effect<A, ModelError> }
+  {
+    readonly ask: <A, I>(schema: Schema.Schema<A, I>, prompt: string) => Effect.Effect<A, ModelError>
+    /**
+     * Asks like `ask`, telling `field` each field of the answer as soon as
+     * it's written, in order, while the model writes the rest: only where the
+     * answer can be read as it's written, like Codex's. What it gives is the
+     * whole answer, decoded, which is what counts: what was told before is
+     * only ever a guess at it.
+     */
+    readonly stream?: <A, I>(schema: Schema.Schema<A, I>, prompt: string, field: Field) => Effect.Effect<A, ModelError>
+  }
 >() {}
 
 /** Writes the prompts for new work, which can be left to another model than the one that talks. */
@@ -141,6 +155,9 @@ const once = (chosen: Chosen, command: Provider["command"], schema: object, prom
   )
 }
 
+/** Codex's app-server, kept running between calls. */
+type Server = Effect.Effect.Success<ReturnType<typeof CodexServer.make>>
+
 /** Asks a coding agent CLI, so it runs on the user's existing login. */
 const make = (chosen: Chosen) =>
   Effect.gen(function* () {
@@ -161,14 +178,81 @@ const make = (chosen: Chosen) =>
           ),
       })
 
+    /**
+     * Like `reply` through the server, telling each field as Codex writes it. A
+     * message it starts again is read afresh while none of it was told, and
+     * fails the call once some was, which can't be taken back. Should the
+     * server fail before the model wrote anything, `codex exec` answers instead,
+     * its fields told all at once.
+     */
+    const streamed = (server: Server, schema: object, prompt: string, field: Field) =>
+      Effect.suspend(() => {
+        let scanner = new Partial.Scanner()
+        let message: string | undefined
+        let written = false
+        let told = false
+        let whole: string | undefined
+        const read = (text: string) =>
+          Effect.forEach(
+            scanner.feed(text),
+            (found) =>
+              found._tag === "Field"
+                ? Effect.zipRight(
+                    Effect.sync(() => {
+                      told = true
+                    }),
+                    field(found.key, found.value),
+                  )
+                : Effect.void,
+            { discard: true },
+          )
+        return Stream.runForEach(server.stream({ prompt, schema }), (piece) => {
+          if (piece._tag === "Whole") {
+            whole = piece.text
+            return Effect.void
+          }
+          written = true
+          if (message !== undefined && piece.message !== message) {
+            if (told) return Effect.fail(new CodexServer.TurnError({ cause: "The model started its answer again once part of it was told" }))
+            scanner = new Partial.Scanner()
+          }
+          message = piece.message
+          return read(piece.text)
+        }).pipe(
+          Effect.flatMap(() => Effect.try(() => json(whole ?? ""))),
+          Effect.catchIf(
+            (error) => error._tag === "ServerError" && !written,
+            (error) =>
+              Effect.logWarning("Codex's app-server isn't working, starting Codex for this call", error).pipe(
+                Effect.zipRight(once(chosen, provider.command, schema, prompt)),
+                Effect.tap((answer) =>
+                  Effect.suspend(() => {
+                    scanner = new Partial.Scanner()
+                    return read(JSON.stringify(answer))
+                  }),
+                ),
+              ),
+          ),
+        )
+      })
+
+    /** An answer asked for in the schema's JSON Schema, decoded with it, within a minute. */
+    const decoded = <A, I, E>(schema: Schema.Schema<A, I>, answer: (shape: object) => Effect.Effect<unknown, E>) =>
+      Effect.try(() => JSONSchema.make(schema)).pipe(
+        Effect.flatMap(answer),
+        Effect.flatMap(Schema.decodeUnknown(schema)),
+        Effect.timeout("60 seconds"),
+        Effect.mapError((cause) => new ModelError({ cause })),
+      )
+
     return {
-      ask: <A, I>(schema: Schema.Schema<A, I>, prompt: string) =>
-        Effect.try(() => JSONSchema.make(schema)).pipe(
-          Effect.flatMap((schema) => reply(schema, prompt)),
-          Effect.flatMap(Schema.decodeUnknown(schema)),
-          Effect.timeout("60 seconds"),
-          Effect.mapError((cause) => new ModelError({ cause })),
-        ),
+      ask: <A, I>(schema: Schema.Schema<A, I>, prompt: string) => decoded(schema, (shape) => reply(shape, prompt)),
+      ...Option.match(server, {
+        onNone: () => ({}),
+        onSome: (server) => ({
+          stream: <A, I>(schema: Schema.Schema<A, I>, prompt: string, field: Field) => decoded(schema, (shape) => streamed(server, shape, prompt, field)),
+        }),
+      }),
       prepare: Option.match(server, { onNone: () => Effect.void, onSome: (server) => server.prepare }),
     }
   })
