@@ -13,21 +13,23 @@ export interface Call {
   readonly schema: { readonly json: string; readonly path: string }
 }
 
+/** How to run the CLI for a call. */
+export interface Invocation {
+  readonly argv: ReadonlyArray<string>
+  readonly stdin?: string
+  /** Added to yapd's own environment. */
+  readonly env?: Record<string, string>
+}
+
 /** A coding agent CLI run headless, read-only and without the user's setup, as far as each CLI allows. */
 export interface Provider {
   /** Used when no model is configured. The tier is a faster service tier, where the CLI has one. */
   readonly defaults?: { readonly model: string; readonly effort: string; readonly tier?: string }
   /** False when the CLI has no reasoning effort setting, only models that bake one in. */
   readonly takesEffort: boolean
-  readonly command: (call: Call) => { readonly argv: ReadonlyArray<string>; readonly stdin?: string }
+  readonly command: (call: Call) => Invocation
   /** Pulls the reply's JSON value out of stdout. Defaults to finding the object in plain text. */
   readonly reply?: (stdout: string) => unknown
-  /**
-   * The same call, run in a project's checkout to read through it. Only for CLIs
-   * that keep the model from changing anything themselves, and were seen to:
-   * OpenCode's plan agent, for one, still has its shell and only asks it not to.
-   */
-  readonly research?: (call: Call) => { readonly argv: ReadonlyArray<string>; readonly stdin?: string }
 }
 
 const flag = (name: string, value: string | undefined) => (value === undefined ? [] : [name, value])
@@ -65,23 +67,34 @@ const codex = ({ prompt, model, effort, tier, schema }: Call) => ({
   stdin: prompt,
 })
 
-const claude =
-  (tools: string) =>
-  ({ prompt, model, effort, schema }: Call) => ({
-    argv: [
-      "claude", "-p",
-      ...flag("--model", model),
-      ...flag("--effort", effort),
-      "--output-format", "json",
-      "--json-schema", schema.json,
-      "--tools", tools,
-      "--setting-sources", "",
-      "--strict-mcp-config",
-      "--disable-slash-commands",
-      "--no-session-persistence",
-    ],
-    stdin: prompt,
-  })
+const claude = ({ prompt, model, effort, schema }: Call) => ({
+  argv: [
+    "claude", "-p",
+    ...flag("--model", model),
+    ...flag("--effort", effort),
+    "--output-format", "json",
+    "--json-schema", schema.json,
+    // Prompts end by asking for a JSON object, which other CLIs need. Claude Code 2.1.293 then often had Sonnet write
+    // it out, be told to call StructuredOutput, and send it again. 2.1.299 doesn't, but Sonnet still answers about
+    // 0.3 s sooner with this.
+    "--append-system-prompt", "When asked to reply with a JSON object, give it as the input of the StructuredOutput tool rather than writing it out.",
+    "--tools", "",
+    "--setting-sources", "",
+    "--strict-mcp-config",
+    "--disable-slash-commands",
+    "--no-session-persistence",
+  ],
+  stdin: prompt,
+  // Without these, Claude Code spent about 0.6 s of each call on traffic a one-off call has no use for, a fetch
+  // before it asked and telemetry before it exited, and offered the model its Opus advisor tool every time. Like
+  // Codex's --ignore-user-config, auto memory stays off: what the user's own sessions remember about the folder yapd
+  // runs from would otherwise go into every reply.
+  env: {
+    CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
+    CLAUDE_CODE_DISABLE_ADVISOR_TOOL: "1",
+    CLAUDE_CODE_DISABLE_AUTO_MEMORY: "1",
+  },
+})
 
 export const providers: Record<Name, Provider> = {
   codex: {
@@ -89,13 +102,10 @@ export const providers: Record<Name, Provider> = {
     defaults: { model: "gpt-6-luna", effort: "high", tier: "priority" },
     takesEffort: true,
     command: codex,
-    research: codex,
   },
   claude: {
     takesEffort: true,
-    command: claude(""),
-    // The only tools it's given, so there's no shell and nothing that writes.
-    research: claude("Read,Glob,Grep"),
+    command: claude,
     reply: (stdout) => (JSON.parse(stdout) as { structured_output: unknown }).structured_output,
   },
   grok: {

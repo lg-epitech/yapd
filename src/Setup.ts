@@ -185,7 +185,7 @@ export const refresh = (bun: string, main: string) =>
         if (Option.isNone(settings) || Object.values(find(settings.value.hooks ?? {}, main)).every((hooks) => hooks.length === 0)) return
         const { changed, message } = yield* install(agent, command(bun, main, environment()), main)
         if (changed) yield* Console.log(message)
-      }).pipe(Effect.catchAll((error) => Console.error(`${error.message}. Its hooks are in the README.`))),
+      }).pipe(Effect.catchAll((error) => Console.error(`${error.message}. Once that's fixed, run yapd setup again.`))),
     { discard: true },
   )
 
@@ -211,7 +211,7 @@ export const setup = (bun: string, main: string) =>
     for (const agent of agents) {
       yield* install(agent, command(bun, main, environment()), main).pipe(
         Effect.flatMap(({ message }) => Console.log(message)),
-        Effect.catchAll((error) => Console.error(`${error.message}. Its hooks are in the README.`)),
+        Effect.catchAll((error) => Console.error(`${error.message}. Once that's fixed, run yapd setup again.`)),
       )
     }
   })

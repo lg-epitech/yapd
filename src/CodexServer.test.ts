@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, setDefaultTimeout, test } from "bun:test"
-import { Effect, Exit, Fiber, Scope, TestClock, TestContext } from "effect"
+import { Chunk, Effect, Exit, Fiber, Scope, Stream, TestClock, TestContext } from "effect"
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -63,8 +63,15 @@ const fakeCodex = async () => {
   let turns = 0
   let lateThread: object | undefined
   const held: string[] = []
+  /** The message as the model writes it, four characters at a time. */
+  const write = (threadId: string, turnId: string, text: string) => {
+    for (const delta of text.match(/.{1,4}/gs) ?? []) {
+      send({ method: "item/agentMessage/delta", params: { threadId, turnId, itemId: `message-${threadId}`, delta } })
+    }
+  }
   const complete = (threadId: string) => {
     const text = JSON.stringify({ thread: threadId })
+    write(threadId, "turn", text)
     send({ method: "item/completed", params: { threadId, item: { type: "agentMessage", text } } })
     send({ method: "turn/completed", params: { threadId, turn: { status: "completed" } } })
   }
@@ -108,9 +115,12 @@ const fakeCodex = async () => {
         continue
       }
       if (crashes) setTimeout(() => process.exit(1), 50)
-      if (mode === "hang" || crashes) continue
+      // Writes the start of its message, then never finishes it.
+      if (mode === "trickle") write(threadId, `turn-${turns}`, JSON.stringify({ spoken: "On it, sir. I'll merge it." }).slice(0, 20))
+      if (mode === "hang" || mode === "trickle" || crashes) continue
       const status = mode === "fail-turn" ? "failed" : "completed"
       const text = JSON.stringify({ thread: threadId })
+      write(threadId, `turn-${turns}`, text)
       send({ method: "item/completed", params: { threadId, item: { type: "agentMessage", text } } })
       send({ method: "turn/completed", params: { threadId, turn: { status } } })
       if (lateThread !== undefined) { send(lateThread); lateThread = undefined }
@@ -201,7 +211,8 @@ const withServer = <A>(
   return Effect.runPromise(
     Effect.acquireUseRelease(
       Scope.make(),
-      (scope) => CodexServer.make(settings, codex(log)).pipe(
+      // Two ready threads, which is all these need to show how they're kept.
+      (scope) => CodexServer.make(settings, codex(log), 2).pipe(
         Effect.flatMap((server) => body(server, log, scope)),
         Scope.extend(scope),
       ),
@@ -267,19 +278,19 @@ describe("CodexServer", () => {
       }),
     ))
 
-  test("lets go of threads that have waited too long", () =>
+  test("replaces ready threads before they'd be too old to trust, so a call after a quiet spell finds one", () =>
     withServer("", (server, log) =>
       Effect.gen(function* () {
         yield* until(log, threadsStarted(2))
         yield* settle
-        yield* TestClock.adjust("1 hour")
+        // Each round of five minutes looks them over: at fifteen they're replaced.
+        for (let round = 0; round < 3; round++) {
+          yield* TestClock.adjust("5 minutes")
+          yield* settle
+        }
+        const recorded = yield* until(log, threadsStarted(4))
+        expect(calls("thread/unsubscribe")(recorded).map((entry) => entry.params.threadId).toSorted()).toEqual(["thread-1", "thread-2"])
         expect(yield* server.run(turn)).toBe(answer("thread-3"))
-        const recorded = yield* until(log, (recorded) => calls("thread/unsubscribe")(recorded).length === 3)
-        expect(calls("thread/unsubscribe")(recorded).map((entry) => entry.params.threadId).toSorted()).toEqual([
-          "thread-1",
-          "thread-2",
-          "thread-3",
-        ])
       }),
     ))
 
@@ -304,6 +315,59 @@ describe("CodexServer", () => {
         const running = yield* Effect.fork(server.run(turn))
         yield* until(log, (recorded) => calls("turn/start")(recorded).length === 1)
         yield* Fiber.interrupt(running)
+        const recorded = yield* until(log, (recorded) => calls("thread/unsubscribe")(recorded).length === 1)
+        expect(calls("turn/interrupt")(recorded).map((entry) => entry.params)).toEqual([
+          { threadId: "thread-1", turnId: "turn-1" },
+        ])
+      }),
+    ))
+
+  test("passes a streamed answer on in order as it's written, then whole", () =>
+    withServer("", (server, log) =>
+      Effect.gen(function* () {
+        yield* until(log, threadsStarted(2))
+        const written = Chunk.toReadonlyArray(yield* Stream.runCollect(server.stream(turn)))
+        const whole = answer("thread-1")
+        expect(written.at(-1)).toEqual({ _tag: "Whole", text: whole })
+        expect(written.slice(0, -1)).toEqual(
+          (whole.match(/.{1,4}/gs) ?? []).map((text) => ({ _tag: "Piece", message: "message-thread-1", text })),
+        )
+      }),
+    ))
+
+  test("streams on a new thread when Codex has let a ready one go", () =>
+    withServer("forget", (server, log) =>
+      Effect.gen(function* () {
+        yield* until(log, threadsStarted(2))
+        const written = Chunk.toReadonlyArray(yield* Stream.runCollect(server.stream(turn)))
+        expect(written.at(-1)).toEqual({ _tag: "Whole", text: answer("thread-3") })
+      }),
+    ))
+
+  test("stops a turn it gives up on mid-stream", () =>
+    withServer("trickle", (server, log) =>
+      Effect.gen(function* () {
+        yield* until(log, threadsStarted(2))
+        const written = yield* Stream.runCollect(Stream.take(server.stream(turn), 2))
+        expect(Chunk.toReadonlyArray(written).map((entry) => entry.text)).toEqual(['{"sp', 'oken'])
+        const recorded = yield* until(log, (recorded) => calls("thread/unsubscribe")(recorded).length === 1)
+        expect(calls("turn/interrupt")(recorded).map((entry) => entry.params)).toEqual([
+          { threadId: "thread-1", turnId: "turn-1" },
+        ])
+      }),
+    ))
+
+  test("stops a turn it gives up on mid-stream, even read where nothing can be interrupted", () =>
+    withServer("trickle", (server, log) =>
+      Effect.gen(function* () {
+        yield* until(log, threadsStarted(2))
+        const written = yield* Stream.runCollect(Stream.take(server.stream(turn), 2)).pipe(
+          Effect.uninterruptible,
+          // Fails the test, in real time, should closing the stream wait on the model, which never finishes here.
+          Effect.disconnect,
+          Effect.raceFirst(Effect.promise(() => Bun.sleep(2_000)).pipe(Effect.zipRight(Effect.dieMessage("Closing the stream hung")))),
+        )
+        expect(Chunk.toReadonlyArray(written).map((entry) => entry.text)).toEqual(['{"sp', 'oken'])
         const recorded = yield* until(log, (recorded) => calls("thread/unsubscribe")(recorded).length === 1)
         expect(calls("turn/interrupt")(recorded).map((entry) => entry.params)).toEqual([
           { threadId: "thread-1", turnId: "turn-1" },

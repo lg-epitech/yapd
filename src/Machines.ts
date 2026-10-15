@@ -4,12 +4,11 @@ import * as CliLauncher from "./CliLauncher.ts"
 import * as Config from "./Config.ts"
 import type { Machine } from "./Drafts.ts"
 import type { Launcher } from "./Launcher.ts"
-import { researcher } from "./Model.ts"
 import * as Remote from "./Remote.ts"
 import * as T3CodeLauncher from "./T3CodeLauncher.ts"
 
 // Where new work can start: this machine and the ones it reaches over SSH,
-// each with what starts agents there and what reads through its projects.
+// each with what starts agents there.
 
 /**
  * What starts agents on this machine: T3 Code when there's a token for it, and
@@ -36,28 +35,26 @@ export const short = (host: string) => host.split(".")[0] ?? host
 /**
  * This machine first, by the name the user gave it, then the ones in
  * `YAPD_REMOTES`. Its hostname is read each time, since a Mac's changes with
- * the network.
+ * the network. What starts work on another machine goes through the
+ * connection to it `masters` has open, when there is one.
  */
-export const machines = Effect.gen(function* () {
-  const remotes = yield* Config.remotes
-  const called = Option.getOrUndefined(yield* Config.name)
-  const launchers = Remote.launchers(remotes, hostname, yield* own, undefined, called)
-  const researchers = Remote.researchers(remotes, hostname, yield* researcher, undefined, called)
-  const here: Machine = {
-    get name() {
-      return called ?? short(hostname())
-    },
-    here: true,
-    get hosts() {
-      return [hostname()]
-    },
-    launcher: launchers(),
-    researcher: researchers(),
-  }
-  return [
-    here,
-    ...[...remotes.keys()].map(
-      (remote): Machine => ({ name: remote, here: false, hosts: [remote], launcher: launchers(remote), researcher: researchers(remote) }),
-    ),
-  ]
-})
+export const machines = (masters?: Remote.Masters) =>
+  Effect.gen(function* () {
+    const remotes = yield* Config.remotes
+    const called = Option.getOrUndefined(yield* Config.name)
+    const launchers = Remote.launchers(remotes, hostname, yield* own, undefined, called, masters)
+    const here: Machine = {
+      get name() {
+        return called ?? short(hostname())
+      },
+      here: true,
+      get hosts() {
+        return [hostname()]
+      },
+      launcher: launchers(),
+    }
+    return [
+      here,
+      ...[...remotes.keys()].map((remote): Machine => ({ name: remote, here: false, hosts: [remote], launcher: launchers(remote) })),
+    ]
+  })

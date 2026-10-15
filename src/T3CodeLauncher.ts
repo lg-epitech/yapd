@@ -1,16 +1,21 @@
-import { Effect, Either, type Redacted, Schema } from "effect"
+import { Clock, Duration, Effect, Either, Option, type Redacted, Schema } from "effect"
 import { realpath } from "node:fs/promises"
 import { homedir } from "node:os"
 import { basename, join } from "node:path"
+import { dated } from "./Latency.ts"
 import { type Catalog, type Launcher, LaunchError, type Request, type Started } from "./Launcher.ts"
 import { run } from "./Process.ts"
 import * as Server from "./T3CodeServer.ts"
+import type * as T3Live from "./T3Live.ts"
 
 // Starts a thread the way T3 Code's app does when the user sends the first
 // message of a new one: a single launch that creates the thread and has the
 // server prepare its workspace, a worktree or the checkout, before the first
 // turn. What the request leaves out follows the app's defaults, which the app
-// works out itself, so they are worked out again here.
+// works out itself, so they are worked out again here. Work that belongs to no
+// project starts in T3 Code's scratch project, told by its folder alone, which
+// T3 Code makes the first time it's asked for and gives each thread a folder of
+// its own in.
 
 const Selection = Schema.Struct({
   instanceId: Schema.String,
@@ -288,11 +293,81 @@ export const launch = (plan: Plan, fresh: Fresh) => ({
   initialMessage: { messageId: fresh.message, text: plan.prompt, attachments: [] },
 })
 
-/** Whether T3 Code is still getting the workspace ready, before the first turn can start. */
-const preparing = ({ projection }: Launched) => projection.runs.at(-1)?.status === "preparing"
+/** How long T3 Code has to get new work ready, from when it's asked for: fetching and checking out a worktree can take minutes. */
+export const preparation = "6 minutes"
 
-/** Whether the first turn ended before it began, like when the worktree couldn't be made. */
-const failed = ({ projection }: Launched) => ["failed", "cancelled", "interrupted"].includes(projection.runs.at(-1)?.status ?? "")
+/** Whether T3 Code is still getting a run's workspace ready, before its turn can start. */
+const preparing = (status: string | null | undefined) => status === "preparing"
+
+/** Whether a run ended short, which as its workspace is got ready means its turn never began, like when the worktree couldn't be made. */
+const short = (status: string | null | undefined) => ["failed", "cancelled", "interrupted"].includes(status ?? "")
+
+/** How a launched thread's first turn is getting on, its only run so far. */
+const first = ({ projection }: Launched) => projection.runs.at(-1)?.status
+
+/** How long after new work is asked for T3 Code can take to put it in the thread it made, a step of its own that it can be slow to get to. */
+const handing = "1 minute"
+
+/**
+ * How long to wait before looking again at new work being got ready, asked
+ * for at `asked`, in ms: a quarter of a second for its first ten seconds, by
+ * when work without a worktree usually is, then a second, so a worktree that
+ * takes minutes isn't asked about four times a second.
+ */
+const pace = (asked: number, now: number): Duration.DurationInput => (now - asked < 10_000 ? "250 millis" : "1 second")
+
+/**
+ * How new work is getting on, as T3 Code shows its thread, by the checks a
+ * launch waits on: with no run, which T3 Code shows as idle, so the work isn't
+ * in it yet; its workspace still being got ready; ended before its turn
+ * began; or begun. Looked at later than a launch would, a turn that began and
+ * ended since is begun all the same.
+ */
+export const progress = (thread: Pick<T3Live.Thread, "status" | "latestRunStartedAt">): "empty" | "preparing" | "unstarted" | "begun" =>
+  thread.status === "idle"
+    ? "empty"
+    : preparing(thread.status)
+      ? "preparing"
+      : short(thread.status) && thread.latestRunStartedAt === null
+        ? "unstarted"
+        : "begun"
+
+/**
+ * New work's thread as `look` shows it once it's no longer being got ready,
+ * or as it last did when a launch would have given up, looked at as often as
+ * a launch looks meanwhile: none if there's no thread for it. With no run,
+ * it's waited for only as long after it was asked for, at `asked`, in ms, as
+ * T3 Code can take to put the work in; still without it then, it's as good as
+ * none, since the work may yet go in, so there's no saying it didn't start.
+ */
+export const readied = (look: Effect.Effect<Option.Option<T3Live.Thread>>, asked: number) =>
+  Effect.gen(function* () {
+    const until = asked + Duration.toMillis(preparation)
+    const filled = Math.min(until, asked + Duration.toMillis(handing))
+    /** Until when it's waited for, as it is now. */
+    const waited = (thread: Option.Option<T3Live.Thread>) =>
+      Option.match(Option.map(thread, progress), { onNone: () => 0, onSome: (now) => (now === "preparing" ? until : now === "empty" ? filled : 0) })
+    let now = yield* look
+    while ((yield* Clock.currentTimeMillis) < waited(now)) {
+      yield* Effect.sleep(pace(asked, yield* Clock.currentTimeMillis))
+      const next = yield* look
+      if (Option.isSome(next)) now = next
+    }
+    return Option.filter(now, (thread) => progress(thread) !== "empty")
+  })
+
+/** Why new work T3 Code made a thread for didn't start: it couldn't get its workspace ready. */
+export const unready = (worktree: boolean, project = "it") =>
+  `T3 Code ${worktree ? "couldn't make the worktree" : `couldn't get ${project} ready`}, so the thread it made didn't start.`
+
+/**
+ * Why new work didn't start, as T3 Code shows the thread it made for it once
+ * it's been waited for, if it's known not to have: its workspace couldn't be
+ * got ready. Begun, still being got ready, or with the work not in it yet,
+ * which T3 Code may still put in, there's no saying it didn't.
+ */
+export const unstarted = (thread: Pick<T3Live.Thread, "status" | "latestRunStartedAt">, worktree: boolean, project?: string) =>
+  progress(thread) === "unstarted" ? Option.some(unready(worktree, project)) : Option.none()
 
 /** Why T3 Code wouldn't start it, to be read out. */
 export const reason = (error: Server.Trouble | Server.Refusal) =>
@@ -335,6 +410,16 @@ const repository = (cwd: string) =>
 /** How many of a project's threads the catalog names. */
 const few = 5
 
+/** The folder behind T3 Code's scratch project, and the path a folder really is, which tells that project by it. */
+interface Scratch {
+  readonly root: string
+  readonly resolve: (path: string) => string
+}
+
+/** Whether a project is T3 Code's scratch project, by its folder alone. */
+const outside = (scratch: Scratch | undefined, project: Project) =>
+  scratch !== undefined && scratch.resolve(project.workspaceRoot) === scratch.resolve(scratch.root)
+
 export const catalog = (input: {
   readonly shell: Shell
   readonly settings: Settings
@@ -342,8 +427,10 @@ export const catalog = (input: {
   /** By project id. */
   readonly files: ReadonlyMap<string, "local" | "worktree" | undefined>
   readonly repositories: ReadonlyMap<string, Repository>
+  /** When T3 Code has a scratch project. */
+  readonly scratch?: Scratch
 }): Catalog => ({
-  projects: input.shell.projects.map((project) => {
+  projects: [...input.shell.projects.map((project) => {
     const usual = defaults(input.settings, project, input.files.get(project.id))
     const threads = newest(input.shell, project)
     // One that has since gone would be refused at the start, so whoever writes the request has to pick.
@@ -360,8 +447,14 @@ export const catalog = (input: {
       worktree: repository && usual.worktree,
       ...(selection === undefined ? {} : { model: { name: selection.model, ...(level === undefined ? {} : { effort: level }) } }),
       recent: threads.slice(0, few).map(({ title, updatedAt }) => ({ title, date: updatedAt })),
+      ...(outside(input.scratch, project) ? { scratch: true } : {}),
     }
   }),
+  // Never used yet, it's made the first time work starts there, and called what T3 Code calls it.
+  ...(input.scratch === undefined || input.shell.projects.some((project) => outside(input.scratch, project))
+    ? []
+    : [{ name: "No project", path: input.scratch.root, repository: false, branch: null, worktree: false, recent: [], scratch: true }]),
+  ],
   models: input.providers.flatMap((provider) =>
     provider.enabled && provider.status === "ready"
       ? provider.models.map((model) => ({
@@ -383,12 +476,30 @@ const file = (project: Project) =>
     Effect.orElseSucceed(() => undefined),
   )
 
-const Providers = Schema.Struct({ providers: Schema.Array(Provider) })
+const Providers = Schema.Struct({
+  providers: Schema.Array(Provider),
+  /** The folder behind its scratch project, on a T3 Code that has one. */
+  scratchWorkspaceRoot: Schema.optional(Schema.String),
+})
+
+/** The scratch project, made if it wasn't yet. */
+const Scratched = Schema.Struct({ projectId: Schema.String })
+
+/** What T3 Code calls each folder, as it really is, links followed: what tells two paths to the same folder. */
+const resolving = (paths: ReadonlyArray<string>) =>
+  Effect.map(
+    Effect.promise(() => Promise.all(paths.map(async (path) => [path, await canonical(path)] as const))),
+    (found) => {
+      const resolved = new Map(found)
+      return (path: string) => resolved.get(path) ?? path
+    },
+  )
 
 const heard = <A, R>(effect: Effect.Effect<A, LaunchError | Server.Trouble | Server.Refusal, R>) =>
   effect.pipe(
     Effect.catchTags({
-      Trouble: (error) => Effect.fail(new LaunchError({ reason: reason(error), cause: error.cause })),
+      Trouble: (error) =>
+        Effect.fail(new LaunchError({ reason: reason(error), cause: error.cause, ...(error.sent === true ? { sent: true } : {}) })),
       Refusal: (error) => Effect.fail(new LaunchError({ reason: reason(error), cause: error })),
     }),
   )
@@ -400,19 +511,33 @@ export const launcher = (
 ): Launcher => ({
   start: (request) =>
     Effect.gen(function* () {
+      const began = yield* Clock.currentTimeMillis
       const refuse = (reason: string) => new LaunchError({ reason })
       const { api, call } = yield* reach
 
-      const shell = yield* api("/api/orchestration/shell", Shell)
-      const paths = [home(request.project.trim()), ...shell.projects.map(({ workspaceRoot }) => workspaceRoot)]
-      const resolved = new Map(yield* Effect.promise(() => Promise.all(paths.map(async (path) => [path, await canonical(path)] as const))))
-      const project = yield* Either.mapLeft(find(shell.projects, request.project, (path) => resolved.get(path) ?? path), refuse)
+      const [shell, { providers, scratchWorkspaceRoot: root }] = yield* Effect.all(
+        [api("/api/orchestration/shell", Shell), call("server.getConfig", {}, Providers)],
+        { concurrency: "unbounded" },
+      )
+      const wanted = home(request.project.trim())
+      const resolve = yield* resolving([wanted, ...shell.projects.map(({ workspaceRoot }) => workspaceRoot), ...(root === undefined ? [] : [root])])
+      // Asked for by its folder, the scratch project is made if it wasn't yet, which T3 Code does once however often it's asked.
+      const scratch = root !== undefined && resolve(wanted) === resolve(root)
+      const unable = "This T3 Code can't start work outside a project."
+      const made = Effect.gen(function* () {
+        // T3 Code says why only in words of its own, wrapped in another error, so all that's told is that it can't.
+        const { projectId } = yield* call("projects.ensureScratch", {}, Scratched).pipe(
+          Effect.mapError((error) => (error._tag === "Refusal" && error.tag !== "EnvironmentAuthorizationError" ? refuse(unable) : error)),
+        )
+        const found = (yield* api("/api/orchestration/shell", Shell)).projects.find(({ id }) => id === projectId)
+        return found ?? (yield* refuse(unable))
+      })
+      const project = scratch ? yield* made : yield* Either.mapLeft(find(shell.projects, request.project, resolve), refuse)
 
       const base = request.baseBranch?.trim() || undefined
-      const [settings, { providers }, refs, named, mode] = yield* Effect.all(
+      const [settings, refs, named, mode] = yield* Effect.all(
         [
           call("server.getSettings", {}, Settings),
-          call("server.getConfig", {}, Providers),
           call("vcs.listRefs", { cwd: project.workspaceRoot, refKind: "local", limit: 200 }, Refs),
           base === undefined
             ? Effect.succeed([])
@@ -428,43 +553,56 @@ export const launcher = (
       const latest = newest(shell, project)[0]?.modelSelection
       const decided = yield* Either.mapLeft(plan({ request, project, settings, file: mode, latest, providers, refs, named }), refuse)
 
-      const started = ids()
+      // Under the ids yapd wrote down before asking, when it did, so asking again starts it once.
+      const started = request.ids === undefined ? ids() : { ...ids(), ...request.ids }
+      /** Whether T3 Code took the launch, after which whatever goes wrong may have left it started. */
+      let asked = false
+      /** How many times it was looked at while T3 Code got it ready. */
+      let polls = 0
       const prepared = yield* Effect.gen(function* () {
         let launched = yield* call("orchestration.launchThread", launch(decided, started), Launched, "30 seconds")
+        asked = true
+        const answered = yield* Clock.currentTimeMillis
         // T3 Code gets the workspace ready after answering. Fetching and checking out can take minutes.
-        while (preparing(launched)) {
-          yield* Effect.sleep("1 second")
+        while (preparing(first(launched))) {
+          yield* Effect.sleep(pace(answered, yield* Clock.currentTimeMillis))
+          polls++
           launched = yield* api(`/api/orchestration/threads/${encodeURIComponent(started.thread)}/bounded`, Launched)
         }
         return launched
       }).pipe(
-        Effect.timeoutFail({ duration: "6 minutes", onTimeout: () => new Server.Trouble({ reason: "T3 Code is taking too long." }) }),
+        Effect.timeoutFail({ duration: preparation, onTimeout: () => new Server.Trouble({ reason: "T3 Code is taking too long." }) }),
         Effect.mapError((error) =>
-          error._tag === "Trouble" && error.reason === "T3 Code is taking too long."
-            ? new Server.Trouble({ reason: "T3 Code is taking too long, so I don't know if it started." })
-            : error,
+          error._tag !== "Trouble"
+            ? error
+            : error.reason === "T3 Code is taking too long."
+              ? new Server.Trouble({ reason: "T3 Code is taking too long, so I don't know if it started.", sent: true })
+              : asked
+                ? new Server.Trouble({ ...error, sent: true })
+                : error,
         ),
       )
-      if (failed(prepared)) {
-        const why = decided.worktree ? "couldn't make the worktree" : `couldn't get ${project.title} ready`
-        return yield* new LaunchError({ reason: `T3 Code ${why}, so the thread it made didn't start.` })
-      }
+      // Not named for the scratch project, whose name T3 Code gives as "No project".
+      if (short(first(prepared))) return yield* new LaunchError({ reason: unready(decided.worktree, scratch ? undefined : project.title) })
       const { thread } = prepared.projection
       const level = effort(thread.modelSelection)
+      const ended = yield* Clock.currentTimeMillis
+      yield* Effect.logInfo(`Launched in ${((ended - began) / 1000).toFixed(2)} s after ${polls} ${polls === 1 ? "poll" : "polls"} ${dated(ended)}`)
       return {
         thread: started.thread,
-        project: project.title,
+        project: scratch ? "scratch" : project.title,
         directory: thread.worktreePath ?? project.workspaceRoot,
         branch: thread.branch,
         model: thread.modelSelection.model,
         ...(level === undefined ? {} : { effort: level }),
-        worktree: thread.worktreePath !== null,
+        // T3 Code gives each scratch thread a folder of its own, as it would a worktree, which it isn't.
+        worktree: !scratch && thread.worktreePath !== null,
       } satisfies Started
     }).pipe(heard),
 
   catalog: Effect.gen(function* () {
     const { api, call } = yield* reach
-    const [shell, settings, { providers }] = yield* Effect.all(
+    const [shell, settings, { providers, scratchWorkspaceRoot: root }] = yield* Effect.all(
       [
         api("/api/orchestration/shell", Shell),
         call("server.getSettings", {}, Settings),
@@ -476,9 +614,14 @@ export const launcher = (
       Effect.forEach(shell.projects, (project) => Effect.map(look(project), (found) => [project.id, found] as const), {
         concurrency: "unbounded",
       }).pipe(Effect.map((found) => new Map(found)))
-    const [files, repositories] = yield* Effect.all([each(file), each(({ workspaceRoot }) => repository(workspaceRoot))], {
-      concurrency: "unbounded",
-    })
-    return catalog({ shell, settings, providers, files, repositories })
+    const [files, repositories, resolve] = yield* Effect.all(
+      [
+        each(file),
+        each(({ workspaceRoot }) => repository(workspaceRoot)),
+        root === undefined ? Effect.succeed(undefined) : resolving([root, ...shell.projects.map(({ workspaceRoot }) => workspaceRoot)]),
+      ],
+      { concurrency: "unbounded" },
+    )
+    return catalog({ shell, settings, providers, files, repositories, ...(root === undefined || resolve === undefined ? {} : { scratch: { root, resolve } }) })
   }).pipe(heard),
 })

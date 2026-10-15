@@ -1,10 +1,11 @@
-import { Cause, Chunk, Context, Deferred, Effect, Either, Fiber, FiberSet, Layer, Option, PubSub, Queue, Scope, Stream } from "effect"
+import { Cause, Chunk, Clock, Context, Deferred, Effect, Either, Fiber, FiberSet, Layer, Option, PubSub, Queue, Scope, Stream } from "effect"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { Audio } from "./Audio.ts"
+import { Audio, tone, wav } from "./Audio.ts"
 import { defaults } from "./Endpointer.ts"
 import * as Floor from "./Floor.ts"
+import { dated } from "./Latency.ts"
 import { Shortcut } from "./Shortcut.ts"
 import { DictationTranscriber } from "./Transcriber.ts"
 import { Vad } from "./Vad.ts"
@@ -12,13 +13,41 @@ import { extension, Voice } from "./Voice.ts"
 
 // Dictating new work: the user presses the shortcut, talks for as long as they
 // like, pausing to think, and presses it again to send. Updates wait meanwhile.
-// It ends at what they said; what's done with it is up to whoever listens.
+// It ends at what they said, or at nothing; what's done with it is up to
+// whoever listens.
+
+/**
+ * A press of the shortcut that starts a dictation, by the number its
+ * transcript carries, and how many times yapd had been turned on or off by
+ * then, so whoever takes it in can tell it was said before yapd was turned
+ * off, however late it's handed on.
+ */
+export interface Press {
+  readonly press: number
+  readonly turns: number
+  /** When the shortcut was pressed, however late whoever gets ready for it gets to it. */
+  readonly began: number
+}
+
+/** How many times yapd has been turned on or off by now, which each press keeps. */
+export class Turns extends Context.Tag("yapd/Turns")<Turns, Effect.Effect<number>>() {}
+
+/** Whether what was dictated is handed on at once, ahead of those before it still being heard, like "Mute." while yapd is on. */
+export class Ahead extends Context.Tag("yapd/Ahead")<Ahead, (heard: string) => Effect.Effect<boolean>>() {}
 
 export class Dictation extends Context.Tag("yapd/Dictation")<
   Dictation,
   {
-    /** What the user said, each time they send a dictation, in the order they said it. */
-    readonly transcripts: Stream.Stream<string>
+    /** Each press of the shortcut that starts a dictation, as it starts. */
+    readonly presses: Stream.Stream<Press>
+    /**
+     * What the user said, each time a dictation ends, in the order they said
+     * it, but for what goes `Ahead`, with how many seconds of it was speech,
+     * when they stopped talking, however long it took to hear, and the press
+     * it began with: nothing when it came to nothing, like one cancelled or
+     * one that failed, so whoever waited on it knows it's over.
+     */
+    readonly transcripts: Stream.Stream<Press & { readonly heard: string; readonly voiced: number; readonly at: number }>
     /** Drops every dictation not handed on yet, without a sound, like when yapd is turned off. */
     readonly drop: Effect.Effect<void>
   }
@@ -29,6 +58,8 @@ const longest = "5 minutes"
 
 /** Samples in each frame the microphone sends, 32 ms of 16 kHz. */
 const frameLength = 512
+/** Seconds in each frame. */
+const perFrame = frameLength / 16000
 /** Frames Whisper hears at once, just under its 30 seconds. */
 const whole = Math.floor((29 * 16000) / frameLength)
 /** Frames kept either side of speech, so no word is clipped. */
@@ -104,53 +135,16 @@ const cues = {
   ],
 } as const
 
-/** Kokoro's rate, which the helper already plays at. */
-const rate = 24000
-/** Well under yapd's voice. */
-const level = 0.12
-/** Each note fades in and out over this, so it doesn't click. */
-const fade = 0.008
-
-/** Soft sine notes, one after the other. */
-export const tone = (notes: ReadonlyArray<readonly [frequency: number, seconds: number]>, sampleRate = rate) => {
-  const parts = notes.map(([frequency, seconds]) => {
-    const length = Math.round(seconds * sampleRate)
-    const edge = Math.round(fade * sampleRate)
-    return Float32Array.from({ length }, (_, i) => {
-      const envelope = Math.min(1, i / edge, (length - 1 - i) / edge)
-      return level * envelope * Math.sin((2 * Math.PI * frequency * i) / sampleRate)
-    })
-  })
-  const joined = new Float32Array(parts.reduce((length, part) => length + part.length, 0))
-  parts.reduce((offset, part) => {
-    joined.set(part, offset)
-    return offset + part.length
-  }, 0)
-  return joined
-}
-
-/** 16-bit mono WAV. */
-export const wav = (samples: Float32Array, sampleRate = rate) => {
-  const bytes = new Uint8Array(44 + samples.length * 2)
-  const view = new DataView(bytes.buffer)
-  const text = (offset: number, value: string) => bytes.set(new TextEncoder().encode(value), offset)
-  text(0, "RIFF")
-  view.setUint32(4, 36 + samples.length * 2, true)
-  text(8, "WAVEfmt ")
-  view.setUint32(16, 16, true)
-  view.setUint16(20, 1, true)
-  view.setUint16(22, 1, true)
-  view.setUint32(24, sampleRate, true)
-  view.setUint32(28, sampleRate * 2, true)
-  view.setUint16(32, 2, true)
-  view.setUint16(34, 16, true)
-  text(36, "data")
-  view.setUint32(40, samples.length * 2, true)
-  samples.forEach((sample, i) => view.setInt16(44 + i * 2, Math.max(-1, Math.min(1, sample)) * 0x7fff, true))
-  return bytes
-}
-
 type End = "Sent" | "Cancelled"
+
+/** How a dictation ended, and when: the press that ended it, however long anything before it took. */
+interface Ending {
+  readonly end: End
+  readonly at: number
+}
+
+/** What a dictation that came to nothing hands on. */
+const silence = { text: "", voiced: 0 }
 
 /**
  * Records the user from the shortcut to the next press, through the helper's
@@ -166,12 +160,19 @@ export const WhisperDictation = Layer.scoped(
     const vad = yield* Vad
     const transcriber = yield* DictationTranscriber
     const voice = yield* Voice
+    const turns = yield* Turns
+    const ahead = yield* Ahead
     const device = Floor.use(yield* Floor.Floor, audio)
     const scope = yield* Effect.scope
     /** Each with how many times dictations were dropped before it was sent, so one handed on just before isn't taken in after. */
-    const transcripts = yield* PubSub.unbounded<{ readonly heard: string; readonly drops: number }>()
+    const transcripts = yield* PubSub.unbounded<Press & { readonly heard: string; readonly voiced: number; readonly at: number; readonly drops: number }>()
+    /** Likewise each press that starts one. */
+    const presses = yield* PubSub.unbounded<Press & { readonly drops: number }>()
     const dictations = yield* FiberSet.make()
     let drops = 0
+    let pressed = 0
+    /** Whether a dictation was heard since yapd started, which loaded the model for it. */
+    let heardOnce = false
 
     const dir = yield* Effect.acquireRelease(
       Effect.promise(() => mkdtemp(join(tmpdir(), "yapd-dictation-"))),
@@ -200,7 +201,7 @@ export const WhisperDictation = Layer.scoped(
       }).pipe(Effect.catchAll((error) => Effect.logWarning(`Could not say "${text}"`, error)))
 
     /** Ends a dictation from this side, unless the shortcut has moved on to the next one. */
-    const cancel = (ended: Deferred.Deferred<End>) => Effect.suspend(() => (ending === ended ? shortcut.cancel : Effect.void))
+    const cancel = (ended: Deferred.Deferred<Ending>) => Effect.suspend(() => (ending === ended ? shortcut.cancel : Effect.void))
 
     /** Each window on its own, since Whisper only hears 30 seconds. Empty when there was no speech. */
     const transcribe = (frames: ReadonlyArray<Float32Array>, voiced: ReadonlyArray<boolean>) =>
@@ -212,11 +213,30 @@ export const WhisperDictation = Layer.scoped(
       })
 
     /**
+     * Logs how long a dictation sent at `at` took to hear, with none of its
+     * words: in how many windows, how much of it was speech, how long after his
+     * last word he pressed, and whether it was the first since the model loaded.
+     */
+    const timed = (voiced: ReadonlyArray<boolean>, at: number) =>
+      Effect.gen(function* () {
+        const now = yield* Clock.currentTimeMillis
+        const count = voiced.filter(Boolean).length < defaults.confirm ? 0 : windows(voiced).length
+        const last = voiced.lastIndexOf(true)
+        const first = !heardOnce
+        heardOnce = true
+        yield* Effect.logInfo(
+          `Dictation: ${count} ${count === 1 ? "window" : "windows"}, ${(voiced.filter(Boolean).length * perFrame).toFixed(1)} s of speech, ${
+            last === -1 ? "no word" : `${((voiced.length - 1 - last) * perFrame).toFixed(1)} s from the last word to the press`
+          }, heard in ${((now - at) / 1000).toFixed(1)} s${first ? ", first since load" : ""} ${dated(now)}`,
+        )
+      })
+
+    /**
      * From the first sound until the microphone is off, holding the speaker and
      * microphone, so the next dictation waits for them rather than have this one
      * turn its microphone off. Nothing without a microphone.
      */
-    const record = (ended: Deferred.Deferred<End>, scope: Scope.Scope) =>
+    const record = (ended: Deferred.Deferred<Ending>, scope: Scope.Scope) =>
       Effect.gen(function* () {
         yield* cue("started")
         const microphone = yield* audio.microphone
@@ -257,9 +277,12 @@ export const WhisperDictation = Layer.scoped(
           Effect.forever,
           Effect.fork,
         )
-        const end = yield* Deferred.await(ended).pipe(
-          Effect.timeoutTo({ duration: longest, onSuccess: (end): End | "Expired" => end, onTimeout: () => "Expired" }),
-        )
+        const sent = yield* Deferred.await(ended).pipe(Effect.timeoutOption(longest))
+        // When it was said, which is what it can be about: the press that sent it, however long the voice detector took to load
+        // or it then takes to hear, or now, for one that went on too long.
+        const { end, at }: { readonly end: End | "Expired"; readonly at: number } = Option.isSome(sent)
+          ? sent.value
+          : { end: "Expired", at: yield* Clock.currentTimeMillis }
         yield* Fiber.interrupt(recording)
         if (end === "Sent") {
           // Also keep frames the helper had delivered before the capture fiber stopped.
@@ -274,49 +297,86 @@ export const WhisperDictation = Layer.scoped(
           yield* Queue.offer(pending, Option.none())
         } else yield* Fiber.interrupt(classified)
         if (end === "Expired") yield* cancel(ended)
-        yield* cue(end === "Sent" ? "sent" : "cancelled")
-        return { end, frames, voiced: Fiber.join(classified).pipe(Effect.as(voiced)) }
+        if (end !== "Sent") {
+          yield* cue("cancelled")
+          return { end, heard: undefined, at }
+        }
+        // Transcribing starts as the cue plays rather than after it, which only says it was sent.
+        const heard = yield* Fiber.join(classified).pipe(
+          Effect.flatMap(() => Effect.map(transcribe(frames, voiced), (text) => ({ text, voiced: voiced.filter(Boolean).length * perFrame }))),
+          Effect.tap(() => timed(voiced, at)),
+          Effect.forkIn(scope),
+        )
+        yield* cue("sent")
+        return { end, heard, at }
       }).pipe(Effect.scoped, device)
 
     /**
-     * `before` is done once the dictation before this one has been dealt with,
-     * which a long one can be after a short one that followed it: what they
-     * said is passed on in the order they said it, since one can build on another.
+     * What a dictation came to, once recorded: the words, or nothing, after
+     * saying why. One that failed came to nothing too, which is passed on like
+     * the rest, so whoever waits on its press knows it's over.
      */
-    const dictate = (ended: Deferred.Deferred<End>, before: Deferred.Deferred<void> | undefined, done: Deferred.Deferred<void>) =>
+    const hear = (ended: Deferred.Deferred<Ending>) =>
       Effect.gen(function* () {
-        // While they talk, which is plenty of time.
-        yield* Effect.forkIn(transcriber.prepare, scope)
-        yield* Floor.take
         const recorded = yield* record(ended, yield* Effect.scope)
+        const nothing = { ...silence, at: recorded?.at ?? (yield* Clock.currentTimeMillis) }
         if (recorded === undefined) {
           yield* cancel(ended)
-          return yield* say("I can't hear you, the microphone is off.")
+          return yield* Effect.as(say("I can't hear you, the microphone is off."), nothing)
         }
-        const { end, frames, voiced } = recorded
-        if (end === "Expired") {
+        if (recorded.end === "Expired") {
           yield* Effect.logInfo("Dictation dropped after five minutes")
-          return yield* say("I stopped listening after five minutes, and dropped that.")
+          return yield* Effect.as(say("I stopped listening after five minutes, and dropped that."), nothing)
         }
-        if (end === "Cancelled") return yield* Effect.logInfo("Dictation cancelled")
-        const heard = yield* voiced.pipe(
-          Effect.flatMap((voiced) => transcribe(frames, voiced)),
+        if (recorded.heard === undefined) return yield* Effect.as(Effect.logInfo("Dictation cancelled"), nothing)
+        const heard = yield* Fiber.join(recorded.heard).pipe(
           Effect.tapError((error) => Effect.logWarning("Could not transcribe the dictation", error)),
           Effect.either,
         )
         if (Either.isLeft(heard)) {
           const error = heard.left
-          if (error._tag === "TranscribeError") return yield* say("Sorry, I couldn't make that out.")
+          if (error._tag === "TranscribeError") return yield* Effect.as(say("Sorry, I couldn't make that out."), nothing)
           // Without a model to hear it, saying it again at once wouldn't help, so they're told what would.
-          return yield* say(
-            error.loading
-              ? "The model for dictation is still downloading. Try again in a minute."
-              : "I couldn't load the model for dictation, so I didn't hear that. I'll try again the next time you dictate.",
+          return yield* Effect.as(
+            say(
+              error.loading
+                ? "The model for dictation is still downloading. Try again in a minute."
+                : "I couldn't load the model for dictation, so I didn't hear that. I'll try again the next time you dictate.",
+            ),
+            nothing,
           )
         }
-        if (heard.right === "") return yield* say("I didn't catch anything.")
-        if (before !== undefined) yield* Deferred.await(before)
-        yield* PubSub.publish(transcripts, { heard: heard.right, drops })
+        if (heard.right.text === "") return yield* Effect.as(say("I didn't catch anything."), nothing)
+        return { ...heard.right, at: recorded.at }
+      }).pipe(
+        Effect.catchAllCause((cause) =>
+          Cause.isInterruptedOnly(cause)
+            ? Effect.failCause(cause)
+            : Effect.logError("Dictation failed", cause).pipe(
+                Effect.zipRight(cancel(ended)),
+                Effect.zipRight(Effect.map(Clock.currentTimeMillis, (at) => ({ ...silence, at }))),
+              ),
+        ),
+      )
+
+    /**
+     * `before` is done once the dictation before this one has been dealt with,
+     * which a long one can be after a short one that followed it: what they
+     * said is passed on in the order they said it, since one can build on
+     * another. What goes `ahead`, like "Mute." while yapd is on, is passed on
+     * at once, never waiting for those before it, which turning off then
+     * drops; those after it still wait for them.
+     */
+    const dictate = (press: Press, ended: Deferred.Deferred<Ending>, before: Deferred.Deferred<void> | undefined, done: Deferred.Deferred<void>) =>
+      Effect.gen(function* () {
+        // While they talk, which is plenty of time.
+        yield* Effect.forkIn(transcriber.prepare, scope)
+        yield* Floor.take
+        const heard = yield* hear(ended)
+        const earlier = before === undefined ? Effect.void : Deferred.await(before)
+        if (!(yield* ahead(heard.text))) yield* earlier
+        yield* PubSub.publish(transcripts, { ...press, heard: heard.text, voiced: heard.voiced, at: heard.at, drops })
+        yield* earlier
       }).pipe(
         Effect.ensuring(Deferred.succeed(done, undefined)),
         Effect.scoped,
@@ -327,20 +387,22 @@ export const WhisperDictation = Layer.scoped(
         ),
       )
 
-    let ending: Deferred.Deferred<End> | undefined
+    let ending: Deferred.Deferred<Ending> | undefined
     let last: Deferred.Deferred<void> | undefined
     yield* shortcut.events.pipe(
       Stream.runForEach((event) =>
         Effect.gen(function* () {
           if (event._tag === "Started") {
-            const ended = yield* Deferred.make<End>()
+            const press: Press = { press: ++pressed, turns: yield* turns, began: yield* Clock.currentTimeMillis }
+            const ended = yield* Deferred.make<Ending>()
             const done = yield* Deferred.make<void>()
             const before = last
             ending = ended
             last = done
-            return yield* FiberSet.run(dictations, dictate(ended, before, done))
+            yield* PubSub.publish(presses, { ...press, drops })
+            return yield* FiberSet.run(dictations, dictate(press, ended, before, done))
           }
-          if (ending !== undefined) yield* Deferred.succeed(ending, event._tag)
+          if (ending !== undefined) yield* Deferred.succeed(ending, { end: event._tag, at: yield* Clock.currentTimeMillis })
           ending = undefined
         }),
       ),
@@ -348,7 +410,10 @@ export const WhisperDictation = Layer.scoped(
     )
 
     return {
-      transcripts: Stream.fromPubSub(transcripts).pipe(Stream.filterMap(({ heard, drops: before }) => before === drops ? Option.some(heard) : Option.none())),
+      presses: Stream.fromPubSub(presses).pipe(Stream.filterMap(({ drops: before, ...press }) => (before === drops ? Option.some(press) : Option.none()))),
+      transcripts: Stream.fromPubSub(transcripts).pipe(
+        Stream.filterMap(({ drops: before, ...transcript }) => (before === drops ? Option.some(transcript) : Option.none())),
+      ),
       // Without waiting for them to stop, since nothing they do after can reach anyone.
       drop: Effect.suspend(() => {
         drops++

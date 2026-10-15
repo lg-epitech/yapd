@@ -1,11 +1,10 @@
 import { AutoTokenizer, RawAudio } from "@huggingface/transformers"
 import { Cause, Effect, Queue } from "effect"
-import { rename, rm } from "node:fs/promises"
+import { rm } from "node:fs/promises"
 import * as ort from "onnxruntime-node"
 import * as Hub from "./Hub.ts"
-import { run } from "./Process.ts"
 import { phonemize } from "./vendor/kokoro/phonemize.js"
-import { type Device, join, kokoroRepo as repo, type Reply, type Request, split, voices } from "./Voice.ts"
+import { type Device, ffmpeg, keepsItsStart, kokoroRepo as repo, type Reply, type Request, speaking, voices } from "./Voice.ts"
 
 // Kokoro, in a process of its own that the daemon starts. onnxruntime runs a
 // model on the thread that asks, and in the daemon that froze everything else
@@ -43,16 +42,6 @@ const load = Hub.load(repo, async () => {
   return { file, styles, tokenizer, device: gpu === undefined ? ("CPU" as Device) : device, session: gpu ?? (await open(file, "CPU")) }
 })
 
-const applyEffect = (raw: string, path: string) =>
-  run(["ffmpeg", "-loglevel", "error", "-y", "-i", raw, "-af", effect, path]).pipe(
-    Effect.catchAll((error) =>
-      Effect.sync(() => send({ type: "warning", message: `Could not apply the effect, playing it unprocessed: ${error.stderr}` })).pipe(
-        Effect.zipRight(Effect.promise(() => rename(raw, path))),
-      ),
-    ),
-    Effect.ensuring(Effect.promise(() => rm(raw, { force: true }))),
-  )
-
 const program = Effect.gen(function* () {
   // Its voices don't need the model.
   if (!voices.has(voice)) return yield* Effect.fail(`Unknown voice "${voice}"`)
@@ -71,6 +60,7 @@ const program = Effect.gen(function* () {
       session = cpu
       device = "CPU"
       send({ type: "warning", message: `Kokoro's GPU failed, so it runs on the CPU from now on: ${error}` })
+      send({ type: "device", device })
       await gpu.release().catch(() => {})
       return await session.run(feeds)
     }
@@ -108,28 +98,37 @@ const program = Effect.gen(function* () {
     else if (request.id > handled) cancelled.add(request.id)
   })
   send({ type: "ready", device })
+  // So it's clear why updates wait to be rendered whole before they play.
+  if (!keepsItsStart(effect)) {
+    send({ type: "warning", message: `The effect may change how a first part starts, so updates play once rendered whole: ${effect}` })
+  }
 
-  const render = (text: string, path: string) =>
-    Effect.gen(function* () {
-      const raw = effect === "none" ? path : `${path}.raw.wav`
-      const parts = yield* Effect.forEach(yield* split(text, fits), (part) => Effect.tryPromise(() => speak(part)))
-      yield* Effect.tryPromise(() => new RawAudio(join(parts, rate), rate).save(raw))
-      if (raw !== path) yield* applyEffect(raw, path)
-    })
+  const render = speaking(
+    {
+      rate,
+      fits,
+      speak: (text) => Effect.tryPromise(() => speak(text)),
+      write: (audio, path) => Effect.tryPromise(() => new RawAudio(audio, rate).save(path)),
+      filter: ffmpeg(effect, rate),
+      warn: (message) => send({ type: "warning", message }),
+    },
+    effect,
+  )
 
   /** Answers every request, even one given up on, since the daemon holds the next back until this one is done. */
-  const answer = ({ id, text, path }: Extract<Request, { type: "render" }>) =>
-    cancelled.delete(id)
+  const answer = (request: Extract<Request, { type: "render" }>) => {
+    const { id, path, first } = request
+    return cancelled.delete(id)
       ? Effect.sync(() => send({ type: "cancelled", id }))
-      : render(text, path).pipe(
+      : render(request, (part, words) => send({ type: "part", id, path: part, words }), () => cancelled.has(id)).pipe(
           Effect.matchCauseEffect({
-            onSuccess: () =>
+            onSuccess: (duration) =>
               // Given up on while it rendered, so nobody will remove it.
-              cancelled.delete(id)
-                ? Effect.promise(() => rm(path, { force: true })).pipe(
+              cancelled.delete(id) || duration === undefined
+                ? Effect.promise(() => Promise.all([path, ...(first === undefined ? [] : [first])].map((file) => rm(file, { force: true })))).pipe(
                     Effect.zipRight(Effect.sync(() => send({ type: "cancelled", id }))),
                   )
-                : Effect.sync(() => send({ type: "rendered", id })),
+                : Effect.sync(() => send({ type: "rendered", id, duration })),
             onFailure: (cause) => Effect.sync(() => send({ type: "failed", id, reason: Cause.pretty(cause) })),
           }),
           Effect.ensuring(
@@ -139,6 +138,7 @@ const program = Effect.gen(function* () {
             }),
           ),
         )
+  }
 
   // One at a time: they'd only compete for the same GPU or cores.
   return yield* Queue.take(requests).pipe(Effect.flatMap(answer), Effect.forever)

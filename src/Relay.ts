@@ -46,6 +46,6 @@ export const make = (relays: ReadonlyArray<Relay>): Relays["Type"] => ({
         )
         if (reached) return
       }
-      return yield* new RelayError({ reason: "I can't reach that session from here." })
+      return yield* new RelayError({ reason: "I can't reach that work from here." })
     }),
 })

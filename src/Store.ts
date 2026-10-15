@@ -1,0 +1,233 @@
+import { Database } from "bun:sqlite"
+import { Context, Data, Effect, Layer } from "effect"
+import { mkdir, writeFile } from "node:fs/promises"
+import { dirname, join } from "node:path"
+import { home } from "./Home.ts"
+
+// What yapd knows that nothing else does, like what the user heard and asked
+// for, in one SQLite database on the machine that talks to them. What agents
+// and T3 Code keep is asked of them when needed, never copied here, since a
+// copy would drift. A row about a thread names its machine too, since another
+// machine's threads are only known there.
+
+export const file = join(home, "yapd.sqlite")
+
+export class StoreError extends Data.TaggedError("StoreError")<{ readonly message: string; readonly cause?: unknown }> {}
+
+/**
+ * How the schema came to be, one step at a time. The database counts the
+ * steps it has had in its `user_version`, so each runs once. A feature adds
+ * the tables it needs as a new step at the end, and a step that has shipped
+ * never changes.
+ */
+export const migrations: ReadonlyArray<string> = [
+  // What yapd knows about threads themselves, and the messages it sends them.
+  // A message's ids are chosen before the first try and kept, so a try after
+  // a crash sends the same command. Its title and project are kept as of when
+  // it was held, and where its checkout is, so what became of it can be told
+  // after a restart. `machine`
+  // is what the user calls the machine, so renaming one orphans its rows.
+  `create table threads (
+    machine text not null,
+    id text not null,
+    prompt text,
+    dictated text,
+    description text,
+    started integer not null check (started in (0, 1)),
+    at text not null,
+    primary key (machine, id)
+  ) strict;
+  create table messages (
+    command_id text primary key,
+    message_id text not null,
+    machine text not null,
+    thread text not null,
+    title text not null,
+    project text not null,
+    directory text not null,
+    text text not null,
+    state text not null check (state in ('held', 'sent', 'failed')),
+    reason text,
+    created_at text not null,
+    sent_at text
+  ) strict;
+  create index messages_held on messages (created_at) where state = 'held';`,
+  // Kept with a held message so its reference cannot silently lose its guard on restart.
+  "alter table messages add column reference text;",
+  // What yapd remembers for the user: a journal of everything heard, said and
+  // done, oldest first, so it can be recalled after a restart and built on:
+  // what each update said, what the user answered or asked for, and what came
+  // of it. Times are milliseconds since 1970. `key` is set on what must only
+  // ever be said once, like a thread's question, and `heard_at` once the user
+  // heard it through, answered it or was briefed on it. Settings came before
+  // the steps, so an older database may have them already.
+  `create table if not exists settings (name text primary key, value text not null);
+  create table journal (
+    id integer primary key,
+    at integer not null,
+    kind text not null,
+    machine text,
+    project text,
+    thread text,
+    directory text,
+    said text,
+    text text,
+    utterance text,
+    key text,
+    heard_at integer,
+    detail text
+  ) strict;
+  create index journal_at on journal (at);
+  create index journal_kind_at on journal (kind, at);
+  create index journal_thread on journal (machine, thread, at) where thread is not null;
+  create unique index journal_key on journal (key) where key is not null;
+  create index journal_unheard on journal (at) where heard_at is null and kind in ('update', 'notice');`,
+  // What yapd did to threads for the user, one row for each step it committed
+  // to, written before the step goes out under the ids in it: the same ids
+  // however often the step is worked out again, so T3 Code does it once. It's
+  // a ledger, not an outbox: nothing here is ever sent again on its own, and
+  // nothing waits in it to be sent. `body` is the command as it went out, and
+  // `digest` a message's words as compared for "I sent that a minute ago".
+  `create table actions (
+    command_id text primary key,
+    message_id text,
+    utterance text not null,
+    step integer not null,
+    kind text not null check (kind in ('message','stop','undo','decide','reply','start','tidy','relay')),
+    machine text not null,
+    thread text not null,
+    body text not null,
+    digest text,
+    state text not null check (state in ('prepared','sent','refused','failed','unknown','abandoned')),
+    how text,
+    reason text,
+    at integer not null,
+    settled_at integer
+  ) strict;
+  create index actions_thread on actions (machine, thread, at);
+  create index actions_open on actions (at) where state in ('prepared', 'unknown');
+  create index actions_message on actions (message_id) where message_id is not null;`,
+  // The threads the user muted, whose progress and finished work yapd keeps
+  // to itself until he unmutes them, or until `ends_at`. The key names the
+  // machine and the thread, or the session when there's no thread to tie it
+  // to, so only what it's called aloud and its project are kept beside it.
+  "create table mutes (key text primary key, called text, project text, at integer not null, ends_at integer) strict;",
+  // What he asked to be reminded of: at a time, when a thread finishes or asks
+  // him something, or a message to offer a thread then, which only his yes
+  // ever sends. His words are kept as he said them beside what the model made
+  // of them, and the thread by what it was called aloud, for once it's gone.
+  // Whether he heard it is the journal's, under `remind:<id>`: the id is never
+  // used again, even once older rows are pruned, so that key is always new.
+  `create table reminders (
+    id integer primary key autoincrement,
+    at integer not null,
+    utterance text,
+    heard text not null,
+    text text not null,
+    propose text,
+    due integer,
+    machine text,
+    thread text,
+    called text,
+    event text check (event in ('finished', 'asked')),
+    state text not null check (state in ('pending', 'fired', 'cancelled')),
+    fired_at integer,
+    check (due is not null or event is not null),
+    check ((event is null and propose is null) or (machine is not null and thread is not null))
+  ) strict;
+  create index reminders_due on reminders (due) where state = 'pending' and due is not null;
+  create index reminders_event on reminders (machine, thread) where state = 'pending' and event is not null;`,
+  // What he asked yapd to keep in mind, by voice: a fact, or a routine, steps
+  // sent whenever he says its name. His words are kept as he said them beside
+  // what's kept of them, and the dictation they came in. One forgotten stays,
+  // to be brought back. A routine's name is told by how it's `called`, as
+  // names compare, in any case, spacing or quotes but symbols and all, so
+  // there's only ever one of each kept, and "C" is never "C++"; never reused,
+  // an id forgotten and brought back is always the same memory. An offer of
+  // one of his routines keeps its name beside its steps, which a model is
+  // only ever told of by that name.
+  `create table memories (
+    id integer primary key autoincrement,
+    at integer not null,
+    kind text not null check (kind in ('fact', 'routine')),
+    name text,
+    called text,
+    text text not null,
+    heard text not null,
+    utterance text,
+    forgotten_at integer,
+    check ((kind = 'routine') = (name is not null)),
+    check ((name is null) = (called is null))
+  ) strict;
+  create unique index memories_routine on memories (called) where kind = 'routine' and forgotten_at is null;
+  alter table reminders add column routine text;`,
+]
+
+export class Store extends Context.Tag("yapd/Store")<
+  Store,
+  {
+    /** Runs `work` as one transaction: all of it is kept, or none of it if it throws. */
+    readonly transaction: <A>(work: (database: Database) => A) => Effect.Effect<A, StoreError>
+  }
+>() {}
+
+const version = (database: Database) => database.query<{ user_version: number }, []>("pragma user_version").get()?.user_version ?? 0
+
+/**
+ * Takes the database through the steps it hasn't had. Each step goes with its
+ * count, so a failed one leaves nothing behind, and each reads the count with
+ * the database locked, so a second yapd starting at once can't take one twice.
+ */
+const migrate = (database: Database, steps: ReadonlyArray<string>) => {
+  const next = database.transaction(() => {
+    const had = version(database)
+    if (had > steps.length) {
+      throw new StoreError({ message: `The database is from a newer yapd, at version ${had} where this one knows ${steps.length}.` })
+    }
+    const step = steps[had]
+    if (step === undefined) return false
+    database.exec(step)
+    database.exec(`pragma user_version = ${had + 1}`)
+    return true
+  })
+  while (next.immediate()) {}
+}
+
+/** Opens the database at `path`, or in memory for ":memory:", up to date, and closes it with the scope. */
+export const open = (path: string, steps: ReadonlyArray<string> = migrations) =>
+  Effect.acquireRelease(
+    Effect.tryPromise({
+      try: async () => {
+        if (path !== ":memory:") {
+          await mkdir(dirname(path), { recursive: true })
+          // Private from the start. SQLite gives its journal files the same permissions.
+          await writeFile(path, "", { flag: "a", mode: 0o600 })
+        }
+        const database = new Database(path, { strict: true })
+        try {
+          // Readers don't wait for a writer, and a writer waits its turn instead of failing.
+          database.exec("pragma journal_mode = wal")
+          database.exec("pragma busy_timeout = 5000")
+          database.exec("pragma foreign_keys = on")
+          migrate(database, steps)
+          return database
+        } catch (error) {
+          database.close()
+          throw error
+        }
+      },
+      catch: (cause) => cause instanceof StoreError ? cause : new StoreError({ message: `Could not open ${path}.`, cause }),
+    }),
+    (database) => Effect.sync(() => database.close()),
+  )
+
+export const make = (path: string, steps: ReadonlyArray<string> = migrations) =>
+  Effect.map(open(path, steps), (database): Store["Type"] => ({
+    transaction: (work) =>
+      Effect.try({
+        try: () => database.transaction(() => work(database))(),
+        catch: (cause) => new StoreError({ message: "yapd's database couldn't be read or changed.", cause }),
+      }),
+  }))
+
+export const layer = Layer.scoped(Store, make(file))

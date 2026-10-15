@@ -1,4 +1,4 @@
-import { Data, type Duration, Effect, Either, Redacted, Schema } from "effect"
+import { Data, Deferred, type Duration, Effect, Either, Fiber, Redacted, Schema } from "effect"
 import { homedir } from "node:os"
 import { join } from "node:path"
 
@@ -7,7 +7,7 @@ import { join } from "node:path"
 // takes commands.
 
 /** The orchestration protocol yapd speaks. T3 Code turns away clients that don't name the one it does. */
-const protocol = "2"
+export const protocol = "2"
 
 /** Where the running server says it listens. T3CODE_HOME moves it, as it does for T3 Code. */
 const runtimeState = join(process.env.T3CODE_HOME ?? join(homedir(), ".t3"), "userdata", "server-runtime.json")
@@ -15,10 +15,45 @@ const Server = Schema.parseJson(Schema.Struct({ origin: Schema.String }))
 export type Server = Schema.Schema.Type<typeof Server>
 
 /** T3 Code couldn't be asked, or its answer made no sense. */
-export class Trouble extends Data.TaggedError("Trouble")<{ readonly reason: string; readonly cause?: unknown }> {}
+export class Trouble extends Data.TaggedError("Trouble")<{
+  readonly reason: string
+  readonly cause?: unknown
+  /** The request went out before it went wrong, so T3 Code may have done it. */
+  readonly sent?: boolean
+  /** The file it sent was too large to be an icon: kept however the reason is worded, as for another machine. */
+  readonly tooLarge?: boolean
+}> {}
 
 /** T3 Code was asked and said no, in its own words. */
 export class Refusal extends Data.TaggedError("Refusal")<{ readonly tag: string; readonly message: string }> {}
+
+/** As a logger that writes JSON would print it, or nothing when it can't be. */
+const json = (value: unknown) => {
+  try {
+    return JSON.stringify(value) ?? ""
+  } catch {
+    return ""
+  }
+}
+
+/** Text with the token taken out, wherever it came from, for whatever's logged or said. */
+export const withheld = (text: string, token: Redacted.Redacted) => {
+  const secret = Redacted.value(token)
+  return secret === "" ? text : text.replaceAll(secret, "[token]")
+}
+
+/**
+ * What went wrong, to keep as a cause: as it is, unless the token is
+ * anywhere in it, as the log would print it, and then only how it reads with
+ * the token taken out. Nothing T3 Code or the socket says is known to carry
+ * it, but a cause is printed whole, however deep, so it's never left to chance.
+ */
+export const harmless = (cause: unknown, token: Redacted.Redacted): unknown => {
+  if (cause === undefined) return cause
+  const secret = Redacted.value(token)
+  const printed = [Bun.inspect(cause), json(cause)]
+  return secret !== "" && printed.some((text) => text.includes(secret)) ? withheld(printed[0]!, token) : cause
+}
 
 export const locate = Effect.tryPromise(() => Bun.file(runtimeState).text()).pipe(
   Effect.flatMap(Schema.decodeUnknown(Server)),
@@ -27,41 +62,60 @@ export const locate = Effect.tryPromise(() => Bun.file(runtimeState).text()).pip
 
 const misunderstood = (cause: unknown) => new Trouble({ reason: "T3 Code answered in a way I don't understand.", cause })
 
+/**
+ * Gives up on a request once `patience` is up, by a clock of its own rather
+ * than by cutting the request short: yapd waits on some where nothing can be
+ * cut short, like a step of its own once it's written, and a time limit that
+ * cuts its request short would wait there for good. Given up on, or stopped
+ * itself, it stops the request on the way out, as ever.
+ */
+export const patiently = <A, E, E2>(request: Effect.Effect<A, E>, patience: Duration.DurationInput, late: () => E2): Effect.Effect<A, E | E2> =>
+  Effect.uninterruptibleMask((restore) =>
+    Effect.gen(function* () {
+      const answer = yield* Deferred.make<A, E | E2>()
+      // Each on its own, out of reach of whatever can't be cut short around them, so the first to end is what comes of it.
+      const asking = yield* Effect.forkDaemon(Effect.interruptible(Deferred.complete(answer, request)))
+      const waiting = yield* Effect.forkDaemon(Effect.interruptible(Effect.zipRight(Effect.sleep(patience), Deferred.failSync(answer, late))))
+      return yield* restore(Deferred.await(answer)).pipe(Effect.ensuring(Effect.zipRight(Fiber.interrupt(waiting), Fiber.interrupt(asking))))
+    }),
+  )
+
 export const api =
   (server: Server, token: Redacted.Redacted) =>
   <A, I>(path: string, schema: Schema.Schema<A, I>, init: RequestInit = {}) =>
-    Effect.tryPromise({
-      try: async (signal) => {
-        let response: Response
-        try {
-          response = await fetch(`${server.origin}${path}`, {
-            ...init,
-            headers: {
-              authorization: `Bearer ${Redacted.value(token)}`,
-              "content-type": "application/json",
-              "x-t3-orchestration-protocol": protocol,
-            },
-            signal,
-          })
-        } catch (cause) {
-          throw new Trouble({ reason: "T3 Code isn't answering.", cause })
-        }
-        if (!response.ok) {
-          await response.body?.cancel().catch(() => {})
-          throw response.status === 401 || response.status === 403
-            ? new Trouble({ reason: "T3 Code turned down my token. It may have expired." })
-            : new Trouble({ reason: "T3 Code wouldn't take it.", cause: `${response.status} from ${path}` })
-        }
-        try {
-          return await response.json()
-        } catch (cause) {
-          throw misunderstood(cause)
-        }
-      },
-      catch: (cause) => cause instanceof Trouble ? cause : misunderstood(cause),
-    }).pipe(
-      Effect.flatMap((body) => Effect.mapError(Schema.decodeUnknown(schema)(body), misunderstood)),
-      Effect.timeoutFail({ duration: "5 seconds", onTimeout: () => new Trouble({ reason: "T3 Code isn't answering." }) }),
+    patiently(
+      Effect.tryPromise({
+        try: async (signal) => {
+          let response: Response
+          try {
+            response = await fetch(`${server.origin}${path}`, {
+              ...init,
+              headers: {
+                authorization: `Bearer ${Redacted.value(token)}`,
+                "content-type": "application/json",
+                "x-t3-orchestration-protocol": protocol,
+              },
+              signal,
+            })
+          } catch (cause) {
+            throw new Trouble({ reason: "T3 Code isn't answering.", cause })
+          }
+          if (!response.ok) {
+            await response.body?.cancel().catch(() => {})
+            throw response.status === 401 || response.status === 403
+              ? new Trouble({ reason: "T3 Code turned down my token. It may have expired." })
+              : new Trouble({ reason: "T3 Code wouldn't take it.", cause: `${response.status} from ${path}` })
+          }
+          try {
+            return await response.json()
+          } catch (cause) {
+            throw misunderstood(cause)
+          }
+        },
+        catch: (cause) => cause instanceof Trouble ? cause : misunderstood(cause),
+      }).pipe(Effect.flatMap((body) => Effect.mapError(Schema.decodeUnknown(schema)(body), misunderstood))),
+      "5 seconds",
+      () => new Trouble({ reason: "T3 Code isn't answering." }),
     )
 
 const Failure = Schema.Struct({ _tag: Schema.String, message: Schema.String })
@@ -96,76 +150,176 @@ const id = "1"
 
 /**
  * One request over the app's WebSocket, which is closed once it's answered.
- * Closing it sooner would stop what the request started.
+ * Closing it sooner would stop what the request started. Whatever goes wrong
+ * once the request went out, even T3 Code taking too long, says it went out,
+ * since T3 Code may have done it all the same.
  */
 export const call =
   (server: Server, token: Redacted.Redacted) =>
   <A, I>(method: string, payload: unknown, schema: Schema.Schema<A, I>, patience: Duration.DurationInput = "15 seconds") =>
-    Effect.acquireUseRelease(
-      Effect.try({
-        try: () =>
-          new WebSocket(`${server.origin.replace(/^http/, "ws")}/ws?orchestrationProtocol=${protocol}`, {
-            headers: { authorization: `Bearer ${Redacted.value(token)}` },
-          }),
-        catch: (cause) => new Trouble({ reason: "T3 Code isn't answering.", cause }),
+    Effect.suspend(() => {
+      let sent = false
+      return asked(server, token, method, payload, schema, patience, () => {
+        sent = true
+      }).pipe(
+        // With its cause named, since spreading an error leaves its cause behind.
+        Effect.mapError((error) => (error._tag === "Trouble" && sent ? new Trouble({ ...error, cause: error.cause, sent: true }) : error)),
+      )
+    })
+
+/** The request itself, saying through `went` once it has gone out. */
+const asked = <A, I>(
+  server: Server,
+  token: Redacted.Redacted,
+  method: string,
+  payload: unknown,
+  schema: Schema.Schema<A, I>,
+  patience: Duration.DurationInput,
+  went: () => void,
+) =>
+  Effect.acquireUseRelease(
+    Effect.try({
+      try: () =>
+        new WebSocket(`${server.origin.replace(/^http/, "ws")}/ws?orchestrationProtocol=${protocol}`, {
+          headers: { authorization: `Bearer ${Redacted.value(token)}` },
+        }),
+      catch: (cause) => new Trouble({ reason: "T3 Code isn't answering.", cause }),
+    }),
+    (socket) =>
+      Effect.async<unknown, Trouble | Refusal>((resume) => {
+        let open = false
+        let refused = false
+        let cause: unknown
+        socket.onopen = () => {
+          open = true
+          // Without headers, T3 Code stops answering on this socket and doesn't say why.
+          try {
+            socket.send(JSON.stringify({ _tag: "Request", id, tag: method, payload, headers: [] }))
+            went()
+          } catch (cause) {
+            resume(Effect.fail(new Trouble({ reason: "T3 Code isn't answering.", cause })))
+          }
+        }
+        // Bun only says which status it got instead of the upgrade, and T3 Code only turns down credentials.
+        socket.onerror = (event) => {
+          cause = event
+          refused = "message" in event && String(event.message).includes("101")
+        }
+        socket.onclose = () =>
+          resume(
+            Effect.fail(
+              new Trouble({
+                cause,
+                reason: open
+                  ? "T3 Code hung up on me."
+                  : refused
+                    ? "T3 Code turned down my token. It may have expired."
+                    : "T3 Code isn't answering.",
+              }),
+            ),
+          )
+        socket.onmessage = (event) => {
+          const message = Schema.decodeUnknownEither(Message)(event.data)
+          if (Either.isLeft(message)) return resume(Effect.fail(misunderstood(message.left)))
+          if (message.right._tag === "Defect") return resume(Effect.fail(misunderstood(event.data)))
+          if (message.right._tag === "Exit" && message.right.requestId === id) resume(outcome(message.right.exit))
+        }
       }),
-      (socket) =>
-        Effect.async<unknown, Trouble | Refusal>((resume) => {
-          let open = false
-          let refused = false
-          let cause: unknown
-          socket.onopen = () => {
-            open = true
-            // Without headers, T3 Code stops answering on this socket and doesn't say why.
-            try {
-              socket.send(JSON.stringify({ _tag: "Request", id, tag: method, payload, headers: [] }))
-            } catch (cause) {
-              resume(Effect.fail(new Trouble({ reason: "T3 Code isn't answering.", cause })))
-            }
+    (socket) =>
+      Effect.sync(() => {
+        socket.onclose = null
+        socket.onopen = null
+        socket.onmessage = null
+        socket.onerror = null
+        socket.close()
+      }),
+  ).pipe(
+    (request) => patiently(request, patience, () => new Trouble({ reason: "T3 Code is taking too long." })),
+    Effect.flatMap((value) => Effect.mapError(Schema.decodeUnknown(schema)(value), misunderstood)),
+  )
+
+/** The most a file T3 Code sends, like a project's icon, can be: anything larger isn't one. */
+export const largest = 256 * 1024
+
+/** Why a file T3 Code sent wasn't taken: it was larger than `largest`. */
+export const tooLarge = "T3 Code sent a file too large to be an icon."
+
+/** Reads a body up to `most` bytes, and none past that. */
+const capped = async (response: Response, most: number) => {
+  const reader = response.body?.getReader()
+  if (reader === undefined) return new Uint8Array()
+  const chunks: Array<Uint8Array> = []
+  let size = 0
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    size += value.byteLength
+    if (size > most) {
+      await reader.cancel().catch(() => {})
+      throw new Trouble({ reason: tooLarge, tooLarge: true })
+    }
+    chunks.push(value)
+  }
+  const bytes = new Uint8Array(size)
+  let at = 0
+  for (const chunk of chunks) {
+    bytes.set(chunk, at)
+    at += chunk.byteLength
+  }
+  return bytes
+}
+
+/**
+ * A file T3 Code serves at a signed path, like a project's icon, with its
+ * type. Never with the token, which a signed path doesn't need, nor
+ * following a redirect anywhere else. The path is a key to the file while
+ * it lasts, so nothing that went wrong keeps it, nor anything that could.
+ */
+export const asset =
+  (server: Server) =>
+  (path: string): Effect.Effect<{ readonly bytes: Uint8Array; readonly type: string }, Trouble> =>
+    patiently(
+      Effect.tryPromise({
+        try: async (signal) => {
+          if (!path.startsWith("/")) throw new Trouble({ reason: "T3 Code gave me a file I can't fetch." })
+          let response: Response
+          try {
+            // A redirect is answered as it is, and refused below like any answer that isn't the file.
+            response = await fetch(`${server.origin}${path}`, { redirect: "manual", signal })
+          } catch {
+            throw new Trouble({ reason: "T3 Code isn't answering." })
           }
-          // Bun only says which status it got instead of the upgrade, and T3 Code only turns down credentials.
-          socket.onerror = (event) => {
-            cause = event
-            refused = "message" in event && String(event.message).includes("101")
+          if (!response.ok) {
+            await response.body?.cancel().catch(() => {})
+            throw new Trouble({ reason: response.status === 404 ? "T3 Code no longer has that file." : "T3 Code wouldn't send the file.", cause: response.status })
           }
-          socket.onclose = () =>
-            resume(
-              Effect.fail(
-                new Trouble({
-                  cause,
-                  reason: open
-                    ? "T3 Code hung up on me."
-                    : refused
-                      ? "T3 Code turned down my token. It may have expired."
-                      : "T3 Code isn't answering.",
-                }),
-              ),
-            )
-          socket.onmessage = (event) => {
-            const message = Schema.decodeUnknownEither(Message)(event.data)
-            if (Either.isLeft(message)) return resume(Effect.fail(misunderstood(message.left)))
-            if (message.right._tag === "Defect") return resume(Effect.fail(misunderstood(event.data)))
-            if (message.right._tag === "Exit" && message.right.requestId === id) resume(outcome(message.right.exit))
+          if (Number(response.headers.get("content-length") ?? 0) > largest) {
+            await response.body?.cancel().catch(() => {})
+            throw new Trouble({ reason: tooLarge, tooLarge: true })
           }
-        }),
-      (socket) =>
-        Effect.sync(() => {
-          socket.onclose = null
-          socket.onopen = null
-          socket.onmessage = null
-          socket.onerror = null
-          socket.close()
-        }),
-    ).pipe(
-      Effect.timeoutFail({ duration: patience, onTimeout: () => new Trouble({ reason: "T3 Code is taking too long." }) }),
-      Effect.flatMap((value) => Effect.mapError(Schema.decodeUnknown(schema)(value), misunderstood)),
+          const bytes = await capped(response, largest).catch((error) => {
+            throw error instanceof Trouble ? error : new Trouble({ reason: "T3 Code stopped sending the file." })
+          })
+          return { bytes, type: response.headers.get("content-type") ?? "" }
+        },
+        catch: (cause) => (cause instanceof Trouble ? cause : new Trouble({ reason: "T3 Code stopped sending the file." })),
+      }),
+      "5 seconds",
+      () => new Trouble({ reason: "T3 Code isn't answering." }),
     )
+
+/** Where a machine's T3 Code answers from here, and the token for it. */
+export interface Located {
+  readonly server: Server
+  readonly token: Redacted.Redacted
+}
 
 /** How T3 Code is reached, so tests can stand in for it. */
 export interface Transport {
   readonly api: ReturnType<typeof api>
   readonly call: ReturnType<typeof call>
+  readonly asset: ReturnType<typeof asset>
 }
 
 export const connect = (token: Redacted.Redacted) =>
-  Effect.map(locate, (server): Transport => ({ api: api(server, token), call: call(server, token) }))
+  Effect.map(locate, (server): Transport => ({ api: api(server, token), call: call(server, token), asset: asset(server) }))

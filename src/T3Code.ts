@@ -71,7 +71,8 @@ export const messageDispatch = (thread: ShellThread, text: string) => ({
   createdBy: "user",
   creationSource: "web",
   threadId: thread.id,
-  messageId: crypto.randomUUID(),
+  // Marked as yapd's, so the turn it starts is told of however short: it answers what he said.
+  messageId: `yapd:${crypto.randomUUID()}`,
   text,
   attachments: [],
   dispatchMode: { type: "start_immediately" },

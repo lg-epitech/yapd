@@ -15,6 +15,12 @@ export const Request = Schema.Struct({
   worktree: Schema.optional(Schema.Boolean),
   /** The branch a new worktree starts from. */
   baseBranch: Schema.optional(Schema.String),
+  /**
+   * The ids yapd wrote down before asking, so asking again under them starts
+   * it once. What has no ids of its own, like an agent's command line, goes
+   * without, and a machine whose yapd is older ignores them.
+   */
+  ids: Schema.optional(Schema.Struct({ thread: Schema.String, message: Schema.String, command: Schema.String })),
 })
 export type Request = typeof Request.Type
 
@@ -53,6 +59,11 @@ export const Catalog = Schema.Struct({
       model: Schema.optional(Schema.Struct({ name: Schema.String, effort: Schema.optional(Schema.String) })),
       /** The latest work there, newest first, since the user refers to it: "the latency thing from yesterday". */
       recent: Schema.Array(Schema.Struct({ title: Schema.String, date: Schema.String })),
+      /**
+       * Whether it's T3 Code's scratch project, where work that belongs to no
+       * project starts, each thread in a folder of its own. An older yapd never says.
+       */
+      scratch: Schema.optional(Schema.Boolean),
     }),
   ),
   /** The models that are ready to use. A request can name one by any of its names. */
@@ -68,7 +79,12 @@ export const Catalog = Schema.Struct({
 export type Catalog = typeof Catalog.Type
 
 /** Nothing was started, unless the reason says otherwise. The reason is read out. */
-export class LaunchError extends Data.TaggedError("LaunchError")<{ readonly reason: string; readonly cause?: unknown }> {}
+export class LaunchError extends Data.TaggedError("LaunchError")<{
+  readonly reason: string
+  readonly cause?: unknown
+  /** It was asked for before it went wrong, so it may have started all the same. */
+  readonly sent?: boolean
+}> {}
 
 /** One way of starting agents, like T3 Code's threads. Which one is used comes from configuration, and nothing falls through to another. */
 export interface Launcher {
@@ -76,20 +92,29 @@ export interface Launcher {
   readonly catalog: Effect.Effect<Catalog, LaunchError>
 }
 
-/** Either what started, or the reason nothing did. */
-export const Response = Schema.Struct({ started: Schema.optional(Started), reason: Schema.optional(Schema.String) })
+/** Either what started, or the reason nothing did, and whether it was asked for before that went wrong, so it may have started all the same. */
+export const Response = Schema.Struct({ started: Schema.optional(Started), reason: Schema.optional(Schema.String), sent: Schema.optional(Schema.Boolean) })
 
-/** `yapd start`: starts the work described on stdin and prints how it went. */
-export const serve = (launcher: Launcher, input: string) =>
+/**
+ * What `yapd start` says on stderr once it has what to start, just before it
+ * asks for it. SSH reports a connection that drops before the answer as it
+ * does one it never made, so this is how the machine that asked tells that
+ * it may have started all the same.
+ */
+export const asking = "yapd: asking for it to start."
+
+/** `yapd start`: starts the work described on stdin and prints how it went, doing `asking` once it has what to start, before it asks for it. */
+export const serve = (launcher: Launcher, input: string, asking: Effect.Effect<void> = Effect.void) =>
   Schema.decodeUnknown(Schema.parseJson(Request))(input).pipe(
     Effect.mapError(() => new LaunchError({ reason: "yapd here and on the machine that speaks don't match. Update both." })),
     Effect.filterOrFail(
       ({ prompt }) => prompt.trim() !== "",
       () => new LaunchError({ reason: "I didn't catch what to start." }),
     ),
+    Effect.tap(() => asking),
     Effect.flatMap(launcher.start),
     Effect.map((started) => Response.make({ started })),
-    Effect.catchTag("LaunchError", ({ reason }) => Effect.succeed(Response.make({ reason }))),
+    Effect.catchTag("LaunchError", ({ reason, sent }) => Effect.succeed(Response.make({ reason, ...(sent === true ? { sent } : {}) }))),
     Effect.map((response) => JSON.stringify(response)),
   )
 

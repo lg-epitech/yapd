@@ -1,0 +1,47 @@
+{
+  "at": 1791626400000,
+  "projects": [
+    { "id": "p-integration", "title": "integration", "workspaceRoot": "/code/integration" },
+    { "id": "p-yapd", "title": "yapd", "workspaceRoot": "/code/yapd" }
+  ],
+  "threads": [
+    {
+      "id": "t-tezos",
+      "projectId": "p-integration",
+      "title": "Migrate the Tezos integration",
+      "modelSelection": { "instanceId": "claudeAgent", "model": "claude-opus-5-5" },
+      "activeRunId": "run-3",
+      "activityRunStatus": "running",
+      "status": "running",
+      "latestRunStartedAt": "2026-10-09T09:50:00.000Z",
+      "pendingRuntimeRequest": null,
+      "createdAt": "2026-10-09T08:00:00.000Z",
+      "updatedAt": "2026-10-09T09:55:00.000Z"
+    },
+    {
+      "id": "t-mina",
+      "projectId": "p-integration",
+      "title": "Open the Mina SSV2 bug tickets",
+      "modelSelection": { "instanceId": "claudeAgent", "model": "claude-opus-5-5" },
+      "activeRunId": "run-2",
+      "activityRunStatus": "running",
+      "status": "running",
+      "latestRunStartedAt": "2026-10-09T09:40:00.000Z",
+      "pendingRuntimeRequest": null,
+      "createdAt": "2026-10-09T08:30:00.000Z",
+      "updatedAt": "2026-10-09T09:52:00.000Z"
+    },
+    {
+      "id": "t-menu",
+      "projectId": "p-yapd",
+      "title": "Thread menu and mutes",
+      "modelSelection": { "instanceId": "claudeAgent", "model": "claude-opus-5-5" },
+      "activeRunId": null,
+      "status": "completed",
+      "latestRunCompletedAt": "2026-10-09T09:30:00.000Z",
+      "pendingRuntimeRequest": null,
+      "createdAt": "2026-10-09T07:00:00.000Z",
+      "updatedAt": "2026-10-09T09:30:00.000Z"
+    }
+  ]
+}

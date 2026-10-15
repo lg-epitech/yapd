@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test"
 import { Option } from "effect"
 import type { Catalog } from "./Launcher.ts"
+import type * as Memory from "./Memory.ts"
+import type { Line } from "./Words.ts"
 import * as Writer from "./Writer.ts"
 
 const now = Date.parse("2026-09-29T18:00:00.000Z")
@@ -22,6 +24,7 @@ const catalog: Catalog = {
       ],
     },
     { name: "notes", path: "/code/notes", repository: false, branch: null, worktree: false, recent: [] },
+    { name: "No project", path: "/t3/scratch", repository: false, branch: null, worktree: false, model: { name: "claude-fable-5-1", effort: "high" }, recent: [], scratch: true },
   ],
   models: [
     { name: "claude-fable-5-1", title: "Claude Fable 5.1", aliases: ["fable"], efforts: ["low", "high"] },
@@ -39,12 +42,18 @@ const material = (overrides: Partial<Writer.Material> = {}): Writer.Material => 
   recent: [],
   earlier: [],
   lines: [{ speaker: "user", text: "In yap D, fix the loader." }],
-  research: true,
   now,
   ...overrides,
 })
 
 describe("Writer", () => {
+  test("leaves the line for going ahead out of what's said once work starts, since yapd says one of its own in front", () => {
+    const start = `- For "start", what you say once the session has started, which comes after your usual line that it's in hand, so leave that out: the project, the model, and whether it's in a worktree, like "In yapd, on Fable, in a worktree." or "In yapd, on Fable, without a worktree."`
+    const prompt = Writer.prompt(material(), Option.some("Call me sir."))
+    expect(prompt).toContain(start)
+    expect(prompt).not.toMatch(/\bon it\b/i)
+  })
+
   test("gives the model the user's rules, what can start where, and what they dictated", () => {
     const prompt = Writer.prompt(material(), Option.none())
     expect(prompt).toContain("Their rules, as they wrote them:\nFable on high for hard bugs. No worktree for questions.")
@@ -53,9 +62,27 @@ describe("Writer", () => {
     expect(prompt).toContain(`"Reduce Yapd Response Latency" (2 h ago), "Explore iPhone App Options" (yesterday), "Run Kokoro on the GPU" (9 days ago)`)
     expect(prompt).not.toContain("Something From Long Ago")
     expect(prompt).toContain("- notes (/code/notes), no model yet, not a repository, so no worktree")
+    // T3 Code's scratch project apart from the projects, never as one he could name.
+    expect(prompt).toContain("Outside their projects (scratch): work that belongs to no project starts here, in a folder of its own, last used claude-fable-5-1 high.")
+    expect(prompt).not.toContain("- No project")
+    expect(Writer.vocabulary(material().listings)).not.toContain("No project")
     expect(prompt).toContain("On box: nothing can start there right now. I can't reach box.")
     expect(prompt).toContain("Never guess a project")
     expect(prompt.endsWith("What they dictated:\nIn yap D, fix the loader.")).toBe(true)
+  })
+
+  test("never shows a routine, kept by voice or in his preferences, whose steps only yapd sends for its name said", () => {
+    const memories: ReadonlyArray<Memory.Memory> = [
+      { id: 1, at: now, kind: "fact", text: "rig's T3 Code runs the nightly", heard: "Remember that rig's T3 Code runs the nightly." },
+      { id: 2, at: now, kind: "routine", name: "review it", text: "Have Codex review the diff twice.", heard: "When I say review it, have Codex review the diff twice." },
+    ]
+    const rules = "Fable on high for hard bugs.\n\n## Routines\n\n- land it: Merge the PR once checks pass, then deploy.\n\n### Worktrees\n\nNo worktree for questions."
+    const prompt = Writer.prompt(material({ rules: Option.some(rules), memories }), Option.none())
+    expect(prompt).toContain("Their rules, as they wrote them:\nFable on high for hard bugs.\n\n### Worktrees\n\nNo worktree for questions.")
+    expect(prompt).toContain("- «rig's T3 Code runs the nightly»")
+    for (const routine of ["Routines", "land it", "Merge the PR once checks pass", "review it", "Have Codex review the diff twice"]) expect([routine, prompt.includes(routine)]).toEqual([routine, false])
+    // Rules that are only routines are none.
+    expect(Writer.prompt(material({ rules: Option.some("## Routines\n- land it: Merge the PR.") }), Option.none())).toContain("They have written no rules.")
   })
 
   test("passes on what was read out lately, by the name of the machine it came from", () => {
@@ -92,5 +119,37 @@ describe("Writer", () => {
     expect(answering).toContain(`- "drop" when they call the request off`)
     expect(answering).toContain(`- "wait" when what they said after your question wasn't an answer to it`)
     expect(answering.endsWith("What they dictated:\nFix the loader.\n\nYou asked: Is that yapd or std?\n\nThey said, right after: Never mind.")).toBe(true)
+  })
+
+  test("tells it what of an answer may be its own voice and what he said after a pause, only when it's known yapd could be heard", () => {
+    const answer = (line: Partial<Line> = {}) =>
+      Writer.prompt(
+        material({
+          lines: [
+            { speaker: "user", text: "Fix the loader." },
+            { speaker: "yapd", text: "For the loader fix, is that yapd or std?" },
+            { speaker: "user", text: "Std. Yapd.", ...line },
+          ],
+        }),
+        Option.none(),
+      )
+    expect(answer({ echo: "For the loader fix, is that yapd or std?", afterPause: "Yapd." }).endsWith(
+      `They said, right after: Std. Yapd.\nThey began that while your own voice could still get into their microphone, so what came first may be your own words, from around «For the loader fix, is that yapd or std?», misheard or not, and words that sound like yours there are yours. What they said after a pause, «Yapd.», is surely theirs, even where it repeats your words, like naming one of the projects you offered.`,
+    )).toBe(true)
+    // With nothing after a pause, only the first part.
+    expect(answer({ echo: "For the loader fix, is that yapd or std?" }).endsWith("misheard or not, and words that sound like yours there are yours.")).toBe(true)
+    // Without the note on its own voice, his words alone, as ever.
+    expect(answer({ afterPause: "Yapd." }).endsWith("They said, right after: Std. Yapd.")).toBe(true)
+  })
+
+  test("tells it what of new work may be its own voice and what he said after a pause, only when it's known yapd could be heard", () => {
+    const said = (line: Partial<Line> = {}) => material({ lines: [{ speaker: "user", text: "In a worktree. Start a session in yapd to fix the docs.", ...line }] })
+    const noted = `What they dictated:\nIn a worktree. Start a session in yapd to fix the docs.\nThey began that while your own voice could still get into their microphone, so what came first may be your own words, from around «On Opus, in a worktree.», misheard or not, and words that sound like yours there are yours. What they said after a pause, «Start a session in yapd to fix the docs.», is surely theirs, even where it repeats your words.`
+    const over = { echo: "On Opus, in a worktree.", afterPause: "Start a session in yapd to fix the docs." }
+    expect(Writer.prompt(said(over), Option.none()).endsWith(noted)).toBe(true)
+    // Without the note on its own voice, his words alone, as ever.
+    expect(Writer.prompt(said({ afterPause: "Start a session in yapd to fix the docs." }), Option.none()).endsWith(
+      "What they dictated:\nIn a worktree. Start a session in yapd to fix the docs.",
+    )).toBe(true)
   })
 })

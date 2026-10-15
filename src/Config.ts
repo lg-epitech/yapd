@@ -42,6 +42,11 @@ export const writerModel = optional("YAPD_WRITER_MODEL")
 export const writerEffort = optional("YAPD_WRITER_EFFORT")
 export const writerTier = optional("YAPD_WRITER_TIER")
 
+/** The model that works out what the user says to yapd, on the CLI that writes summaries, with its effort and tier. Each defaults to theirs. */
+export const brainModel = optional("YAPD_BRAIN_MODEL")
+export const brainEffort = optional("YAPD_BRAIN_EFFORT")
+export const brainTier = optional("YAPD_BRAIN_TIER")
+
 /** What the user calls this machine, like "rosie", since a Mac's hostname is rarely it. Defaults to the hostname, without its domain. */
 export const name = optional("YAPD_NAME")
 
@@ -51,10 +56,23 @@ export const preferences = optional("YAPD_PREFERENCES")
 /** How yapd talks, in the user's words, like "Talk like Jarvis and call me sir". Unset, it talks plainly. */
 export const style = optional("YAPD_STYLE")
 
+/**
+ * What yapd says once the user has asked for something, in their own words,
+ * separated by "|", like "Right away, sir.|Very good, sir.". It says a
+ * different one from last time, in place of the line written in their style.
+ */
+export const onIt = Config.string("YAPD_ON_IT").pipe(
+  Config.withDefault(""),
+  Config.map((value) => value.split("|").map((line) => line.trim()).filter((line) => line !== "")),
+)
+
 /** Kokoro voice, see https://huggingface.co/hexgrad/Kokoro-82M/blob/main/VOICES.md */
 export const voice = Config.string("YAPD_VOICE").pipe(Config.withDefault("bm_fable"))
 
-/** ffmpeg audio filter applied to Kokoro's output, or "none". The default is a light Jarvis-style treatment. */
+/**
+ * ffmpeg audio filter applied to Kokoro's output, or "none". The default is a light Jarvis-style treatment. An update's
+ * first sentences only play while the rest renders with filters known to leave them as the whole starts, see Voice.keepsItsStart.
+ */
 export const effect = Config.string("YAPD_EFFECT").pipe(
   Config.withDefault(
     "highpass=f=120,equalizer=f=3000:t=q:w=1:g=3,chorus=0.7:0.9:25:0.25:0.3:2,aecho=0.8:0.5:40|70:0.25|0.15,volume=9dB",

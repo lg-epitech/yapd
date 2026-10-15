@@ -26,12 +26,19 @@ import * as Config from "./Config.ts"
 import * as Helper from "./Helper.ts"
 import { run } from "./Process.ts"
 import * as Shortcut from "./Shortcut.ts"
+import * as Wav from "./Wav.ts"
 
 export class AudioError extends Data.TaggedError("AudioError")<{ readonly message: string; readonly cause?: unknown }> {}
 
 export interface Playback {
   /** In seconds. */
   readonly duration: number
+  /**
+   * Whether it's known to be playing, as the audio helper says once it
+   * starts. afplay can't say, so with it that's only known once `finished`
+   * succeeds, since it may never have started at all.
+   */
+  readonly confirmed: boolean
   /** Completes once it has played to the end. */
   readonly finished: Effect.Effect<void, AudioError>
   /** Stops it and returns how far it got, in seconds. */
@@ -46,15 +53,43 @@ export class Audio extends Context.Tag("yapd/Audio")<
     readonly play: (path: string, from?: number) => Effect.Effect<Playback, AudioError, Scope.Scope>
     /**
      * 32 ms frames of 16 kHz mono from the microphone while playing, with yapd's
-     * own voice cancelled out, so none over the first seconds it says after the
-     * microphone comes on, until that's learnt. None when there's no microphone
-     * to listen to.
+     * own voice cancelled out once that's learnt: see `echo`. None when
+     * there's no microphone to listen to.
      */
     readonly microphone: Effect.Effect<Option.Option<Queue.Dequeue<Float32Array>>, never, Scope.Scope>
+    /**
+     * Whether yapd's own voice may be in a frame from the microphone, so what
+     * sounds like the user may be yapd: while it says its first seconds since
+     * the microphone came on, before the echo cancellation has learnt its
+     * voice. Told as the frame came in, so whoever listens knows even when
+     * running behind.
+     */
+    readonly echo: (frame: Float32Array) => Effect.Effect<boolean>
     /** Turns the microphone off until the next update. */
     readonly rest: Effect.Effect<void>
+    /**
+     * Gets the speaker ready for something about to be said, since macOS takes
+     * about a second to set it up from rest. Nothing when it's ready already.
+     * Whoever calls it rests it again if nothing comes.
+     */
+    readonly warm: Effect.Effect<void>
+    /**
+     * A soft note, so he knows he was heard while what he said is worked
+     * out: only while the microphone is open and nothing else plays, never
+     * over a line, and never starting the helper. Whatever's played next
+     * takes its place. It never counts as speaking.
+     */
+    readonly tick: Effect.Effect<void>
+    /** When the helper last woke from rest, for how long a line waited on the speaker: none before it ever has, nor without it. */
+    readonly woke?: Effect.Effect<Option.Option<Woke>>
   }
 >() {}
+
+/** The helper waking from rest: when it was asked to play, and when it started playing, by the clock. */
+export interface Woke {
+  readonly asked: number
+  readonly playing: number
+}
 
 /** What the speaker and microphone are doing. The microphone is open while yapd speaks too, so that wins. */
 export type Doing = "idle" | "speaking" | "listening"
@@ -67,37 +102,95 @@ export class Activity extends Context.Tag("yapd/Activity")<
   }
 >() {}
 
+/**
+ * How long "speaking" holds once what plays ends, in milliseconds, so what
+ * plays on from it right after, like the rest of a line from its first part,
+ * doesn't have the menu's icon flicker.
+ */
+const between = 250
+
 /** Turns whether something plays and whether the microphone is open into what they're doing, for whoever watches. */
 const reporter = Effect.gen(function* () {
   const ref = yield* SubscriptionRef.make<Doing>("idle")
-  const runSync = Runtime.runSync(yield* Effect.runtime<never>())
+  const runtime = yield* Effect.runtime<never>()
+  const runSync = Runtime.runSync(runtime)
+  const runFork = Runtime.runFork(runtime)
   let last: Doing = "idle"
+  /** What it's doing once speaking is over, told only once nothing has played for a moment. */
+  let after: { doing: Doing } | undefined
+  const set = (doing: Doing) => {
+    if (doing === last) return
+    last = doing
+    runSync(SubscriptionRef.set(ref, doing))
+  }
   return {
     activity: { changes: ref.changes } satisfies Activity["Type"],
     report: (speaking: boolean, listening: boolean) => {
-      const doing = speaking ? "speaking" : listening ? "listening" : "idle"
+      const doing: Doing = speaking ? "speaking" : listening ? "listening" : "idle"
+      if (after !== undefined) {
+        // Playing again in that moment, it never stopped speaking.
+        if (doing === "speaking") after = undefined
+        else after.doing = doing
+        return
+      }
       if (doing === last) return
-      last = doing
-      runSync(SubscriptionRef.set(ref, doing))
+      if (last !== "speaking") return set(doing)
+      const held = { doing }
+      after = held
+      runFork(
+        Effect.sleep(between).pipe(
+          Effect.zipRight(
+            Effect.sync(() => {
+              if (after !== held) return
+              after = undefined
+              set(held.doing)
+            }),
+          ),
+        ),
+      )
     },
   }
 })
 
-/** Plays with afplay, counting each one as it starts and ends. */
-const afplay = (playing: (count: 1 | -1) => void) => (path: string) =>
+/**
+ * Plays with afplay, counting each one as it starts and ends. afplay plays a
+ * file from its start, so from `from` it plays a copy of it from there,
+ * removed once it's played.
+ */
+const afplay = (playing: (count: 1 | -1) => void) => (path: string, from = 0) =>
   Effect.gen(function* () {
+    // Not one it can read, it's played all the same, of a length it can't tell.
+    const duration = yield* Wav.duration(path).pipe(Effect.orElseSucceed(() => 0))
+    const file = from > 0 ? join(tmpdir(), `yapd-from-${crypto.randomUUID()}.wav`) : path
+    const removed = Effect.promise(() => rm(file, { force: true }))
+    if (from > 0) {
+      yield* Effect.acquireRelease(
+        Wav.slice(path, from, file).pipe(Effect.mapError((cause) => new AudioError({ message: "Could not play it from where it's asked", cause }))),
+        () => removed,
+      )
+    }
     const start = yield* Clock.currentTimeMillis
     playing(1)
-    const fiber = yield* Effect.forkScoped(run(["afplay", path]).pipe(Effect.ensuring(Effect.sync(() => playing(-1)))))
+    const fiber = yield* Effect.forkScoped(
+      run(["afplay", file]).pipe(
+        Effect.ensuring(Effect.sync(() => playing(-1))),
+        Effect.ensuring(from > 0 ? removed : Effect.void),
+      ),
+    )
     return {
-      duration: 0,
+      duration,
+      confirmed: false,
       finished: Fiber.join(fiber).pipe(
         Effect.asVoid,
         Effect.mapError((cause) => new AudioError({ message: "Could not play", cause })),
       ),
+      // How far into the file it got, as the helper counts it.
       stop: Fiber.interrupt(fiber).pipe(
         Effect.zipRight(Clock.currentTimeMillis),
-        Effect.map((now) => (now - start) / 1000),
+        Effect.map((now) => {
+          const at = from + (now - start) / 1000
+          return duration > 0 ? Math.min(duration, at) : at
+        }),
       ),
       volume: () => Effect.void,
     } satisfies Playback
@@ -114,7 +207,10 @@ export const AfplayAudio = Layer.effectContext(
         report(playing > 0, false)
       }),
       microphone: Effect.succeed(Option.none()),
+      echo: () => Effect.succeed(false),
       rest: Effect.void,
+      warm: Effect.void,
+      tick: Effect.void,
     }
     return Context.make(Audio, audio).pipe(Context.add(Activity, activity))
   }),
@@ -123,6 +219,7 @@ export const AfplayAudio = Layer.effectContext(
 const Event = Schema.Union(
   Schema.Struct({ type: Schema.Literal("hello", "permission"), permission: Schema.String }),
   Schema.Struct({ type: Schema.Literal("active"), listening: Schema.Boolean }),
+  Schema.Struct({ type: Schema.Literal("rested") }),
   Schema.Struct({ type: Schema.Literal("playing"), id: Schema.String, duration: Schema.Number }),
   Schema.Struct({ type: Schema.Literal("finished"), id: Schema.String }),
   Schema.Struct({ type: Schema.Literal("stopped"), id: Schema.optional(Schema.String), at: Schema.optional(Schema.Number) }),
@@ -147,6 +244,75 @@ const settle = (current: Current, error: AudioError, at: number) => {
   Deferred.unsafeDone(current.finished, Exit.fail(error))
   if (current.stopped !== undefined) Deferred.unsafeDone(current.stopped, Exit.succeed(at))
 }
+
+/** Kokoro's rate, which the helper already plays at. */
+const rate = 24000
+/** Well under yapd's voice. */
+const level = 0.12
+/** Each note fades in and out over this, so it doesn't click. */
+const fade = 0.008
+
+/** Soft sine notes, one after the other. */
+export const tone = (notes: ReadonlyArray<readonly [frequency: number, seconds: number]>, sampleRate = rate) => {
+  const parts = notes.map(([frequency, seconds]) => {
+    const length = Math.round(seconds * sampleRate)
+    const edge = Math.round(fade * sampleRate)
+    return Float32Array.from({ length }, (_, i) => {
+      const envelope = Math.min(1, i / edge, (length - 1 - i) / edge)
+      return level * envelope * Math.sin((2 * Math.PI * frequency * i) / sampleRate)
+    })
+  })
+  const joined = new Float32Array(parts.reduce((length, part) => length + part.length, 0))
+  parts.reduce((offset, part) => {
+    joined.set(part, offset)
+    return offset + part.length
+  }, 0)
+  return joined
+}
+
+/** 16-bit mono WAV. */
+export const wav = (samples: Float32Array, sampleRate = rate) => {
+  const bytes = new Uint8Array(44 + samples.length * 2)
+  const view = new DataView(bytes.buffer)
+  const text = (offset: number, value: string) => bytes.set(new TextEncoder().encode(value), offset)
+  text(0, "RIFF")
+  view.setUint32(4, 36 + samples.length * 2, true)
+  text(8, "WAVEfmt ")
+  view.setUint32(16, 16, true)
+  view.setUint16(20, 1, true)
+  view.setUint16(22, 1, true)
+  view.setUint32(24, sampleRate, true)
+  view.setUint32(28, sampleRate * 2, true)
+  view.setUint16(32, 2, true)
+  view.setUint16(34, 16, true)
+  text(36, "data")
+  view.setUint32(40, samples.length * 2, true)
+  samples.forEach((sample, i) => view.setInt16(44 + i * 2, Math.max(-1, Math.min(1, sample)) * 0x7fff, true))
+  return bytes
+}
+
+/** One short, soft note, like a tap, that he was heard. */
+const tap = wav(tone([[1000, 0.06]]))
+
+/** Twenty milliseconds of 16-bit mono silence at 24 kHz, as a WAV file. */
+const quiet20ms = (() => {
+  const samples = 480
+  const bytes = new Uint8Array(44 + samples * 2)
+  const view = new DataView(bytes.buffer)
+  bytes.set(new TextEncoder().encode("RIFF"), 0)
+  view.setUint32(4, 36 + samples * 2, true)
+  bytes.set(new TextEncoder().encode("WAVEfmt "), 8)
+  view.setUint32(16, 16, true)
+  view.setUint16(20, 1, true)
+  view.setUint16(22, 1, true)
+  view.setUint32(24, 24000, true)
+  view.setUint32(28, 48000, true)
+  view.setUint16(32, 2, true)
+  view.setUint16(34, 16, true)
+  bytes.set(new TextEncoder().encode("data"), 36)
+  view.setUint32(40, samples * 2, true)
+  return bytes
+})()
 
 /**
  * How long yapd talks before the helper's echo cancellation has learnt its
@@ -187,6 +353,12 @@ export const native = (
       ),
     )
     const path = join(dir, "socket")
+    const silence = join(dir, "silence.wav")
+    const ticked = join(dir, "tick.wav")
+    yield* Effect.tryPromise({
+      try: () => Promise.all([Bun.write(silence, quiet20ms), Bun.write(ticked, tap)]),
+      catch: (cause) => new Helper.HelperError({ message: "Could not prepare the audio helper's warm-up and tick", cause }),
+    })
     const runtime = yield* Effect.runtime<never>()
     const runSync = Runtime.runSync(runtime)
     const runFork = yield* FiberSet.makeRuntime<never>()
@@ -195,11 +367,21 @@ export const native = (
     let connection: Socket<Helper.Decoder> | undefined
     let greeted: Deferred.Deferred<void> | undefined
     let current: Current | undefined
+    /** The silence played to get the speaker ready, while it plays. It's nobody's playback. */
+    let warming: string | undefined
+    /** The note that he was heard, while it plays. Nobody's playback either, and never speaking. */
+    let ticking: string | undefined
     let listening = false
     /** How long the echo cancellation has heard yapd for, in what it played to the end or stopped. */
     let heard = 0
     /** When what the helper is playing started, if it's playing. */
     let playingSince: number | undefined
+    /** Whether it has played since it last rested, and when it was asked to play while it was resting, until it does. */
+    let awake = false
+    let waking: number | undefined
+    let woke: Woke | undefined
+    /** The frames yapd's own voice may be in, as they came in. */
+    const echoes = new WeakSet<Float32Array>()
     let permission: string | undefined
     let closing = false
     /** What the socket hasn't taken yet; it's written out once it drains. */
@@ -249,12 +431,24 @@ export const native = (
       if (playingSince !== undefined) heard += now() - playingSince
       playingSince = undefined
     }
-    /** Whether yapd is talking while the echo cancellation is still learning its voice. */
-    const echoing = () => playingSince !== undefined && heard + now() - playingSince < learning
+    /** It rested, or quit, so whatever's played next wakes it. */
+    const asleep = () => {
+      awake = false
+      waking = undefined
+    }
+    /** Asked to play something while it rests, which wakes it. */
+    const wake = () => {
+      if (!awake) waking ??= now()
+    }
 
     const receive = (message: Helper.Message) => {
       if (message.kind === Helper.Kind.pcm) {
-        if (listening && frames !== undefined && !echoing()) runSync(PubSub.publish(frames, new Float32Array(message.payload.buffer)))
+        if (!listening || frames === undefined) return
+        const frame = new Float32Array(message.payload.buffer)
+        // Passed on even while yapd's own voice may be in it, which whoever listens tells from the user by what's said.
+        // Whether it may is told now, in order with what the helper says it played, since they may be running behind.
+        if (playingSince !== undefined && heard + now() - playingSince < learning) echoes.add(frame)
+        runSync(PubSub.publish(frames, frame))
         return
       }
       const event = decodeEvent(new TextDecoder().decode(message.payload))
@@ -276,22 +470,60 @@ export const native = (
           heard = 0
           playingSince = undefined
           return
+        case "rested":
+          // It rested of its own accord, on an engine that didn't play anything, as `rest` asks it to. Said
+          // before that playback fails, so whoever then asks for the microphone hears it's off rather than
+          // listening to one that will never hear anything. An older helper never says.
+          quiet()
+          asleep()
+          runFork(endMicrophone())
+          return
         case "playing":
+          // Awake now, whatever it plays, its warm-up silence too.
+          if (waking !== undefined) woke = { asked: waking, playing: now() }
+          waking = undefined
+          awake = true
+          // Silence, or a note so soft it's never taken for yapd talking, which neither speaks nor teaches the echo cancellation anything.
+          if (event.value.id === warming || event.value.id === ticking) return
           // Playing something new stops what it played before without saying so.
           quiet()
           playingSince = now()
           if (current?.id === event.value.id) Deferred.unsafeDone(current.started, Exit.succeed(event.value.duration))
           return
         case "failed":
+          if (event.value.id === warming) {
+            warming = undefined
+            return
+          }
+          if (event.value.id === ticking) {
+            ticking = undefined
+            return
+          }
           quiet()
           // Also after it started, when the helper couldn't carry on after a device change.
           if (current?.id === event.value.id) settle(current, new AudioError({ message: event.value.message }), 0)
           return
         case "finished":
+          if (event.value.id === warming) {
+            warming = undefined
+            return
+          }
+          if (event.value.id === ticking) {
+            ticking = undefined
+            return
+          }
           quiet()
           if (current?.id === event.value.id) Deferred.unsafeDone(current.finished, Exit.void)
           return
         case "stopped":
+          if (event.value.id !== undefined && event.value.id === warming) {
+            warming = undefined
+            return
+          }
+          if (event.value.id !== undefined && event.value.id === ticking) {
+            ticking = undefined
+            return
+          }
           quiet()
           // Without an id, nothing was playing anymore: it had just finished.
           if (current?.stopped !== undefined && (event.value.id === undefined || event.value.id === current.id)) {
@@ -323,9 +555,12 @@ export const native = (
 
     const disconnected = () => {
       connection = undefined
+      warming = undefined
+      ticking = undefined
       unsent = []
       runFork(endMicrophone())
       quiet()
+      asleep()
       if (current !== undefined) settle(current, new AudioError({ message: "The audio helper quit" }), 0)
       current = undefined
       if (shortcut !== undefined) runSync(shortcut.quit)
@@ -438,7 +673,11 @@ export const native = (
               return Option.getOrElse(at, () => 0)
             })
             current = playback
+            // It replaces the silence, or the note, if that's still playing.
+            warming = undefined
+            ticking = undefined
             yield* Effect.addFinalizer(() => stop)
+            wake()
             send({ type: "play", id: playback.id, path: file, from })
             playback.duration = yield* restore(
               Deferred.await(playback.started).pipe(
@@ -453,6 +692,7 @@ export const native = (
             const deadline = Duration.seconds(Math.max(0, playback.duration - from) + 10)
             return {
               duration: playback.duration,
+              confirmed: true,
               finished: Deferred.await(playback.finished).pipe(
                 Effect.timeoutFail({ duration: deadline, onTimeout: () => new AudioError({ message: "Playback never finished" }) }),
               ),
@@ -476,14 +716,32 @@ export const native = (
       microphone: Effect.suspend(() =>
         listening && frames !== undefined ? Effect.map(PubSub.subscribe(frames), Option.some) : Effect.succeed(Option.none()),
       ),
+      echo: (frame) => Effect.sync(() => echoes.has(frame)),
+      // Playing anything sets the helper up, so it plays a moment's silence. It isn't heard, and isn't waited for.
+      warm: Effect.sync(() => {
+        if (connection === undefined || listening || current !== undefined || warming !== undefined) return
+        warming = crypto.randomUUID()
+        wake()
+        send({ type: "play", id: warming, path: silence, from: 0 })
+      }),
+      // Over a line, the helper would stop it without a word, leaving it never to finish: so only while nothing plays, not even afplay.
+      tick: Effect.sync(() => {
+        if (connection === undefined || !listening || current !== undefined || warming !== undefined || ticking !== undefined || afplaying > 0) return
+        ticking = crypto.randomUUID()
+        send({ type: "play", id: ticking, path: ticked, from: 0 })
+      }),
       rest: Effect.suspend(() => {
+        warming = undefined
+        ticking = undefined
         send({ type: "rest" })
         // It stops whatever it's playing without saying so.
         quiet()
+        asleep()
         const ended = endMicrophone()
         reportActivity()
         return ended
       }),
+      woke: Effect.sync(() => Option.fromNullable(woke)),
     }
     return Context.make(Audio, audio).pipe(
       Context.add(Shortcut.Shortcut, shortcut?.service ?? Shortcut.none),

@@ -1,0 +1,641 @@
+import Foundation
+
+// What the app knows of yapd's state, and how the panel follows the card it
+// points at, apart from AppKit and SwiftUI, so that app/checks can build them
+// with swiftc on their own and check them.
+
+/// What `GET /state` returns.
+struct Status: Decodable {
+  struct Update: Decodable, Identifiable, Equatable {
+    let id: String
+    let text: String
+  }
+
+  /// The card yapd is showing, as `/state` points at it.
+  struct Showing: Decodable, Equatable {
+    let id: String
+    /// ISO 8601, when yapd put it up.
+    let at: String
+    /// The revision yapd put it up or back up at, this time, which a request to take it down is sent with, so it's taken down
+    /// only as it was up then. None from a yapd too old to tell one time a card went up from another.
+    let revision: Int?
+
+    /// Whether it went up a moment ago, rather than before the app was watching.
+    var fresh: Bool {
+      let format = ISO8601DateFormatter()
+      format.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+      guard let at = format.date(from: at) else { return false }
+      return Date().timeIntervalSince(at) < 30
+    }
+  }
+
+  /// A thread by its newest update or notice, as `recent` lists it.
+  struct Recent: Decodable, Identifiable, Equatable {
+    /// The project it's in, when yapd knows it.
+    struct Project: Decodable, Equatable {
+      let name: String
+      /// Only for a project T3 Code has.
+      let id: String?
+      /// None for a project T3 Code doesn't have, and for an icon that can't be read at all.
+      let icon: Icon?
+
+      private enum CodingKeys: String, CodingKey { case name, id, icon }
+
+      init(name: String, id: String? = nil, icon: Icon? = nil) {
+        self.name = name
+        self.id = id
+        self.icon = icon
+      }
+
+      init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        name = try container.decode(String.self, forKey: .name)
+        id = try? container.decodeIfPresent(String.self, forKey: .id)
+        // An icon the app can't read leaves the row as it is, drawn by the project's name.
+        icon = try? container.decodeIfPresent(Icon.self, forKey: .icon)
+      }
+    }
+
+    /// The thread a subagent's row is part of, which its subagents being read goes by, and whether it's muted.
+    struct Head: Decodable, Equatable {
+      /// What its subagents are read by, as a name, never taken apart.
+      let key: String
+      let title: String
+      /// Whether that thread is muted, which mutes the subagent too, whatever its own mute. Not from a yapd from before it, or
+      /// what the app can't read of it.
+      let muted: Bool
+
+      private enum CodingKeys: String, CodingKey { case key, title, muted }
+
+      init(key: String, title: String, muted: Bool = false) {
+        self.key = key
+        self.title = title
+        self.muted = muted
+      }
+
+      init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        key = try container.decode(String.self, forKey: .key)
+        title = try container.decode(String.self, forKey: .title)
+        muted = (try? container.decodeIfPresent(Bool.self, forKey: .muted)) ?? false
+      }
+    }
+
+    /// What it's muted and heard again by, as a name, never taken apart.
+    let key: String
+    let machine: String
+    /// T3 Code's id for it, or none for a session yapd can't tie to a thread.
+    let thread: String?
+    let title: String
+    let project: Project?
+    /// What yapd said of its latest update, or would have, had it not been muted.
+    let text: String
+    /// ISO 8601, when the agent's turn ended.
+    let at: String
+    let muted: Bool
+    /// ISO 8601, when the mute ends on its own, if it does.
+    let until: String?
+    /// Whether it waits on him, for an approval or an answer.
+    let waiting: Bool
+    /// Whether it can be heard again: not a terminal session's or an archived thread's older update, which yapd can't reach. A
+    /// yapd from before it doesn't send it, and hears every row again.
+    let replayable: Bool
+    /// How many of its updates and notices he hasn't heard, muted or not. 0 from a yapd from before it.
+    let unheard: Int
+    /// Whether its subagents are read to him, or for a subagent's row, those of the thread it's part of. None for a session's row,
+    /// whose subagents can't be, and from a yapd from before it.
+    let subagents: Bool?
+    /// The thread it's part of, only for a subagent's row.
+    let head: Head?
+
+    var id: String { key }
+
+    /// When the agent's turn ended, unless yapd sent a time the app can't read.
+    var ended: Date? { Status.date(at) }
+
+    private enum CodingKeys: String, CodingKey { case key, machine, thread, title, project, text, at, muted, until, waiting, replayable, unheard, subagents, head }
+
+    init(
+      key: String, machine: String, thread: String? = nil, title: String, project: Project? = nil, text: String, at: String,
+      muted: Bool = false, until: String? = nil, waiting: Bool = false, replayable: Bool = true, unheard: Int = 0,
+      subagents: Bool? = nil, head: Head? = nil
+    ) {
+      self.key = key
+      self.machine = machine
+      self.thread = thread
+      self.title = title
+      self.project = project
+      self.text = text
+      self.at = at
+      self.muted = muted
+      self.until = until
+      self.waiting = waiting
+      self.replayable = replayable
+      self.unheard = max(0, unheard)
+      self.subagents = subagents
+      self.head = head
+    }
+
+    init(from decoder: Decoder) throws {
+      let container = try decoder.container(keyedBy: CodingKeys.self)
+      key = try container.decode(String.self, forKey: .key)
+      machine = try container.decode(String.self, forKey: .machine)
+      thread = try container.decodeIfPresent(String.self, forKey: .thread)
+      title = try container.decode(String.self, forKey: .title)
+      project = try? container.decodeIfPresent(Project.self, forKey: .project)
+      text = try container.decode(String.self, forKey: .text)
+      at = try container.decode(String.self, forKey: .at)
+      muted = try container.decodeIfPresent(Bool.self, forKey: .muted) ?? false
+      until = try? container.decodeIfPresent(String.self, forKey: .until)
+      waiting = (try? container.decodeIfPresent(Bool.self, forKey: .waiting)) ?? false
+      replayable = (try? container.decodeIfPresent(Bool.self, forKey: .replayable)) ?? true
+      unheard = max(0, (try? container.decodeIfPresent(Int.self, forKey: .unheard)) ?? 0)
+      // What the app can't read of either leaves the row as one from a yapd from before them, with no subagents to read: a
+      // subagent's too, whose thread can't be read, rather than offer its own, which yapd turns away.
+      head = try? container.decodeIfPresent(Head.self, forKey: .head)
+      subagents = head == nil && container.contains(.head) ? nil : try? container.decodeIfPresent(Bool.self, forKey: .subagents)
+    }
+  }
+
+  /// One of his reminders still to come, as `reminders` lists it, worded as yapd says it.
+  struct Reminder: Decodable, Identifiable, Equatable {
+    /// What it's cancelled by, as a name, never shown.
+    let id: String
+    /// What it's to tell him, or offer to send a thread: empty when it's only that a thread did what he asked to hear of.
+    let text: String
+    /// When, by yapd's clock, or the thread and what it's to do.
+    let when: String
+
+    /// How the menu names it: what it's to tell him, or else when, cut short when it's long.
+    var label: String {
+      Reminder.cut(text.isEmpty ? when : text)
+    }
+
+    /// What the menu says under it: when, unless that's what it's named by.
+    var detail: String? {
+      text.isEmpty ? nil : Reminder.cut(when)
+    }
+
+    /// All of it, uncut, shown as he hovers over it, so he can read the whole of a long one before cancelling it: what it's to
+    /// tell him, if anything, over when.
+    var whole: String {
+      text.isEmpty ? when : "\(text)\n\(when)"
+    }
+
+    /// Cut short when it's long, as a recent row's label is.
+    private static func cut(_ line: String) -> String {
+      line.count > 60 ? "\(line.prefix(59))…" : line
+    }
+  }
+
+  /// Two letters in one of T3 Code's colours, as T3 Code draws a project with no image, and any icon the app can't draw.
+  struct Monogram: Decodable, Equatable {
+    let text: String
+    /// One of T3 Code's colour names, which `Tint` has.
+    let color: String
+  }
+
+  /// How T3 Code draws a project: its own image, fetched from yapd, an emoji he chose, or a monogram. Each but a monogram
+  /// carries the monogram to draw instead, for an image that won't load or decode.
+  enum Icon: Decodable, Equatable {
+    /// `url` is a path on yapd's API, and `revision` changes only with the image.
+    case image(url: String, revision: String, instead: Monogram?)
+    case emoji(String, instead: Monogram?)
+    case monogram(Monogram)
+
+    private enum CodingKeys: String, CodingKey { case kind, url, revision, emoji, text, color }
+
+    /// The monogram to draw for it when what it is can't be drawn.
+    var instead: Monogram? {
+      switch self {
+      case .image(_, _, let instead), .emoji(_, let instead): instead
+      case .monogram(let monogram): monogram
+      }
+    }
+
+    /// A kind the app doesn't know, or one missing what it needs, is the monogram it carries; with none, it can't be read.
+    init(from decoder: Decoder) throws {
+      let container = try decoder.container(keyedBy: CodingKeys.self)
+      let text = try? container.decodeIfPresent(String.self, forKey: .text)
+      let color = try? container.decodeIfPresent(String.self, forKey: .color)
+      let instead = text.flatMap { text in color.map { Monogram(text: text, color: $0) } }.flatMap { $0.text.isEmpty ? nil : $0 }
+      let kind = try? container.decodeIfPresent(String.self, forKey: .kind)
+      switch kind {
+      case "image":
+        if let url = try? container.decodeIfPresent(String.self, forKey: .url),
+          let revision = try? container.decodeIfPresent(String.self, forKey: .revision)
+        {
+          self = .image(url: url, revision: revision, instead: instead)
+          return
+        }
+      case "emoji":
+        if let emoji = try? container.decodeIfPresent(String.self, forKey: .emoji), !emoji.isEmpty {
+          self = .emoji(emoji, instead: instead)
+          return
+        }
+      default: break
+      }
+      guard let instead else {
+        throw DecodingError.dataCorruptedError(forKey: .kind, in: container, debugDescription: "An icon with nothing the app can draw")
+      }
+      self = .monogram(instead)
+    }
+  }
+
+  /// A time as yapd sends it, ISO 8601, with or without fractions of a second.
+  static func date(_ text: String) -> Date? {
+    let format = ISO8601DateFormatter()
+    format.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    if let date = format.date(from: text) { return date }
+    format.formatOptions = [.withInternetDateTime]
+    return format.date(from: text)
+  }
+
+  let on: Bool
+  let activity: String
+  /// The last updates yapd said, to hear again. None from a yapd that stopped sending them.
+  let updates: [Update]
+  /// The threads with the latest updates, newest first. None from a yapd too old to send them, which the menu shows the
+  /// updates it said for instead.
+  let recent: [Recent]?
+  /// His reminders still to come: those at a time, the soonest first, then those on a thread, the newest first. None from a yapd
+  /// from before them.
+  let reminders: [Reminder]?
+  /// None when no card is up, and from a yapd too old to show cards.
+  let showing: Showing?
+  /// How many times yapd put a card up or took one down, or was asked to take one down, which a card asked to go back up is
+  /// sent with, so it goes back up only if nothing came since. None from a yapd too old to count them.
+  let revision: Int?
+  /// How yapd talks of its own accord. None from a yapd from before modes, which talks as in normal and can't be asked to
+  /// change it, and for a mode the app doesn't know.
+  let mode: Mode?
+  /// ISO 8601, when focus or quiet ends on its own, only while one is on.
+  let until: String?
+  /// How many threads wait on him, on every machine yapd can see. 0 from a yapd from before it.
+  let waiting: Int
+  /// How many updates and notices a catch-up would tell him of now, muted threads aside. 0 from a yapd from before it.
+  let unheard: Int
+  /// Whether yapd answers what it's asked even while it's off, as one that counts what's unheard does. One from before that
+  /// turns a request away while it's off.
+  private let answersOff: Bool
+
+  private enum CodingKeys: String, CodingKey { case on, activity, updates, recent, reminders, showing, revision, mode, until, waiting, unheard }
+
+  init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    on = try container.decode(Bool.self, forKey: .on)
+    activity = try container.decode(String.self, forKey: .activity)
+    updates = try container.decodeIfPresent([Update].self, forKey: .updates) ?? []
+    // A row the app can't read is left out, rather than the whole state.
+    recent = try container.decodeIfPresent([Lenient<Recent>].self, forKey: .recent).map { $0.compactMap(\.value) }
+    reminders = try container.decodeIfPresent([Lenient<Reminder>].self, forKey: .reminders).map { $0.compactMap(\.value) }
+    // An older yapd doesn't send them at all.
+    showing = try container.decodeIfPresent(Showing.self, forKey: .showing)
+    revision = try container.decodeIfPresent(Int.self, forKey: .revision)
+    // What the app can't read of the mode leaves the rest of the state as it is.
+    mode = (try? container.decodeIfPresent(String.self, forKey: .mode)).flatMap(Mode.init(rawValue:))
+    until = mode == nil || mode == .normal ? nil : try? container.decodeIfPresent(String.self, forKey: .until)
+    waiting = max(0, (try? container.decodeIfPresent(Int.self, forKey: .waiting)) ?? 0)
+    unheard = max(0, (try? container.decodeIfPresent(Int.self, forKey: .unheard)) ?? 0)
+    answersOff = container.contains(.unheard)
+  }
+
+  /// Whether yapd answers what it's asked now, as by the shortcut: always, from a yapd that answers while it's off, and
+  /// otherwise only while it's on.
+  var answers: Bool { on || answersOff }
+}
+
+/// How yapd talks of its own accord: `normal` says what finished and what needs him; `focus` and `quiet` say only what needs
+/// him, and hold the rest for later.
+enum Mode: String, Codable, CaseIterable {
+  case normal, focus, quiet
+
+  /// How the menu offers it, each lasting as long as yapd gives it when it isn't told: focus an hour, quiet until 8:00.
+  var item: String {
+    switch self {
+    case .normal: "Normal"
+    case .focus: "Focus for an Hour"
+    case .quiet: "Quiet until Morning"
+    }
+  }
+}
+
+/// What `PUT /state` is sent to change the mode, and nothing else: no `on`, and no `until`, so yapd gives focus an hour and
+/// quiet until the morning, by its own clock.
+struct ModeChange: Encodable, Equatable {
+  let mode: Mode
+}
+
+/// What `POST /utterances` is sent, as if he'd said it by the shortcut.
+struct Utterance: Encodable, Equatable {
+  let text: String
+
+  /// Asks yapd who's waiting on him, so the answer is said, as any answer is. It only reads his threads.
+  static let whoNeedsMe = Utterance(text: "who needs me?")
+  /// Asks yapd to catch him up, in his own words, so its model decides what that means, as it would by the shortcut. It only
+  /// reads what yapd kept, and nothing reaches an agent.
+  static let catchMeUp = Utterance(text: "catch me up")
+}
+
+extension Status {
+  /// What the menu bar icon shows.
+  enum Look: Equatable {
+    /// yapd isn't running.
+    case down
+    case off
+    case speaking
+    case listening
+    /// On and quiet, with a moon in focus or quiet, and a dot while a thread waits on him.
+    case on(moon: Bool, dot: Bool)
+  }
+
+  /// What the icon shows for `state`, none while yapd isn't running.
+  static func look(_ state: Status?) -> Look {
+    guard let state else { return .down }
+    guard state.on else { return .off }
+    switch state.activity {
+    case "speaking": return .speaking
+    case "listening": return .listening
+    default: return .on(moon: state.mode == .focus || state.mode == .quiet, dot: state.waiting > 0)
+    }
+  }
+
+  /// What the menu says of the mode while focus or quiet is on, like "Focus until 3:00 PM", with "tomorrow" when it ends on a
+  /// later day than `now`. None in normal, and from a yapd from before modes.
+  func modeLine(now: Date, zone: TimeZone = .current, locale: Locale = .current) -> String? {
+    let name: String
+    switch mode {
+    case .focus: name = "Focus"
+    case .quiet: name = "Quiet"
+    case .normal, nil: return nil
+    }
+    guard let ends = until.flatMap(Status.date) else { return name }
+    return "\(name) until \(clock(ends, now: now, zone: zone, locale: locale))"
+  }
+
+  /// What the icon tells VoiceOver: what it shows, and while yapd is on and quiet, its mode and the threads waiting on him.
+  static func told(_ state: Status?, now: Date) -> String {
+    switch look(state) {
+    case .down: "yapd isn't running"
+    case .off: "yapd is off"
+    case .speaking: "yapd is speaking"
+    case .listening: "yapd is listening"
+    case .on: (["yapd is on"] + [state?.modeLine(now: now), state?.waitingLine].compactMap { $0 }).joined(separator: ", ")
+    }
+  }
+
+  /// What the menu says of the threads waiting on him, none while there are none.
+  var waitingLine: String? {
+    waiting == 0 ? nil : "\(waiting) \(waiting == 1 ? "Thread" : "Threads") Waiting on You"
+  }
+
+  /// What the menu offers of what he hasn't heard, like "Catch Me Up (3)", none while there's nothing, and from a yapd from
+  /// before it.
+  var unheardLine: String? {
+    unheard == 0 ? nil : "Catch Me Up (\(unheard))"
+  }
+
+  /// What `PUT /state` is sent to have yapd talk in `mode`: none from a yapd from before modes, which would turn it away, and
+  /// none to go back to normal when it's normal already. Focus or quiet asked again starts its time again.
+  func change(to mode: Mode) -> ModeChange? {
+    guard let current = self.mode else { return nil }
+    return current == .normal && mode == .normal ? nil : ModeChange(mode: mode)
+  }
+}
+
+/// A time as the menu says it, like "3:00 PM": with "tomorrow" after it when it's the day after `now`, and its day before it on a
+/// later day, its weekday within the week, like "Fri 9:00 AM", and its date after that, like "Oct 20 at 9:00 AM", as a mute can
+/// end then.
+func clock(_ at: Date, now: Date, zone: TimeZone = .current, locale: Locale = .current) -> String {
+  let format = DateFormatter()
+  format.locale = locale
+  format.timeZone = zone
+  format.dateStyle = .none
+  format.timeStyle = .short
+  var calendar = Calendar(identifier: .gregorian)
+  calendar.timeZone = zone
+  let days = calendar.dateComponents([.day], from: calendar.startOfDay(for: now), to: calendar.startOfDay(for: at)).day ?? 0
+  switch days {
+  case ..<1: return format.string(from: at)
+  case 1: return "\(format.string(from: at)) tomorrow"
+  default:
+    format.setLocalizedDateFormatFromTemplate(days < 7 ? "EEEjmm" : "MMMdjmm")
+    return format.string(from: at)
+  }
+}
+
+/// One of a list, or none when it can't be read, so the rest of the list still is.
+struct Lenient<Value: Decodable>: Decodable {
+  let value: Value?
+
+  init(from decoder: Decoder) throws {
+    value = try? Value(from: decoder)
+  }
+}
+
+/// What `DELETE /cards/current` is sent to take a card down: the card, and the revision it went up at as the state followed last
+/// said, so yapd takes it down only while it's still up as it went up then, and a request that gets there late never takes down
+/// the same card put back up since. Without one, as when yapd is too old to tell, it takes the card down whichever time it went up.
+struct TakeDown: Equatable {
+  let id: String
+  let shown: Int?
+
+  /// As the request asks it.
+  var query: [URLQueryItem] {
+    [URLQueryItem(name: "id", value: id)] + (shown.map { [URLQueryItem(name: "shown", value: String($0))] } ?? [])
+  }
+}
+
+/// What `PUT /cards/current` is sent to put a card back up: the card, and the revision of the state followed last as it was
+/// asked for, so yapd puts it back up only if nothing came since. Without one, as when yapd is too old to count, it goes back up
+/// whatever came since.
+struct PutBack: Encodable, Equatable {
+  let id: String
+  let revision: Int?
+}
+
+/// What came of fetching one of the cards yapd showed lately, from `GET /cards/{id}`.
+enum Fetched: Equatable {
+  case card(Card)
+  /// yapd said it no longer has it, after twenty more or as it restarted since.
+  case missing
+  /// yapd didn't answer, or not with the card, which says nothing of whether it still has it.
+  case failed
+
+  /// What yapd's answer says, `body` and `response` as they came back.
+  init(_ body: Data, _ response: URLResponse) {
+    switch (response as? HTTPURLResponse)?.statusCode {
+    case 200: self = (try? JSONDecoder().decode(Card.self, from: body)).map(Fetched.card) ?? .failed
+    case 404: self = .missing
+    default: self = .failed
+    }
+  }
+}
+
+/// The card the panel shows, following the one yapd points at: put up once it's fetched, which is tried again a few times, a
+/// while apart, as long as yapd still points at it, and taken away when yapd takes it down. What yapd points at is only what
+/// it asks for, so on connecting, even to the same card, it's checked against what the panel actually shows, which may have
+/// faded while yapd was away. A card shown again from the menu is fetched too, and shown only if nothing newer came meanwhile,
+/// and yapd puts it back up only if nothing came there since the state followed last as it was asked for. A card is taken down
+/// at yapd as it went up the time the panel follows, so a request for a card put away that gets there late never takes it down
+/// once it's been put back up since.
+@MainActor
+final class Following {
+  /// What it does with the panel, and asks of yapd.
+  struct Doing {
+    /// One of the cards yapd showed lately, unless yapd no longer has it or fetching it fails.
+    let fetch: @MainActor (String) async -> Fetched
+    /// Puts a card up, `talking` when yapd is about to talk about it.
+    let show: @MainActor (Card, _ talking: Bool) -> Void
+    /// Takes the card away at once.
+    let hide: @MainActor () -> Void
+    /// Has yapd take this card down too, as `DELETE /cards/current?id=&shown=`, which it does only while it's still the one up,
+    /// as it went up then, so a request that gets there late never takes down a card put up since, nor the same one put back up.
+    let takeDown: @MainActor (TakeDown) -> Void
+    /// Has yapd put a card back up, as `PUT /cards/current`, so it points at it again and "hide that" takes it down, unless
+    /// something came since the revision it's sent with: a request that gets there late never undoes it. Done once yapd
+    /// answers, and stopped, unless it's gone already, when the card is superseded first.
+    let putBack: @MainActor (PutBack) async -> Void
+    /// Waits before trying again.
+    let wait: @MainActor (Duration) async -> Void
+  }
+
+  /// How long it waits before each time it tries fetching a card again, once fetching it failed.
+  static let retries: [Duration] = [.seconds(1), .seconds(2), .seconds(4)]
+
+  private let doing: Doing
+  /// The card yapd points at, as its state said last.
+  private(set) var wanted: String?
+  /// The revision that card went up at, as its state said last, or will once yapd puts back up a card shown again, which it's
+  /// taken down at.
+  private(set) var since: Int?
+  /// The card the panel shows, from when it's put up until it's taken away or goes away on its own.
+  private(set) var shown: String?
+  /// yapd's revision, as its state said last.
+  private(set) var revision: Int?
+  /// Whether yapd's state is coming in, so yapd can be told what the panel does.
+  private var connected = false
+  /// A card the panel put away while yapd was away, so wasn't told.
+  private var untold: String?
+  /// Fetching the card yapd points at to put it up, which stops when it points at another.
+  private var putting: Task<Void, Never>?
+  /// Fetching the card asked last to be shown again, which stops when anything newer comes first.
+  private var replaying: Task<Void, Never>?
+  /// How many times the panel was told something newer than a card being fetched to show again, so one whose fetch comes back
+  /// after that, even had it missed being stopped, is left unshown.
+  private var newer = 0
+
+  init(_ doing: Doing) {
+    self.doing = doing
+  }
+
+  /// Follows yapd's state as it comes in, the card it points at and its revision: `connecting` for the first since it was away.
+  func follow(_ showing: Status.Showing?, revision: Int?, connecting: Bool) {
+    connected = true
+    let untold = self.untold
+    self.untold = nil
+    // A card put up or taken down at yapd, or asked to be taken down, even with the same one up or none, comes after a card
+    // asked to be shown again before, which yapd wouldn't put back up now anyway.
+    let moved = revision != self.revision
+    if moved { supersede() }
+    self.revision = revision
+    // The same card put back up since, as by another app, is up anew. Only a state at another revision can say so: until then,
+    // a card shown again from the menu is taken to be up at the revision it's to be put back up at.
+    guard connecting || showing?.id != wanted || (moved && showing?.revision != since) else { return }
+    // What yapd says is up now comes after a card asked to be shown again before, so that one isn't.
+    supersede()
+    wanted = showing?.id
+    since = showing?.revision
+    putting?.cancel()
+    putting = nil
+    guard let showing else {
+      shown = nil
+      return doing.hide()
+    }
+    // Up already, as when yapd comes back before it faded.
+    if shown == showing.id { return }
+    if connecting && (!showing.fresh || showing.id == untold) {
+      // Put up while the app wasn't there to show it, or put away since: it isn't on screen, so yapd takes it down too, and it's kept to show again.
+      shown = nil
+      doing.hide()
+      return doing.takeDown(TakeDown(id: showing.id, shown: showing.revision))
+    }
+    putting = Task { await put(showing.id) }
+  }
+
+  /// yapd's state stopped coming in: what the panel puts away meanwhile, it's told of once it's back.
+  func away() {
+    connected = false
+  }
+
+  /// The panel put a card away, by its close button or by fading: yapd takes it down too, unless it points at another since.
+  func closed(_ id: String) {
+    // Put away since it was asked for, the panel isn't to be put back up by a card shown again late.
+    supersede()
+    if shown == id { shown = nil }
+    guard wanted == id else { return }
+    if connected { doing.takeDown(TakeDown(id: id, shown: since)) } else { untold = id }
+  }
+
+  /// Fetches one of the cards yapd showed lately and shows it again, with nothing said of it, and has yapd put it back up too,
+  /// unless yapd points at another, puts one up or takes one down, or connects, or a card is put away, before it's fetched: what
+  /// came last wins, so a fetch that comes back late never replaces a card put up since or undoes a hide. yapd is asked at the
+  /// revision of the state followed last, so its request, getting there late, never does either. `gone` when yapd says it no
+  /// longer has it; when fetching it fails, as while yapd is slow or restarting, nothing shows, and it can be asked for again.
+  func showAgain(_ id: String, gone: @escaping @MainActor () -> Void) {
+    supersede()
+    let asked = newer
+    let revision = self.revision
+    replaying = Task {
+      let fetched = await doing.fetch(id)
+      // Stopped, a fetch that failed only for that says nothing of whether yapd still has it.
+      guard !Task.isCancelled, asked == newer else { return }
+      let card: Card
+      switch fetched {
+      case .card(let fetched): card = fetched
+      case .missing: return gone()
+      case .failed: return
+      }
+      putting?.cancel()
+      putting = nil
+      wanted = card.id
+      // yapd puts it back up at the revision after the one it's asked at, which is the one its state says it went up at once it
+      // has, so a request to take it down, even put away before that state comes, names it as it's up then: a request for when
+      // it was up before, getting there late, leaves it up.
+      since = revision.map { $0 + 1 }
+      shown = card.id
+      doing.show(card, false)
+      await doing.putBack(PutBack(id: card.id, revision: revision))
+    }
+  }
+
+  /// Once the card being fetched is put up, or given up on, and the one fetched last to show again has come back, shown or not,
+  /// with yapd's answer to putting it back up.
+  func settled() async {
+    await putting?.value
+    await replaying?.value
+  }
+
+  /// Stops showing again a card still being fetched for it, as the panel was told something newer.
+  private func supersede() {
+    newer += 1
+    replaying?.cancel()
+  }
+
+  /// Fetches the card and puts it up, trying again a few times, a while apart, as long as yapd points at it.
+  private func put(_ id: String) async {
+    for wait in [nil] + Self.retries.map(Optional.some) {
+      if let wait { await doing.wait(wait) }
+      guard !Task.isCancelled, wanted == id else { return }
+      // Tried again even when yapd says it no longer has it, only for as long as yapd points at it, which it stops doing then.
+      if case .card(let card) = await doing.fetch(id) {
+        guard !Task.isCancelled, wanted == id else { return }
+        shown = id
+        return doing.show(card, true)
+      }
+    }
+    // Given up on, it isn't on screen, so yapd takes it down too, and it's kept to show again.
+    guard !Task.isCancelled, wanted == id else { return }
+    doing.takeDown(TakeDown(id: id, shown: since))
+  }
+}

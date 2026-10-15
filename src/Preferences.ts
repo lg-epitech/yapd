@@ -1,4 +1,4 @@
-import { Effect, Option } from "effect"
+import { Effect, Option, Ref } from "effect"
 import { join } from "node:path"
 import * as Config from "./Config.ts"
 import { home } from "./Home.ts"
@@ -18,6 +18,87 @@ export const fit = (text: string) => {
   const rules = text.trim()
   return { rules: rules.slice(0, longest), whole: rules.length <= longest }
 }
+
+/** A routine he wrote in the file: what he says, and the steps sent to a thread for it, as he typed them. */
+export interface Routine {
+  readonly name: string
+  readonly steps: string
+}
+
+/** Quotes or backticks around a name, which aren't part of it. */
+const quoted = /^["'`\u201c\u2018]+|["'`\u201d\u2019]+$/g
+
+/** Whether a line is a heading, and if so whether it's that of his routines; undefined for any other line. */
+const headed = (line: string) => {
+  const heading = /^ {0,3}#{1,6}\s+(.*?)[\s#]*$/.exec(line)
+  return heading === null ? undefined : /^routines:?$/i.test(heading[1]!.trim())
+}
+
+/**
+ * His routines: the lines under a "## Routines" heading, up to the next
+ * heading, written "- name: steps", from the whole file, however long, so
+ * none is lost to the cut. Anything else there, and the rest of the file, is
+ * free-form. The first of two called the same, in any case, is the one.
+ */
+export const routines = (text: string): ReadonlyArray<Routine> => {
+  const found: Array<Routine> = []
+  let under = false
+  for (const line of text.split(/\r?\n/)) {
+    const heading = headed(line)
+    if (heading !== undefined) {
+      under = heading
+      continue
+    }
+    const routine = under ? /^\s*[-*+]\s+([^:]+?)\s*:\s*(\S.*?)\s*$/.exec(line) : null
+    if (routine === null) continue
+    const name = routine[1]!.replace(quoted, "").trim()
+    if (name !== "" && !found.some((other) => other.name.toLowerCase() === name.toLowerCase())) found.push({ name, steps: routine[2]! })
+  }
+  return found
+}
+
+/**
+ * The file without his routines, from their heading up to the next heading,
+ * as `routines` reads them: what writes the prompt for new work never sends
+ * them, so it never sees them.
+ */
+export const unroutined = (text: string) => {
+  let under = false
+  return text
+    .split(/\r?\n/)
+    .filter((line) => {
+      under = headed(line) ?? under
+      return !under
+    })
+    .join("\n")
+    .trim()
+}
+
+/**
+ * What reads his routines, each time from the whole file, so a change
+ * applies to the next thing he says. None without a file. One called as yapd
+ * `answers` to already, like "ship it", which with a question open would be
+ * a yes to it, never the routine, is left out, as it's refused said by
+ * voice, and the log says so once, until which are left out changes.
+ */
+export const written = (path: string, answers: (name: string) => boolean) =>
+  Effect.map(Ref.make(""), (warned) =>
+    Effect.gen(function* () {
+      const file = Bun.file(path)
+      const all = (yield* Effect.tryPromise(() => file.exists())) ? routines(yield* Effect.tryPromise(() => file.text())) : []
+      const taken = all.filter(({ name }) => answers(name))
+      const names = taken.map(({ name }) => `"${name}"`).join(", ")
+      if ((yield* Ref.getAndSet(warned, names)) !== names && taken.length > 0) {
+        const [them, it] = taken.length === 1 ? ["routine", "it"] : ["routines", "them"]
+        yield* Effect.logWarning(`I already answer to ${names}, so I'm going without your ${them} called that in ${path}: call ${it} something else`)
+      }
+      return all.filter((routine) => !taken.includes(routine))
+    }).pipe(
+      Effect.catchAll((error) =>
+        Effect.logWarning(`Could not read ${path}, so I'm going without your routines`, error).pipe(Effect.as<ReadonlyArray<Routine>>([])),
+      ),
+    ),
+  )
 
 /** Read each time, so a change applies to the next dictation. None when there's no file, or nothing in it. */
 export const load = (path: string) =>

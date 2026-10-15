@@ -30,6 +30,9 @@ const fail = (text: string): Finding => ({ status: "fail", text })
 
 const mac = process.platform === "darwin" && process.arch === "arm64"
 
+/** Where to read how to fix things, since what's installed from npm has no docs of its own. */
+const guide = "https://github.com/lg-epitech/yapd/blob/master/docs/guide.md"
+
 /** Settings and rules in yapd's home, and none left where they're no longer read. */
 const settings = (folder: string): Array<Finding> => [
   existsSync(Home.settings)
@@ -105,7 +108,7 @@ const daemon = Effect.gen(function* () {
   return [
     mac
       ? fail(`yapd isn't answering on port ${port}. Its log is ${Service.logPath}.`)
-      : warn(`Hooks can't reach yapd at 127.0.0.1:${port}. Forward that port from the Mac that speaks, as docs/guide.md says.`),
+      : warn(`Hooks can't reach yapd at 127.0.0.1:${port}. Forward that port from the Mac that speaks, as ${guide}#agents-on-another-machine says.`),
   ]
 })
 
@@ -182,7 +185,7 @@ const t3code = Effect.gen(function* () {
     Effect.catchAll(({ reason }) =>
       Effect.succeed([
         reason.includes("token")
-          ? fail(`${reason} Issue a new one as docs/guide.md says, and put it in ${Home.settings}.`)
+          ? fail(`${reason} Issue a new one as ${guide}#t3-code says, and put it in ${Home.settings}.`)
           : warn(`${reason} yapd reaches its threads once it is.`),
       ]),
     ),
@@ -205,7 +208,7 @@ const remotes = Effect.gen(function* () {
               : error.code === 255
                 ? fail(`I can't reach ${host} over SSH as ${destination}. yapd needs a key that works without a password.`)
                 : error.code === 127
-                  ? fail(`yapd isn't on ${host}'s PATH for SSH commands. docs/guide.md says how to add it.`)
+                  ? fail(`yapd isn't on ${host}'s PATH for SSH commands. ${guide}#agents-on-another-machine says how to add it.`)
                   : error.stderr.includes("usage: yapd")
                     ? ok(`${host} runs yapd over SSH`)
                     : warn(`yapd on ${host} answered oddly: ${error.stderr.split("\n").at(-1)}`),

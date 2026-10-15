@@ -1,17 +1,17 @@
-import { type Duration, Effect, Either, Schema } from "effect"
+import { type Duration, Effect, Either, Option, Schema } from "effect"
 import * as Launcher from "./Launcher.ts"
 import { Origin } from "./Origin.ts"
 import { Agent } from "./Payload.ts"
 import { ProcessError, run } from "./Process.ts"
 import { type Relay, RelayError, type Relays, type Thread, Unreachable } from "./Relay.ts"
-import * as Research from "./Research.ts"
 
 // Agents on other machines reach the daemon through a tunnel the user sets up,
 // but their follow-ups have to be sent from where they run: T3 Code's API and
 // Codex's queue are local to that machine. So the daemon hands them to
 // `yapd relay` there over SSH, which runs the same relays and says how it went.
-// New work goes the same way, to `yapd start`, `yapd catalog` says what that
-// machine can start, and `yapd research` reads through a project there.
+// New work goes the same way, to `yapd start`, and `yapd catalog` says what
+// that machine can start. `yapd t3` says where its T3 Code listens, for the
+// tunnel to it (`Tunnel.ts`).
 
 /** Hostname, as the machine's hooks report it, to SSH destination. */
 export type Remotes = ReadonlyMap<string, string>
@@ -68,39 +68,74 @@ export type Exec = (command: ReadonlyArray<string>, stdin: string) => Effect.Eff
 const ssh: Exec = (command, stdin) => run(command, { stdin })
 
 /**
+ * The socket of an SSH connection to the machine that's open already, while
+ * there is one. Going through it saves connecting again, which is most of
+ * what a command there takes.
+ */
+export type Master = Effect.Effect<Option.Option<string>>
+
+/** The open connection to each machine, by its hostname in lowercase. */
+export type Masters = (host: string) => Master
+
+const none: Master = Effect.succeed(Option.none())
+
+const nowhere: Masters = () => none
+
+/**
  * Runs a yapd command on another machine and returns the line it answered
  * with. The command is fixed and what it's given goes over stdin: SSH joins its
  * arguments into a shell command, and what names the machine or fills the
- * request came in over the network, or from a model.
+ * request came in over the network, or from a model. With `master`, it goes
+ * through the connection to the machine that's open already. `fail` is told
+ * it was `sent` when the machine stopped answering once it had what it was
+ * asked, which it may have done all the same: when it takes too long, or
+ * when it ends any other way once the command has said `heard.line` on
+ * stderr, which it says once it has it.
  */
-const ask = <E>(
+export const ask = <E>(
   exec: Exec,
   host: string,
   destination: string,
-  command: "relay" | "start" | "catalog" | "research",
+  command: "relay" | "start" | "catalog" | "t3",
   stdin: string,
-  // `silent` and `failed` end the sentences that start with the machine's name.
+  // `silent` and `failed` end the sentences that start with the machine's name, as `heard.cut` does.
   wording: { readonly patience: Duration.DurationInput; readonly silent: string; readonly failed: string },
-  fail: (reason: string, cause?: unknown) => E,
+  fail: (reason: string, cause?: unknown, sent?: boolean) => E,
+  master: Master = none,
+  heard?: { readonly line: string; readonly cut: string },
 ) =>
-  // From /, since Bun would load a .env in the home directory SSH starts in, ahead of yapd's own.
-  exec(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "--", destination, `cd / && yapd ${command}`], stdin).pipe(
+  Effect.flatMap(master, (socket) =>
+    // From /, since Bun would load a .env in the home directory SSH starts in, ahead of yapd's own. When the
+    // connection behind the socket has just gone, SSH connects on its own, as it would without one.
+    exec(
+      [
+        "ssh",
+        ...Option.match(socket, { onNone: () => [], onSome: (path) => ["-S", path] }),
+        // Forwards the user's SSH config sets for the machine would be asked for again with each command, and clash.
+        "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-o", "ClearAllForwardings=yes", "--", destination, `cd / && yapd ${command}`,
+      ],
+      stdin,
+    ),
+  ).pipe(
     Effect.catchTag("ProcessError", (error) =>
       Effect.fail(
-        fail(
-          // 255 is SSH's own failure, 127 the remote shell not finding yapd.
-          error.code === 255
-            ? `I can't reach ${host}.`
-            : error.code === 127
-              ? `yapd isn't on ${host}'s path.`
-              : error.stderr.includes("usage: yapd")
-                ? `yapd on ${host} needs updating.`
-                : `yapd on ${host} ${wording.failed}`,
-          error,
-        ),
+        // Once it said it had it, the connection dropping, which SSH says as it does one it never made, or the command stopping partway.
+        heard !== undefined && error.stderr.split("\n").some((line) => line.trim() === heard.line)
+          ? fail(`${host} ${heard.cut}`, error, true)
+          : fail(
+              // 255 is SSH's own failure, 127 the remote shell not finding yapd.
+              error.code === 255
+                ? `I can't reach ${host}.`
+                : error.code === 127
+                  ? `yapd isn't on ${host}'s path.`
+                  : error.stderr.includes("usage: yapd")
+                    ? `yapd on ${host} needs updating.`
+                    : `yapd on ${host} ${wording.failed}`,
+              error,
+            ),
       ),
     ),
-    Effect.timeoutFail({ duration: wording.patience, onTimeout: () => fail(`${host} ${wording.silent}`) }),
+    Effect.timeoutFail({ duration: wording.patience, onTimeout: () => fail(`${host} ${wording.silent}`, undefined, true) }),
     // The remote shell's startup files may print something first.
     Effect.map((stdout) => stdout.trim().split("\n").at(-1) ?? ""),
   )
@@ -110,7 +145,7 @@ const unknown = (host: string) => `I don't know how to reach ${host}. It needs a
 const garbled = (host: string) => `yapd on ${host} answered in a way I don't understand.`
 
 /** Sends another machine's threads through `yapd relay` there. */
-export const relay = (remotes: Remotes, self: Self, exec: Exec = ssh): Relay => ({
+export const relay = (remotes: Remotes, self: Self, exec: Exec = ssh, masters: Masters = nowhere): Relay => ({
   send: (thread, text) =>
     Effect.gen(function* () {
       if (!elsewhere(self, thread)) return yield* new Unreachable()
@@ -125,6 +160,7 @@ export const relay = (remotes: Remotes, self: Self, exec: Exec = ssh): Relay => 
         JSON.stringify(Request.make({ thread, text })),
         { patience: "30 seconds", silent: "isn't answering, so I don't know if it went through.", failed: "couldn't send it." },
         (reason, cause) => new RelayError({ reason, cause }),
+        masters(host.toLowerCase()),
       )
       const response = yield* decodeResponse(answer).pipe(Effect.mapError((cause) => new RelayError({ reason: garbled(host), cause })))
       if (response.reason !== undefined) return yield* new RelayError({ reason: response.reason })
@@ -136,13 +172,15 @@ export const relay = (remotes: Remotes, self: Self, exec: Exec = ssh): Relay => 
  * machine's own defaults. A worktree can take minutes to fetch and check out,
  * and only a request that rules one out is sure to be quick.
  */
-export const launcher = (host: string, destination: string, exec: Exec = ssh): Launcher.Launcher => {
+export const launcher = (host: string, destination: string, exec: Exec = ssh, master: Master = none): Launcher.Launcher => {
   const refuse = (reason: string, cause?: unknown) => new Launcher.LaunchError({ reason, cause })
   const read = <A, I>(schema: Schema.Schema<A, I>, answer: string) =>
     Schema.decodeUnknown(Schema.parseJson(schema))(answer).pipe(Effect.mapError((cause) => refuse(garbled(host), cause)))
   return {
     start: (request) =>
       Effect.gen(function* () {
+        // Asked for there, it may have started all the same, as T3 Code there says when its answer is lost, or when yapd there stops answering.
+        const failing = (reason: string, cause?: unknown, sent?: boolean) => new Launcher.LaunchError({ reason, cause, ...(sent === true ? { sent } : {}) })
         const answer = yield* ask(
           exec,
           host,
@@ -154,10 +192,16 @@ export const launcher = (host: string, destination: string, exec: Exec = ssh): L
             silent: "isn't answering, so I don't know if it started.",
             failed: "couldn't start it.",
           },
-          refuse,
+          failing,
+          master,
+          { line: Launcher.asking, cut: "cut out partway, so I don't know if it started." },
         )
-        const { started, reason } = yield* read(Launcher.Response, answer)
-        return started ?? (yield* refuse(reason ?? garbled(host)))
+        // yapd there says nothing started in words this one reads, so an answer it can't read may be work that did, in a shape it doesn't
+        // know, or no answer at all, from yapd there stopped partway.
+        const unread = (cause?: unknown) => failing(`yapd on ${host} answered in a way I don't understand, so I don't know if it started.`, cause, true)
+        const { started, reason, sent } = yield* Schema.decodeUnknown(Schema.parseJson(Launcher.Response))(answer).pipe(Effect.mapError(unread))
+        if (started !== undefined) return started
+        return yield* reason === undefined ? unread() : failing(reason, undefined, sent)
       }),
     catalog: Effect.gen(function* () {
       const answer = yield* ask(
@@ -168,26 +212,13 @@ export const launcher = (host: string, destination: string, exec: Exec = ssh): L
         "",
         { patience: "30 seconds", silent: "isn't answering.", failed: "couldn't say what it can start." },
         refuse,
+        master,
       )
       const { catalog, reason } = yield* read(Launcher.Listing, answer)
       return catalog ?? (yield* refuse(reason ?? garbled(host)))
     }),
   }
 }
-
-/** Reads through a project on another machine through `yapd research` there, with that machine's own provider. */
-export const researcher = (host: string, destination: string, exec: Exec = ssh): Research.Researcher =>
-  Research.remote(host, (stdin) =>
-    ask(
-      exec,
-      host,
-      destination,
-      "research",
-      stdin,
-      { patience: Research.patience, silent: "isn't answering.", failed: "couldn't read through the project." },
-      (reason, cause) => new Research.ResearchError({ reason, cause }),
-    ),
-  )
 
 /**
  * Whether a name means this machine: what the user calls it, when they've
@@ -213,25 +244,15 @@ const pick = <A>(
 
 /** The launcher for a machine. `called` is what the user calls this one. */
 export const launchers =
-  (remotes: Remotes, self: Self, own: Launcher.Launcher, exec: Exec = ssh, called?: string) =>
+  (remotes: Remotes, self: Self, own: Launcher.Launcher, exec: Exec = ssh, called?: string, masters: Masters = nowhere) =>
   (machine?: string): Launcher.Launcher =>
     pick(remotes, self, called, machine, {
       own,
-      remote: (host, destination) => launcher(host, destination, exec),
+      remote: (host, destination) => launcher(host, destination, exec, masters(host.toLowerCase())),
       unknown: (reason) => {
         const refused = Effect.fail(new Launcher.LaunchError({ reason }))
         return { start: () => refused, catalog: refused }
       },
-    })
-
-/** What reads through a machine's projects, picked like its launcher. */
-export const researchers =
-  (remotes: Remotes, self: Self, own: Research.Researcher, exec: Exec = ssh, called?: string) =>
-  (machine?: string): Research.Researcher =>
-    pick(remotes, self, called, machine, {
-      own,
-      remote: (host, destination) => researcher(host, destination, exec),
-      unknown: Research.unavailable,
     })
 
 /** The machines work can start on, this one first by what the user calls it, as `launchers` knows them. */

@@ -1,0 +1,5820 @@
+import { Cause, Clock, Context, Duration, Effect, Either, Exit, Fiber, FiberSet, Option } from "effect"
+import { hostname } from "node:os"
+import * as Brain from "./Brain.ts"
+import * as Conversation from "./Conversation.ts"
+import type * as Drafts from "./Drafts.ts"
+import * as Hands from "./Hands.ts"
+import type { Notice } from "./Inbox.ts"
+import * as Latency from "./Latency.ts"
+import { type Entry, type Journal, type Kept, routinesIn, routinesNamed, unroutined } from "./Journal.ts"
+import * as Ledger from "./Ledger.ts"
+import * as Memory from "./Memory.ts"
+import * as Missed from "./Missed.ts"
+import * as Modes from "./Modes.ts"
+import * as Mutes from "./Mutes.ts"
+import { addressed, type Lines, Persona, unaddressed } from "./Persona.ts"
+import type * as Preferences from "./Preferences.ts"
+import * as Questions from "./Questions.ts"
+import * as Reminders from "./Reminders.ts"
+import * as Show from "./Show.ts"
+import * as T3Actions from "./T3Actions.ts"
+import * as Threads from "./Threads.ts"
+import { enough, type Line, once, switches } from "./Words.ts"
+import { ago, type Material } from "./Writer.ts"
+
+// Whatever the user says to yapd itself, by the shortcut or typed, goes through
+// here: worked out first, which has no effect and can be done again while they
+// carry on, then acted on once, one request at a time. yapd keeps at most one
+// question open, and whatever they say next closes it before anything else is
+// done: it answers it or takes its place, so no request is ever left running
+// alongside the one that replaced it, and no question is said twice in the
+// same words.
+
+/** Something the user said to yapd, once the words are settled. */
+export interface Utterance {
+  /** "u" with the time and a few random letters, minted once the words are settled. */
+  readonly id: string
+  readonly heard: string
+  readonly via: "shortcut" | "reply" | "typed"
+  readonly at: number
+  /** Seconds of it that were speech. */
+  readonly voiced: number
+  /** How many times yapd had been turned on or off when it was said, as its shortcut was pressed for a dictation, so nothing is done for it after. */
+  readonly turns: number
+  /**
+   * What yapd was saying around when he began, when that was while its own
+   * voice could still get into the microphone: the first words heard may be
+   * some of it, or his first word lost under it.
+   */
+  readonly echo?: string
+  /** With `echo`, what he said once he carried on after a pause, which is surely his, as yapd had stopped by then. */
+  readonly afterPause?: string
+  /**
+   * With `echo`, whether yapd had said all of the line he began over, and he
+   * ran on past its end: what he said after its last words is his reply to
+   * it, however short, like the "No." of "the Tezos migration. No.".
+   */
+  readonly carried?: true
+  /**
+   * Whether it was said back to a "done" line, in the moment that line
+   * listened after it, run on into it from its last words or not, and the
+   * change that line said yapd just made for him that "scratch that"
+   * reaches, if any, like the message of "On it, sir: the Tezos
+   * migration.": a bare no to it is most likely to that. Nothing else, made
+   * before it or since, nor anything after a line that changed nothing
+   * "scratch that" reaches, like something that didn't go, or what went by
+   * a hook, is taken back without the model.
+   */
+  readonly afterDone?: Brain.Done
+  /**
+   * For the rest of a request, whether what came before it in the same
+   * breath was said back to a "done" line with nothing in it surely his: it
+   * may all be yapd's own words, so nothing of the rest is done either.
+   */
+  readonly echoedBack?: true
+  /**
+   * With `echo`, the routines whose steps what yapd was saying holds, as code
+   * put them in, like an offer of one read as it comes due: a model is only
+   * ever told of what it was saying by their names.
+   */
+  readonly echoRoutines?: ReadonlyArray<string>
+  /**
+   * Said over a question yapd was asking, what it hadn't said of it yet a
+   * moment before he began, as far as where it had got to tells, like its
+   * options and its pick: none when all of it was said, or when that isn't
+   * known, as for what he dictates.
+   */
+  readonly unsaid?: string
+  /**
+   * For the rest of a request, worked out apart from what came before it in
+   * the same breath: all of what he said, as he said it, to keep beside what
+   * the model made of it; "" when some of it may have been yapd's own voice.
+   */
+  readonly whole?: string
+  /**
+   * Handed to yapd from over an update, as the Responder took it for yapd's
+   * to do: whether he's at hand, and whether it's about mutes.
+   */
+  readonly handed?: Brain.Handed
+  /**
+   * Said over an update, the thread it's from and whether that's steered:
+   * nothing written to it by yapd's own hand unless it is.
+   */
+  readonly own?: Brain.Own
+  /**
+   * Said back to something yapd said, when he stopped talking, by the clock,
+   * which what comes of it is timed from: a dictation's is its `at`, when he
+   * pressed to send it.
+   */
+  readonly stopped?: number
+}
+
+/**
+ * What's known of yapd's own voice in what he said back: what it was saying
+ * around when he began, and only with that, what he said after a pause and
+ * the routines whose steps it was saying, by name.
+ */
+const overItself = (said: Brain.Overheard): Pick<Utterance, "echo" | "afterPause" | "echoRoutines"> => Brain.overheard(said)
+
+/**
+ * His words as he said them, for a message or an answer whose words the
+ * model left out: none when he began them while yapd's own voice could
+ * still get into the microphone, since some of them may be yapd's, which
+ * never go to a thread as his.
+ */
+const ownWords = (said: { readonly heard: string; readonly echo?: string }) => (said.echo === undefined ? said.heard : "")
+
+/** His words as they're logged: never what could give a secret away, which is kept out of the log, as out of the journal. */
+const logged = (words: string) => (T3Actions.revealing(words) ? "something that could give a secret away" : words)
+
+/** His words as they're logged in a sentence, in quotes: never what could give a secret away, which is "what he said". */
+const quoted = (words: string) => (T3Actions.revealing(words) ? "what he said" : `"${words}"`)
+
+/** What may all be yapd's own words let go, logged in the same words wherever it's done, so how often that happens can be counted. */
+const notActing = (utterance: Pick<Utterance, "heard">) => Effect.logInfo(`Not acting on it, since ${quoted(utterance.heard)} may have been my own voice`)
+
+/**
+ * Logged as `notActing` has it: what may all be yapd's own words that code
+ * let go without the model, never nothing anyone said, nor what the model
+ * took for talk not meant for it.
+ */
+const fastLetGo = (thought: Pick<Thought, "source" | "decision" | "utterance">) =>
+  thought.source === "fast" && thought.decision.act === "resume" && Brain.mayBeOwn(thought.utterance) && !Brain.saidNothing(thought.utterance)
+    ? notActing(thought.utterance)
+    : Effect.void
+
+/** What a thread asks of the user, which a short answer can settle. */
+export type Asks =
+  | {
+      readonly _tag: "Approval"
+      readonly requestId: string
+      readonly decisions: ReadonlyArray<string>
+      readonly inFull: boolean
+    }
+  | {
+      readonly _tag: "Question"
+      readonly requestId: string
+      readonly questions: Extract<T3Actions.Request, { readonly _tag: "Question" }>["questions"]
+      /** How T3 Code takes the answer: straight to the agent, or as a message, which needs every part it needs. */
+      readonly mode: Extract<T3Actions.Request, { readonly _tag: "Question" }>["mode"]
+      /** The part being asked, from the first. */
+      readonly part: number
+      /** What he answered of the parts before it, by their ids, sent all together once the last is answered. */
+      readonly collected: Readonly<Record<string, Questions.Answer>>
+      /** Whether he heard the part being asked through to yapd's pick. */
+      readonly inFull: boolean
+      /** The part a message he dictated to its thread answered, by its id, which goes whatever comes of the parts after it. */
+      readonly dictated?: string
+    }
+  /** The agent's own message ended on a question. */
+  | { readonly _tag: "Agent" }
+
+/**
+ * What a thread waits on him for that he heard asked, the thread, and when he
+ * first heard all of it, which only what he said after can answer: for a
+ * question, all of the part he's got to, none yet once he's only answered
+ * the one before, so nothing he said before he heard a part answers it.
+ */
+interface Heard {
+  readonly ref: Threads.Ref
+  readonly asks: Exclude<Asks, { readonly _tag: "Agent" }>
+  readonly through: number | undefined
+}
+
+/**
+ * What a thread waits on him for, worded to be asked as the one question
+ * open: an approval, or a question with its options, which his answer
+ * settles in T3 Code for him.
+ */
+export interface Asking {
+  readonly ref: Threads.Ref
+  readonly asks: Exclude<Asks, { readonly _tag: "Agent" }>
+  /** As it's asked: "The Tezos migration wants to push the branch. Say 'approve' if you want it, sir." */
+  readonly asked: string
+  /** What a yes does, after "whether to", or what it's about: "allow the Tezos migration to push the branch". */
+  readonly about: string
+  /** How it's asked again, in other words, each once. */
+  readonly rewordings: ReadonlyArray<string>
+  /** For a question: how each of its parts is put to him. */
+  readonly parts?: ReadonlyArray<Questions.Wording>
+  /** What it's kept as in the journal, under the key it's said once under, ever. */
+  readonly entry: Entry & { readonly key: string }
+  /** The entry it was kept under already, and he never heard, as when yapd restarted while asking it: it's asked under that one. */
+  readonly kept?: number
+}
+
+/** What a thread waits on him for, worded: to be asked, or only told, when it isn't answered by voice, like a secret. */
+export type Worded =
+  | { readonly _tag: "Ask"; readonly asking: Asking }
+  | { readonly _tag: "Tell"; readonly spoken: string; readonly entry: Entry & { readonly key: string } }
+
+/** What "it" means: what the user was just listening to. */
+export type Subject =
+  | { readonly _tag: "Nothing" }
+  | {
+      readonly _tag: "Thread"
+      readonly ref: Threads.Ref
+      readonly said: string
+      readonly more: string
+      readonly asks: Option.Option<Asks>
+      readonly row: number
+      /** The routines whose steps what was said of it holds, as code put them in: a model is only ever told of that by their names. */
+      readonly routines?: ReadonlyArray<string>
+      /** Whether what was said of it came of a request held back as a secret, so it's kept and logged nowhere, said again or not. */
+      readonly withheld?: true
+    }
+  /**
+   * An update from a session T3 Code doesn't run, and what of it was said
+   * last, like an answer over it. Handed over from it, `own`: the thread
+   * it's from, its own or, on another machine, the one it's only known to
+   * be from, which is "it", or none, when its own session is. In the rest of
+   * what's handed over, `went`: the thread the step before went to, when
+   * that's another, which "it" is then, while "this one" is still the update.
+   */
+  | {
+      readonly _tag: "Session"
+      readonly update: Conversation.Update
+      readonly said: string
+      readonly routines?: ReadonlyArray<string>
+      readonly withheld?: true
+      readonly own?: { readonly ref?: Threads.Ref }
+      readonly went?: Threads.Ref
+    }
+  | {
+      readonly _tag: "Answer"
+      readonly said: string
+      readonly about: Option.Option<Threads.Ref>
+      /** What he missed that it told him, by journal entry, which counts as heard once he's heard it to the end, said again or not. */
+      readonly missed?: ReadonlyArray<number>
+      /** Whether it answered him catching up, even with nothing he missed, so what he says back to it is part of catching up. */
+      readonly catchingUp?: true
+      /** The catch-up it was, which asking for more goes on from. */
+      readonly catchup?: Catchup
+      /** The question it asks, if it does: once that's closed, however quietly, it's told rather than asked again (I4). */
+      readonly question?: Open
+      /** The question it was, in the words it was asked in, once it's closed: shown as it was, but told rather than asked again (I4). */
+      readonly asked?: string
+      /**
+       * The routines whose steps what it said holds, as code put them in, like
+       * a routine read back as it's kept: a model is only ever told of what
+       * it said by their names.
+       */
+      readonly routines?: ReadonlyArray<string>
+      /**
+       * Whether it came of a request held back as a secret, like the model's
+       * answer to it, which may say it back in words nothing recognises: said
+       * again, it's kept and logged nowhere either.
+       */
+      readonly withheld?: true
+    }
+
+/**
+ * What a catch-up was about: a thread, by its machine and its id or session,
+ * a project, a machine, what came since when, whether it was what his muted
+ * threads said, or what a thread's subagents said; with how it's named
+ * aloud, when it's one of them.
+ */
+export interface Scope {
+  readonly thread?: { readonly machine: string | undefined; readonly thread: string | undefined }
+  readonly project?: string
+  readonly machine?: string
+  readonly since?: number
+  readonly muted?: true
+  /** The thread whose subagents' it was. */
+  readonly subagents?: Threads.Ref
+  readonly named?: string
+}
+
+/** A catch-up he was told: its scope, what it told him of and what it left out, by journal entry, and the threads it named. */
+export interface Catchup {
+  readonly scope: Scope
+  readonly covered: ReadonlyArray<number>
+  readonly leftOut: ReadonlyArray<number>
+  /** How many threads it left out. */
+  readonly left: number
+  readonly told: ReadonlyArray<{ readonly name: string; readonly ref?: Threads.Ref }>
+}
+
+/** The one question yapd has open, and what it's about. */
+export interface Open {
+  readonly id: string
+  readonly version: number
+  /** Its own, or what a thread waits on him for: an approval, or a question with its options. */
+  readonly kind: "which" | "confirm" | "offer" | "project" | "resend" | "approval" | "question"
+  /** The request it belongs to. */
+  readonly utterance: string
+  /** What the user said in that request. */
+  readonly heard: string
+  /** What yapd was saying around when he began it, when its own voice could still get into the microphone, so what came first may be its own. */
+  readonly echo?: string
+  /** With `echo`, what he said once he carried on after a pause, which is surely his. */
+  readonly afterPause?: string
+  /** With `echo`, the routines whose steps what yapd was saying holds, which a model is only told of by their names. */
+  readonly echoRoutines?: ReadonlyArray<string>
+  /** What was understood, minus what's being asked. */
+  readonly decision: Brain.Decision
+  readonly candidates: ReadonlyArray<Threads.Ref>
+  /** The exact words said: any news, then the question. */
+  readonly asked: string
+  /** What it's about in a few words, for asking it again and letting it go: the request, or the threads it chooses between. */
+  readonly about: string
+  readonly at: number
+  /** For the project of new work: what its prompt is written from. */
+  readonly material: Option.Option<Material>
+  /** For sending again: the command to dispatch again. */
+  readonly resend: Option.Option<string>
+  /** What the question follows, like why a message didn't go, or that it went lately, which is said on its own if he never hears the question. */
+  readonly news?: string
+  /** For what a thread waits on him for: the one request it is, which an answer settles, and nothing else. */
+  readonly asks?: Asks
+  /** For what a thread waits on him for: how it's asked again, in other words, each once. */
+  readonly rewordings?: ReadonlyArray<string>
+  /** For a thread's question: how the part being asked is put to him. */
+  readonly wording?: Questions.Wording
+  /**
+   * After news, the question on its own, like "Send it again?", as whatever
+   * asks it puts it, never worked out from the news, which said on its own
+   * isn't always put as it is before the question. A line saying it again may
+   * leave the news out, and it's still the question asked again (I4).
+   */
+  readonly question?: string
+  /** For an offer he set to be made later, the reminder it is: a yes sends it as any message he sends goes, checked for one sent just before. */
+  readonly reminder?: number
+  /** For a message that's one of his routines' steps, the routine's name, which is all a model is ever told of what a yes sends. */
+  readonly routine?: string
+  /** With `routine`, the question as a model is shown it, when its words hold the steps: the routine by its name in their place. */
+  readonly shown?: string
+  /**
+   * For which of his reminders he meant, its choices, by the ids they're
+   * kept under, in the order they were named: his answer goes to the one he
+   * picked, whatever else he set, cancelled or went off meanwhile.
+   */
+  readonly reminders?: ReadonlyArray<number>
+  /**
+   * For tidying threads: what each of the candidates was called as he was
+   * asked, to name one gone by his yes, and those he was told are busy, which
+   * his yes agrees to archive as they are. Any other busy by then is left out.
+   */
+  readonly tidying?: { readonly called: ReadonlyArray<string>; readonly working: ReadonlyArray<Threads.Ref> }
+  /**
+   * For taking back a step yapd took, asked about by what it did, like a
+   * message said back to a late "On it" after more was sent since: the
+   * step's command, which his yes takes back alone, never one done since.
+   */
+  readonly pinned?: string
+  /**
+   * For taking back a mute, a mode, a reminder, a memory or the catch-up he
+   * changed, asked about by what it did, like "Unmute the Tezos migration?":
+   * that change, by when it was made, which his yes takes back alone, and
+   * only while it's still the last of its kind, never one made since, like a
+   * mute from the menu.
+   */
+  readonly pinnedChange?: Brain.Made
+  /**
+   * Asked of what may all be yapd's own words said back to a "done" line,
+   * whether to stop a thread or take back a change: a yes does that alone,
+   * never any rest the model gives his answer, which may be what it split off
+   * those words.
+   */
+  readonly alone?: boolean
+  /** Asked of what was said over an update, its thread, which an answer to it never writes to by yapd's own hand unless that's steered. */
+  readonly own?: Brain.Own
+  /** Asked of what was handed over from an update: whether it was about mutes, which an answer to it never writes to a thread either. */
+  readonly handed?: Brain.Handed
+}
+
+/** What the user meant, worked out, not yet acted on. */
+export interface Thought {
+  readonly utterance: Utterance
+  readonly subject: Subject
+  readonly decision: Brain.Decision
+  /** The snapshot its handles refer to. */
+  readonly situation: Brain.Situation
+  /** The open question's version it was worked out against. */
+  readonly version: number
+  /** Without the model, by it, or what's said when it couldn't be asked, which changes nothing. */
+  readonly source: "fast" | "model" | "failed"
+}
+
+/** What came of it. */
+export interface Outcome {
+  /** What to say, or "" for nothing. */
+  readonly say: string
+  /** What "it" means next. */
+  readonly subject: Subject
+  /** What kind of thing was said, which picks how long to listen after. */
+  readonly kind: "answer" | "done" | "question" | "none"
+  /** What he missed that it tells him, by journal entry, which counts as heard once he's heard it to the end, and not before. */
+  readonly missed?: ReadonlyArray<number>
+  /** What was decided on a second look, at a thread or at what was found, which the answer is. */
+  readonly second?: Brain.Decision
+  /** What he said looked like a secret, so it wasn't sent, and isn't kept in the journal either. */
+  readonly withheld?: boolean
+  /** A card to put on his screen as it's said. */
+  readonly card?: Show.Draft
+  /** Whether the card holds what couldn't be read aloud, like a command, which makes it the one that goes up when another step of the request has one too. */
+  readonly unreadable?: boolean
+  /** Whether it took his card down, after which only its own card goes up, never one a step before it had. */
+  readonly hides?: boolean
+  /** What's said in place of `say` if no app is there to show its card by the time it's said: the line as it's worked out with none watching. */
+  readonly unseen?: string
+  /**
+   * The line for going ahead said last in its breath, by it or by a step before
+   * it that one without its own, like a stop, follows, which one picked for a
+   * step said after it is kept from being.
+   */
+  readonly onIt?: string
+  /** Run once what's said is known to be playing, like noting the line for going ahead it starts with as the one he heard last. */
+  readonly confirmed?: Effect.Effect<void>
+  /**
+   * What it says yapd just changed for him that "scratch that" reaches, as
+   * `Brain.reached` tells it, when it says one: a step done to a thread that
+   * taking back acts on, like a message sent or queued, a stop, the word to
+   * carry on or a tidy, new work started, a reminder set or cancelled, a
+   * memory kept or forgotten, the catch-up cleared, a mute or a mode. Never
+   * nothing changed, like a mute there already, nor something that didn't
+   * go, nor what taking back does nothing to, like a message withdrawn or an
+   * answer to a thread's question. Said in one line, the newest of them.
+   */
+  readonly changed?: Brain.Change
+  /**
+   * Whether it says a message of his may not have gone, or speaks of sending
+   * one again, without saying its words, like what a restart couldn't
+   * confirm, or "I sent that a minute ago" let go: "send it again" is his
+   * likely reply, which the model could only send the agent as it is, so
+   * nothing said after it is listened for.
+   */
+  readonly unsent?: true
+  /** What it is, for how long it took in the log, when it's more than what was decided, like where work started: "start on rig, in a worktree". */
+  readonly timed?: string
+}
+
+/** What the user says to yapd itself, worked out and acted on. */
+export class Assistant extends Context.Tag("yapd/Assistant")<
+  Assistant,
+  {
+    /** No side effects; it may be called again while the user carries on. */
+    readonly think: (utterance: Utterance, subject: Subject, lines: ReadonlyArray<Line>) => Effect.Effect<Thought>
+    /** Once, one request at a time; thinks once more if the open question changed meanwhile. Never fails. */
+    readonly act: (thought: Thought) => Effect.Effect<Outcome>
+    /**
+     * A dictation, begun with the shortcut `press`, or a typed request: worked
+     * out and acted on, then what came of it said ahead of anything else. None
+     * when yapd is off or was turned off since it was said, however late it's
+     * handed on: then nothing is done for it at all. Turned off while it's
+     * worked out or acted on, it stops there, and is none too.
+     */
+    readonly heard: (utterance: Omit<Utterance, "id">, press?: number) => Effect.Effect<Option.Option<string>>
+    /**
+     * The shortcut was pressed to start a dictation, `began` then, or now if not
+     * known, when yapd had been turned on or off `turns` times: the open question
+     * asked by then waits for what's dictated.
+     */
+    readonly prepare: (press: number, turns: number, began?: number) => Effect.Effect<void>
+    /** The dictation a press began came to nothing, like one cancelled, failed or with no words in it: the open question is waited on again. */
+    readonly nothing: (press: number) => Effect.Effect<void>
+    /** Something was said over an update, which takes the place of whatever yapd asked before that he heard. */
+    readonly replied: Effect.Effect<void>
+    readonly open: Effect.Effect<Option.Option<Open>>
+    /**
+     * yapd was turned off: the open question is closed, whatever was being
+     * worked out, written up or done for a request stops, and the card that's
+     * up comes down, with none still to go up ever going up.
+     */
+    readonly drop: Effect.Effect<void>
+    /** Messages a restart found didn't get there: each is offered to be sent again once, one at a time. */
+    readonly undelivered: (rows: ReadonlyArray<Ledger.Row>) => Effect.Effect<void>
+    /** Steps a restart couldn't confirm, like a stop, or a message it can't offer: each is said once, with why, and never done again. */
+    readonly unconfirmed: (rows: ReadonlyArray<Ledger.Row>) => Effect.Effect<void>
+    /** yapd was turned on: what a restart found while it was off is said, or offered, now. */
+    readonly back: Effect.Effect<void>
+    /** yapd starts saying something of its own accord about a thread, like that it failed, which "it" then means. */
+    readonly mention: (ref: Threads.Ref, said: string) => Effect.Effect<void>
+    /**
+     * What makes of what he says right after `line`, said of a thread or an
+     * update, a follow-up about it, with "it" that thread or update, as he
+     * follows up an answer. `done` when the line says what came of what he
+     * said, with the change it says yapd made that "scratch that" reaches,
+     * if any, like a late "On it" for what went by its own hand.
+     */
+    readonly following: (about: Threads.Ref | Conversation.Update, line: string, done?: Brain.Done, own?: Brain.Own) => Conversation.Answer["followUp"]
+    /**
+     * What makes of what he says over an update, `line`, after the exchange
+     * so far, `lines`, handed to yapd as the Responder took it for yapd's to
+     * do, what comes of it, as said back to a "done" line, with "it" the
+     * update: let go, dismissed, answered, passed to its own session as the
+     * Responder's messages are, or acted on once he's stopped, as a
+     * follow-up to an answer is, never writing to its own thread by yapd's
+     * own hand unless that's steered. Worked out as he talks.
+     */
+    readonly over: (update: Conversation.Update, lines: ReadonlyArray<Line>, line: string, given: Over) => Conversation.Handing
+    /**
+     * What a thread waits on him for, to ask once nothing else is asked and
+     * he isn't dictating, while it still waits on it: once, ever, and once
+     * more after something new cut it off before he heard all of it.
+     */
+    readonly ask: (asking: Asking) => Effect.Effect<void>
+    /** What a thread waited on him for was dealt with, in T3 Code or anywhere: it's not asked, and if it's being asked, it's let go without a word. */
+    readonly settled: (requestId: string) => Effect.Effect<void>
+    /** A machine's threads can be seen again, like rig's once it can be reached: what waits on him there, put by meanwhile, is asked. */
+    readonly returned: (machine: string) => Effect.Effect<void>
+    /**
+     * Briefs him on what was held for later, `held`, as yapd's own notice,
+     * which he can follow up as he can an answer: heard to the end, what it
+     * covered counts as heard. Nothing is said when it can't be summed up.
+     * Once it starts being said, he counts as briefed on what was held until
+     * `until`, or until then.
+     */
+    readonly digest: (held: ReadonlyArray<Kept>, until?: number) => Effect.Effect<void>
+    /** Focus or quiet ended other than by his word, with `count` held meanwhile: the rundown is offered once, in its turn. */
+    readonly rundown: (count: number, was: Modes.Hold) => Effect.Effect<void>
+    /** He said he's back over an update: the catch-up is said, in its turn, as an answer, without the model working out what he meant. */
+    readonly welcome: Effect.Effect<void>
+    /** What he hasn't heard, as a catch-up of everything would gather it, muted threads too, a thread at a time. */
+    readonly missed: Effect.Effect<Missed.Missed>
+    /**
+     * Clears the catch-up, as from the menu: sets aside, unheard, all a
+     * catch-up of everything would tell him now, muted threads aside, which
+     * is what the menu counts, so none of it is told or counted after, and
+     * none of it is said. Never what a thread waits on him for, which isn't
+     * in a catch-up. While yapd is off too. "Scratch that" within two minutes
+     * brings back what's still set aside. How many it set aside.
+     */
+    readonly clear: Effect.Effect<number>
+    /**
+     * Cancels one of his reminders, as from the menu: as cancelling it by voice
+     * does, noted in the journal under its thread and as the change he made
+     * last, which "scratch that" takes back, but with nothing said, as the
+     * catch-up cleared from the menu is. While yapd is off too. Why not, when
+     * it's no longer to come: it went off, it was cancelled already, or there's
+     * none.
+     */
+    readonly cancel: (id: number) => Effect.Effect<"done" | "fired" | "cancelled" | "unknown">
+    /**
+     * An offer he set came due, handed over to be said, with the entry it was
+     * kept under: asked once nothing else is asked and he isn't dictating,
+     * never in place of a question open, and sent only on his yes.
+     */
+    readonly offered: (reminder: Reminders.Reminder, kept: Option.Option<number>) => Effect.Effect<void>
+  }
+>() {}
+
+/**
+ * What's known of an update something said over it is handed over from:
+ * whether what's said over it goes to its thread by yapd's own hand, whether
+ * he's at hand, what the line he spoke over or just heard says yapd changed,
+ * and whether the mute hook handed it over, as about mutes.
+ */
+export interface Over {
+  readonly steered: boolean
+  readonly present: boolean
+  readonly done: Brain.Done
+  readonly muting?: true
+}
+
+/** How what was handed over from an update is acted on, as Conversation runs it, with how long the Brain took, and when it was run. */
+interface Handoff extends Conversation.Running {
+  readonly brain: number
+  readonly ran: number
+}
+
+/** How long what's handed over and put its update back holds everything but its answer at most, after he stopped dictating, as one stuck behind a dictation's request may be. */
+const putBackFor: Duration.DurationInput = "60 seconds"
+
+/** "It" means what's playing, or what was heard within this long. */
+const recall = 15 * 60_000
+/** How long after a question went unanswered it's asked again. */
+const again: Duration.DurationInput = "1 minute"
+/** How many times a question is asked before it's let go. */
+const asks = 2
+/** How long "later" puts a thread's question off. */
+const snooze = 10 * 60_000
+/** How many times a thread's question can have its place taken, or be put off, before it's let go with a word. */
+const interruptions = 3
+/** Questions asked within this long are never asked again in the same words, and one left open longer is let go. */
+const fresh = 10 * 60_000
+/** What the model is told was heard, said or done lately. */
+const lately = { span: 3 * 60 * 60_000, most: 8 }
+/** How many threads a catch-up tells of at most: the rest are left for "more". */
+const briefed = 8
+/** How many of what needs him a catch-up reads first in full at most: the rest are left for "more". */
+const inFull = 4
+/** Threads on the desk: fewer for a reply, which is about what he just heard. */
+/** Threads the model sees in full, for a dictation and for a reply, then how many more by name only; and how many give Whisper their words. */
+const desk = { asked: 30, reply: 12, named: 120, vocabulary: 15 }
+/** How long the searches for what he said have to add their threads to the desk. */
+const cap = "100 millis"
+
+const day = 24 * 60 * 60_000
+
+/** A name as it's said: lower case, its words only, so "integration-connectors" is "integration connectors". */
+const spokenName = (name: string) =>
+  name
+    .toLowerCase()
+    .split(/[^\p{L}\p{N}]+/u)
+    .filter((word) => word !== "")
+    .join(" ")
+/** What "scratch that" can take back: what was done this long ago at most. */
+const scratchable = "2 minutes"
+/** Steps one request can take at most, so a "rest" that never runs out can't go on for ever. */
+const steps = 4
+/** How long the rest of a request has to be worked out for what comes of it to be said in the same breath as the step before. */
+const joining = "1 second"
+
+/**
+ * Which step of its request something is, whether it's the same words sent
+ * again on his yes, and whether it's done quietly: the step before was said
+ * on its own already, so only what didn't go, or a question, is said of it.
+ * `besides` is the line for going ahead the step before says in the same
+ * breath, which its own is kept from being. `working`, tidying, the threads
+ * he agreed to archive at work or waiting on him, told it stops that.
+ */
+interface Stepping {
+  readonly step: number
+  readonly twice: boolean
+  readonly quietly?: boolean
+  readonly besides?: string
+  readonly working?: ReadonlyArray<Threads.Ref>
+  /** For taking back the step he said yes to taking back, by its command: that step alone. */
+  readonly pinned?: string
+  /** For taking back the change he said yes to taking back, or the one the "done" line said, by when it was made: that change alone. */
+  readonly pinnedChange?: Brain.Made
+}
+
+const quiet = (subject: Subject): Outcome => ({ say: "", subject, kind: "none" })
+
+/** Small counts as words, from one, the way a line starts with them. */
+const counted = ["One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight", "Nine", "Ten", "Eleven", "Twelve"]
+
+/** What ends a catch-up while updates wait to be read next, which it leaves to them: how many are coming up. */
+const comingUp = (count: number, said: Lines) =>
+  count === 0 ? "" : ` ${counted[count - 1] ?? count} more ${count === 1 ? "update is" : "updates are"} coming up${addressed(said)}.`
+
+/** Something said back that isn't about a thread. */
+const reply = (say: string, subject: Subject): Outcome => ({ say, subject: { _tag: "Answer", said: say, about: Option.none() }, kind: say === "" ? "none" : "answer" })
+
+/** Something said back about a thread, which "it" then means. */
+const regarding = (say: string, about: Option.Option<Threads.Ref>): Outcome => ({ say, subject: { _tag: "Answer", said: say, about }, kind: say === "" ? "none" : "answer" })
+
+/**
+ * What "it" means once yapd says `said` over one of a thread's subagents'
+ * update, about no other thread than the one it's part of, the only one the
+ * model can name for it: still that subagent, by its own handle, so "mute it"
+ * next mutes it alone, never its thread. None over anything else.
+ */
+const overSubagent = (subject: Subject, about: Option.Option<Threads.Ref>, said: string): Subject | undefined => {
+  if (subject._tag !== "Session" || subject.update.subagent === undefined) return undefined
+  const head = subject.update.subagent.head?.ref
+  const its = Option.isNone(about) || (head !== undefined && Threads.same(about.value, head))
+  return its ? { _tag: "Session", update: subject.update, said } : undefined
+}
+
+/** What's said once what waits on him is put by till its machine's threads can be seen again, to be asked then. */
+const onceBack = "I'll ask you again once I can."
+
+/** What's said of something left rather than asked about, since a question is open already. */
+const unasked = (about: string, said: Lines) => `I left ${about || "that"} for now, since I'd have to ask you something about it${addressed(said)}.`
+
+/**
+ * Whether a question offers to send a message again: one that may not have
+ * got there, or the same words that went to the same thread lately, "Again?",
+ * the one yes or no to sending anything, never one to stopping or tidying.
+ */
+const sendsAgain = (open: Pick<Open, "kind" | "decision">) => open.kind === "resend" || (open.kind === "confirm" && open.decision.act === "send")
+
+/**
+ * What a question left unasked would have asked, said after the news it
+ * follows, which named what it's about already: tidying, the threads it
+ * counted as "them", and any other yes or no to the same words, sending them again.
+ */
+const unaskedAfter = (open: Pick<Open, "kind" | "about" | "decision" | "candidates">) =>
+  open.decision.act === "tidy"
+    ? `I didn't ask whether to ${open.candidates.length > 1 ? `${open.decision.how} them` : open.about}`
+    : sendsAgain(open)
+      ? "I didn't ask about sending it again"
+      : `I didn't ask whether to ${open.about}`
+
+/**
+ * What's said of a question never asked, or let go unanswered: of an offer to
+ * send a message again, whether one that may not have gone or the same words
+ * that went lately, it speaks of the message without its words, so nothing
+ * said after it is listened for, since "send it again", his likely reply, the
+ * model could only send as it is.
+ */
+const withoutWords = (outcome: Outcome, open: Pick<Open, "kind" | "decision">): Outcome => (sendsAgain(open) ? { ...outcome, unsent: true } : outcome)
+
+/** The thread a yes or no question, or a thread's own, is about, which it names, so what's said once it's answered needn't name it again. */
+const askedAbout = (open: Pick<Open, "kind" | "candidates">) =>
+  Brain.yesNo(open.kind) || open.kind === "question" ? Option.fromNullable(open.candidates[0]) : Option.none<Threads.Ref>()
+
+/** The request a question is about, when it's what a thread waits on him for. */
+const requestOf = (open: Pick<Open, "asks">) => (open.asks === undefined || open.asks._tag === "Agent" ? undefined : open.asks.requestId)
+
+/**
+ * What's waiting to be asked of what a thread waits on him for: whether it's
+ * asked again, and whether its key was kept as it was first said. A thread's
+ * question, which keeps waiting for him in T3 Code, comes back after
+ * whatever took its place, from the part he'd got to, and is let go with a
+ * word only once it's been put off or had its place taken too often.
+ */
+interface Queued {
+  readonly asking: Asking
+  readonly again: boolean
+  kept?: Option.Option<Option.Option<number>>
+  /** Not asked before then, as one he put off, or one that gave way to another. */
+  readonly notBefore?: number | undefined
+  /** How many times it's been asked once it's put, when that isn't once: it's asked once more, as one gone unanswered, only that often. */
+  readonly asks?: number | undefined
+  /** How it's put: brought back, or asked once more having gone unanswered. Otherwise as it was first asked. */
+  readonly back?: "here" | "still" | undefined
+  /** How many times something he said took its place once he'd started hearing it. */
+  readonly interrupted?: number | undefined
+  /** How many times he put it off. */
+  readonly snoozed?: number | undefined
+  /** Asked no more, but let go with a word, once it's had its place taken too often. */
+  readonly letGo?: boolean | undefined
+  /**
+   * Brought back from a wait that was no asking of his, nor anything taking
+   * its place, like a press that came to nothing, yapd turned off and on, or
+   * its machine's threads out of sight as he answered: it's put even in words
+   * asked lately, never let go for want of others.
+   */
+  readonly costless?: boolean | undefined
+  /** The words it was brought back in at no cost to him lately, which it can still be asked once more in, as it goes unanswered. */
+  readonly free?: ReadonlyArray<string> | undefined
+}
+
+/** A thread's question, with how far he'd got in answering it. */
+type QuestionAsks = Extract<Asks, { readonly _tag: "Question" }>
+
+/**
+ * A catch-up yapd offers once, only the latest: what was held as focus or
+ * quiet ended other than by his word, or, as yapd is turned on, what came in
+ * while it was off. Unanswered, it gives way to what a thread waits on him
+ * for, and comes back no sooner than `notBefore`, asked once more, as
+ * `asks` counts, then let go with a word.
+ */
+interface Offer {
+  readonly kind: "rundown" | "missed"
+  readonly count: number
+  readonly was?: Modes.Hold
+  readonly asks?: number
+  readonly notBefore?: number
+}
+
+/**
+ * What he answered of a thread's question in one breath: the part he'd got
+ * to, all of it, a list for one that takes several, one option a line. Never
+ * the parts after, which he's yet to hear, and are asked once this one is
+ * answered. With what it was, as it's said before the next. None when it's
+ * nothing that part can take, like words a form that takes only its options
+ * can't. `dictated` when it's a message he dictated to the thread.
+ */
+const fill = (asks: QuestionAsks, text: string, dictated = false): { readonly asks: QuestionAsks; readonly ack: string } | undefined => {
+  const question = asks.questions[asks.part]
+  if (question === undefined) return undefined
+  const part = Questions.said(question, Option.none())
+  const answer = Questions.resolve(part, text)
+  if (answer._tag !== "Picked" && answer._tag !== "Words") return undefined
+  const collected = { ...asks.collected, [question.id]: answer }
+  return { asks: { ...asks, collected, part: asks.part + 1, ...(dictated ? { dictated: question.id } : {}) }, ack: Questions.ack(part, answer) }
+}
+
+/** A thread's question from its first part, with nothing he'd answered of it. */
+const fromTheStart = ({ dictated: _, ...asks }: QuestionAsks): QuestionAsks => ({ ...asks, part: 0, collected: {}, inFull: false })
+
+/**
+ * A thread's question with the message he dictated to its thread taken back
+ * out of it, as if he'd never said it: from the part it answered, which is
+ * asked again, so it goes neither with the rest nor once it's let go.
+ */
+const withdrawn = ({ dictated, ...asks }: QuestionAsks): QuestionAsks => {
+  if (dictated === undefined) return asks
+  const at = asks.questions.findIndex(({ id }) => id === dictated)
+  const collected = Object.fromEntries(Object.entries(asks.collected).filter(([id]) => id !== dictated))
+  return { ...asks, collected, part: at < 0 ? asks.part : Math.min(asks.part, at), inFull: false }
+}
+
+/**
+ * What goes of a thread's question he lets go, by his word or unanswered,
+ * when what he'd answered of it holds a message he dictated to its thread:
+ * all he answered, with the parts he hadn't left out, as when he skips them,
+ * so the message still goes, as he asked. Undefined when there's none.
+ */
+const leftWith = (asks: Asks | undefined): QuestionAsks | undefined => {
+  if (asks?._tag !== "Question" || asks.dictated === undefined || !Object.hasOwn(asks.collected, asks.dictated)) return undefined
+  const collected = Object.fromEntries(asks.questions.map(({ id }): [string, Questions.Answer] => [id, asks.collected[id] ?? { _tag: "Skip" }]))
+  return { ...asks, collected, part: asks.questions.length }
+}
+
+/** Whether he's part-way through a thread's question: past its first part, or with some of it answered. */
+const partway = (asks: Asks): asks is QuestionAsks => asks._tag === "Question" && (asks.part > 0 || Object.keys(asks.collected).length > 0)
+
+/**
+ * A thread's question as a yes to it is taken. Asked which one then, without
+ * yapd's pick, a yes is to the one option left, when only one is, and to none
+ * otherwise. Asked any other way, its words name yapd's pick again, which a
+ * yes is to: it's always to what he heard last.
+ */
+const leaning = (open: Open): Pick<Open, "wording"> | Record<never, never> => {
+  const { wording } = open
+  if (wording === undefined || open.asked !== wording.instead) return {}
+  const others = wording.part.options.flatMap((_, index) => (Option.contains(wording.part.recommended, index) ? [] : [index]))
+  const recommended = others.length === 1 ? Option.fromNullable(others[0]) : Option.none<number>()
+  return { wording: { ...wording, part: { ...wording.part, recommended } } }
+}
+
+/** A thread's question as it was asked, the part he'd got to and what he'd answered of it, to be queued to come back. */
+const resumed = (from: Queued, open: Pick<Open, "asks">, changes: Omit<Queued, "asking" | "again" | "kept">): Queued => ({
+  ...from,
+  asking: { ...from.asking, asks: open.asks?._tag === "Question" ? { ...open.asks, inFull: false } : from.asking.asks },
+  notBefore: undefined,
+  asks: undefined,
+  back: undefined,
+  letGo: undefined,
+  costless: undefined,
+  ...changes,
+})
+
+/**
+ * An answer to a question, with what it left out taken from what was asked
+ * about: the rest of the request, and a message's words, or failing those the
+ * request's own, never the answer's, like "The first." or "Yes.", which
+ * aren't for the thread. None when a message's words are left out and the
+ * request's may have been yapd's own voice, so there are none to send. To a
+ * question asked of those alone, there's no rest at all.
+ */
+const filled = (decision: Brain.Decision, open: Pick<Open, "decision" | "heard" | "echo" | "alone">): Brain.Decision | undefined => {
+  const rest = open.alone === true ? "" : decision.rest.trim() || open.decision.rest
+  if (decision.act !== "send" || decision.text.trim() !== "" || open.decision.act !== "send") return { ...decision, rest }
+  const text = open.decision.text.trim() || ownWords(open)
+  return text === "" ? undefined : { ...decision, text, rest }
+}
+
+/** When a message goes in, as the brain's `how` says it: an empty one is at once. */
+const when = (how: string): T3Actions.When => (how === "after" || how === "restart" ? how : "now")
+
+/** A desk with nothing on it, for words worked out against one that's gone, whose handles name nothing now. */
+const nowhere: Threads.Desk = { threads: [], away: [] }
+
+/** Whether a journal entry is a question yapd asked. */
+const question = (kept: Kept) => typeof kept.detail === "object" && kept.detail !== null && "question" in kept.detail
+
+/** The question a journal entry asked on its own, without the news before it, unless it's from a yapd that didn't keep it. */
+const alone = (kept: Kept) => {
+  const asked = (kept.detail as { readonly question?: unknown }).question
+  return typeof asked === "string" ? [asked] : []
+}
+
+/**
+ * Whether a journal entry is him catching up, as the model decided at once or
+ * on a second look, or asking to hear something again, like a catch-up he
+ * didn't hear through, or saying something back to what he missed, like
+ * "thanks" or "stop" over it: none tells him anything until he's heard the
+ * answer, and what a reply cut off he never did. An older yapd kept catching
+ * up as an answer of what he missed.
+ */
+const catchUp = (kept: Kept) => {
+  if (typeof kept.detail !== "object" || kept.detail === null) return false
+  const { decision, second, over } = kept.detail as {
+    readonly decision?: Partial<Brain.Decision>
+    readonly second?: Partial<Brain.Decision>
+    readonly over?: unknown
+  }
+  // Taking back clearing the catch-up is part of catching up too: what it brings back is his to hear, as it was.
+  const restoring = (decided: Partial<Brain.Decision> | undefined) => decided?.act === "undo" && decided.how === "catchup"
+  return (
+    decision?.act === "catchup" ||
+    second?.act === "catchup" ||
+    decision?.how === "missed" ||
+    second?.how === "missed" ||
+    decision?.act === "again" ||
+    over === "catch-up" ||
+    restoring(decision) ||
+    restoring(second)
+  )
+}
+
+/** Whether "it" is an answer telling him what he missed, or what he asked catching up, so what he says back to it is part of catching up. */
+const caughtUp = (subject: Subject) => subject._tag === "Answer" && (subject.missed !== undefined || subject.catchingUp === true)
+
+/**
+ * What "it" means once what came of something he said is said: said back to
+ * catching up, whatever came of it, like an answer, a card or a later step of
+ * the request, is part of catching up too, unless it asks him something, so
+ * thanks after it doesn't hide what he didn't hear either.
+ */
+const along = (thought: Pick<Thought, "utterance" | "subject">, subject: Subject): Subject =>
+  thought.utterance.via === "reply" && caughtUp(thought.subject) && subject._tag === "Answer" && subject.question === undefined && !caughtUp(subject)
+    ? { ...subject, catchingUp: true }
+    : subject
+
+/**
+ * The routine what's done for an answer to the question open sends, by its
+ * name, when it's that routine's steps: the one the model `gave` by its
+ * handle, or the one asked about, its words left out, as `taken` has them.
+ */
+const sends = (open: Pick<Open, "routine" | "decision">, gave: Brain.Decision, taken: Brain.Decision, situation: Brain.Situation) =>
+  Brain.routinedBy(gave, situation) ?? (open.routine !== undefined && taken.text === open.decision.text ? open.routine : undefined)
+
+/** Whether what's said of something came of a request held back as a secret, whatever its words: then it's kept and logged nowhere. */
+const secretly = (subject: Subject) => subject._tag !== "Nothing" && subject.withheld === true
+
+/** The routines whose steps what's said of something holds, as its provenance is noted with it: none for most. */
+const routinesOf = (subject: Subject): { readonly routines?: ReadonlyArray<string> } =>
+  subject._tag !== "Nothing" && subject.routines !== undefined && subject.routines.length > 0 ? { routines: subject.routines } : {}
+
+/**
+ * What "it" means for what he dictates after what came of something handed
+ * over from an update: never what only what's said back to it goes by, the
+ * update's own session as "it" and the thread a step of it went to, so it's
+ * worked out as any dictation is. Once a step went to another thread, that
+ * one is "it", as after the same request dictated; or else the update, as
+ * after hearing it.
+ */
+const dictated = (subject: Subject): Subject => {
+  if (subject._tag !== "Session") return subject
+  const { own: _, went, ...update } = subject
+  return went === undefined
+    ? update
+    : { _tag: "Answer", said: subject.said, about: Option.some(went), ...routinesOf(subject), ...(subject.withheld === true ? { withheld: true } : {}) }
+}
+
+/**
+ * Where what's said of a question came from, when its words hold one of his
+ * routines' steps, like an offer of one asked as it comes due: the routine,
+ * by its name, which is all a model is told of it.
+ */
+const askedRoutines = (open: Pick<Open, "routine" | "shown">): { readonly routines?: ReadonlyArray<string> } =>
+  open.shown !== undefined && open.routine !== undefined ? { routines: [open.routine] } : {}
+
+/** What came of something, with what's said of it noted as holding these routines' steps, if any. */
+const ofRoutines = (outcome: Outcome, routines: { readonly routines?: ReadonlyArray<string> }): Outcome =>
+  routines.routines === undefined || outcome.subject._tag === "Nothing" ? outcome : { ...outcome, subject: { ...outcome.subject, routines: routines.routines } }
+
+/** Whether he only told yapd to stop what it's saying, like "skip" or "stop, stop", rather than taking it in, like "thanks". */
+const hushed = (heard: string) => enough.has(once(heard))
+
+/** Whether what was heard was taken for noise rather than anything he said to yapd. */
+const noise = (kept: Kept) =>
+  typeof kept.detail === "object" && kept.detail !== null && (kept.detail as { readonly decision?: Partial<Brain.Decision> }).decision?.act === "resume"
+
+/** Whether what he said over an update put it back to be read again from where he cut in, so he's yet to hear the rest of it. */
+const cutOff = (kept: Kept) => typeof kept.detail === "object" && kept.detail !== null && (kept.detail as { readonly cutOff?: unknown }).cutOff === true
+
+/**
+ * Whether it's when he last spoke, as what was cut off since counts from:
+ * never catching up, noise, or what put the update he spoke over back, which
+ * he's still to hear.
+ */
+const spoke = (kept: Kept) => !catchUp(kept) && !noise(kept) && !cutOff(kept)
+
+/** What yapd knows as it works something out, and what that comes to without the model, when it's enough. */
+interface Glance {
+  readonly version: number
+  readonly situation: Brain.Situation
+  readonly quick: Brain.Decision | undefined
+}
+
+/** The assistant, saying what came of each request through `tell`. */
+export const make = (options: {
+  readonly threads: Threads.Threads["Type"]
+  readonly journal: Journal["Type"]
+  readonly drafts: Drafts.Drafts
+  /** What it does to threads, each step once. */
+  readonly hands: Hands.Hands["Type"]
+  /** What it did lately, for "scratch that". */
+  readonly ledger: Ledger.Ledger["Type"]
+  /** What's on his screen. */
+  readonly show: Show.Show["Type"]
+  /** Queues something to say, unless yapd was turned off since `since`. */
+  readonly tell: (notice: Notice, since?: number) => Effect.Effect<void>
+  /** Whether yapd is on, and how many times it was turned on or off. */
+  readonly power: Effect.Effect<{ readonly on: boolean; readonly turns: number }>
+  /**
+   * The update being read, or the last one the user heard, what of it was
+   * said last, like an answer over it, and when, with how many times yapd had
+   * been turned on or off as it was read.
+   */
+  readonly lastHeard: Effect.Effect<
+    Option.Option<{ readonly update: Conversation.Update; readonly said: string; readonly at: number; readonly playing: boolean; readonly turns: number }>
+  >
+  /**
+   * Something is about to be said, so the speaker can get ready while it's
+   * worked out, and stay so until what this gives back lets go, once it's
+   * said or comes to nothing.
+   */
+  readonly coming: Effect.Effect<Effect.Effect<void>>
+  /**
+   * An answer is on its way, so nothing but answers is said until what this
+   * gives back is run, once it's queued or won't come, or for a while after
+   * he stops dictating at most.
+   */
+  readonly awaiting: Effect.Effect<Effect.Effect<void>>
+  /** As `awaiting`, but for as long as `lapse` after he stops dictating at most. Without it, as `awaiting`. */
+  readonly awaitingFor?: (lapse: Duration.DurationInput) => Effect.Effect<Effect.Effect<void>>
+  /** Whether these words are waiting to be said, like an update or work that started, which a dictation cut off. */
+  readonly queued: (spoken: string) => Effect.Effect<boolean>
+  /** Drops an update he told to stop, even one a dictation cut off to be read again, which then counts as heard. */
+  readonly skip: (update: Conversation.Update) => Effect.Effect<void>
+  /** The updates waiting to be read, like one a dictation cut off, by their entry in the journal: coming up, so not missed. */
+  readonly upcoming: Effect.Effect<ReadonlyArray<number>>
+  /** What's told him by what's being said now, or by a notice waiting to be, by its entries in the journal, until it's heard or put by: being told him, so not missed. */
+  readonly telling?: Effect.Effect<ReadonlyArray<number>>
+  /** What a thread waits on him for, read and worded now, to read back what he answers by dictation, unless he's heard it. */
+  readonly compose: (ref: Threads.Ref, requestId: string) => Effect.Effect<Option.Option<Worded>>
+  /** What's muted, and muting and unmuting threads, which never reaches an agent. Without them, muting is something yapd can't do yet. */
+  readonly mutes?: Mutes.Mutes
+  readonly controls?: Mutes.Controls
+  /** What the user calls each machine, for the keys an update is muted by. */
+  readonly naming?: (host: string) => string
+  /** How yapd talks, which he changes by voice. Without it, that's something yapd can't do yet. */
+  readonly modes?: Modes.Modes
+  /**
+   * Turns yapd on or off as the menu does: "Mute." said by the shortcut turns
+   * it off, and "unmute" or "turn on" said by it while it's off, on, with
+   * nothing worked out of either, by what the shortcut's press `press` began,
+   * when it was. It's back once yapd is on or off, never waiting on what's
+   * said on coming back. Without it, they're worked out as anything else is.
+   */
+  readonly turn?: (on: boolean, press?: number) => Effect.Effect<void>
+  /** What he asked to be told later, which he sets and cancels by voice. Without them, that's something yapd can't do yet. */
+  readonly reminders?: Reminders.Reminders
+  /** What he asked yapd to keep in mind, which he has kept and forgets by voice. Without them, that's something yapd can't do yet. */
+  readonly memories?: Memory.Memories
+  /** The routines he wrote in his preferences, read as they are now. */
+  readonly routines?: Effect.Effect<ReadonlyArray<Preferences.Routine>>
+  /** Renders a line ahead on a guess, so it plays at once if it's what's said next: how a thread's question is answered, as it's asked. */
+  readonly guess?: (line: string) => Effect.Effect<boolean>
+}) =>
+  Effect.gen(function* () {
+    const brain = yield* Brain.Brain
+    const persona = yield* Persona
+    const scope = yield* Effect.scope
+    const { threads, journal, drafts, hands, ledger } = options
+    /** One request at a time, from working it out to what's said of it. */
+    const turn = yield* Effect.makeSemaphore(1)
+    /** What's waiting to be said or being said, which isn't missed: he's told of it as it is. */
+    const beingTold = Effect.map(Effect.all([options.upcoming, options.telling ?? Effect.succeed<ReadonlyArray<number>>([])]), ([coming, saying]) => [...coming, ...saying])
+
+    /**
+     * The open question, how many times it's been asked, its asking again
+     * later, whether something being said now may answer it, while which it's
+     * neither said nor asked again, and whether he's heard it yet: until he
+     * has, nothing he says can be about it.
+     */
+    /**
+     * The open question, with what's being said meanwhile that may answer it,
+     * by press or request, which holds it until each is dealt with; when it
+     * first started being said to him, and when he'd heard all of it as it
+     * was last asked, so what he said before either is told apart, however
+     * late it's handed on; and for what a thread waits on him for, what it
+     * was asked from.
+     */
+    let asking:
+      | {
+          open: Open
+          asks: number
+          repeat: Fiber.RuntimeFiber<void> | undefined
+          /** When it's due to be asked again, while it's waiting to be. */
+          due: number | undefined
+          held: Set<string>
+          said: number | undefined
+          whole: number | undefined
+          /** Whether he skipped a part T3 Code needs an answer to, which it was asked once more for. */
+          skipped: boolean
+          from?: Queued
+          /** For an offer of a catch-up, what it offers, to offer again should it give way to what a thread waits on him for. */
+          offer?: Offer
+        }
+      | undefined
+    /** Changes whenever the open question does, so what was worked out against another can tell. */
+    let version = 0
+    /**
+     * Cards still to go up with what's waiting to be said, by the request each
+     * is for, which "hide that" keeps down: every one when it's said on its
+     * own, but only its own request's when it's a later step of one, like
+     * "show me everything, then hide that", which is about the card that
+     * request put up and no other. Each is let go of as its line is said, or
+     * once it won't be, and all of them, kept down, once yapd is turned off,
+     * which drops what's waiting, though one being said just then may not
+     * have gone up yet.
+     */
+    const cards = new Set<{ readonly request: string; down: boolean }>()
+    /**
+     * What yapd said last of its own accord, which "it" may mean, when it
+     * started saying it, and how many times yapd had been turned on or off
+     * then: once it's turned off, nothing said before is "it", nor said or
+     * shown again.
+     */
+    let answered: { readonly subject: Subject; readonly at: number; readonly turns: number } | undefined
+    /**
+     * For each press whose dictation hasn't ended, by the press: what "it"
+     * meant then, before the dictation stopped what was playing, and what lets
+     * updates be said again once its answer is queued.
+     */
+    const presses = new Map<number, { readonly subject: Subject; readonly arrived: Effect.Effect<void> }>()
+    /**
+     * Presses whose dictation has ended, from the last one got ready for on:
+     * getting ready for one can take until after it's over, or only begin
+     * then, and must hold nothing once it is. One that came to nothing keeps
+     * the question he'd heard by then, which it may have cut off, and which
+     * nothing else would wait on again.
+     */
+    const over = new Map<number, string | undefined>()
+    /** Prompts being written for what was said before it's known whether it's new work, by utterance. */
+    const writing = new Map<string, Fiber.RuntimeFiber<Either.Either<Drafts.Written, string>>>()
+    /** When working out what he said began and was decided, by what he said, which what's said of it is timed by as it plays. */
+    const workedOut = new WeakMap<Utterance, { readonly began: number; readonly decided: number }>()
+    /** What's under way for a request, being worked out or in the background, stopped when yapd is turned off. */
+    const jobs = yield* FiberSet.make()
+    /** How many times yapd had been turned on or off when it was last turned off, so what's begun after for a request heard by then is stopped too. */
+    let dropped = Number.NEGATIVE_INFINITY
+    /**
+     * Work being started, by the request it's for, which the journal only has
+     * once T3 Code has it ready: from when yapd starts reading through its
+     * project, if it does, until the launch settles, even once yapd is turned
+     * off, so the model knows not to start it again meanwhile.
+     */
+    const starting = new Map<string, Kept>()
+    /** What a restart found, waiting its turn to be said: messages to offer to send again, and steps it couldn't confirm, to say so. */
+    const restarted: Array<{ readonly row: Ledger.Row; readonly offer: boolean }> = []
+    /** The rundown to offer once focus or quiet ended on its own or from the menu, with how much was held: only the latest. */
+    let offered: Offer | undefined
+    /** What threads wait on him for, waiting their turn to be asked, after what a restart found. */
+    const asked: Array<Queued> = []
+    /** Questions about what a thread waited on him for that was dealt with in T3 Code, which a late answer does nothing to. */
+    const gone = new Set<string>()
+    /** Questions put by while their machine's threads couldn't be seen, which his hearing or answering them then doesn't note as heard. */
+    const putBy = new Set<string>()
+    /** What threads wait on him for that he's heard asked, by request, oldest first: answered by dictation, it's done as he says. */
+    const known = new Map<string, Heard>()
+    /** Offers he set that came due, waiting their turn to be asked, after what a restart found, with the entry each was kept under. */
+    const proposed: Array<{ readonly reminder: Reminders.Reminder; readonly kept: Option.Option<number> }> = []
+    /** The reminder he last set or cancelled, or memory he had kept or forgotten, which "scratch that" takes back while it's the newest change he made. */
+    let noted: Brain.Noted | undefined
+    /** What a line says he just changed of reminders, memories or the catch-up, once it's noted, as "scratch that" tells it from any other change. */
+    const notedChange = (): Pick<Outcome, "changed"> => (noted === undefined ? {} : { changed: { what: "noted", at: noted.at } })
+
+    /** Whether a thread still waits on him for this request, as T3 Code last said, even behind a newer one. */
+    const still = (ref: Threads.Ref, requestId: string) => threads.waiting(ref, requestId)
+
+    /** Takes every copy of a thread's request out of what's waiting to be asked, and gives them back. */
+    const dequeue = (requestId: string) => {
+      const queued = asked.filter(({ asking: waiting }) => waiting.asks.requestId === requestId)
+      if (queued.length > 0) asked.splice(0, asked.length, ...asked.filter(({ asking: waiting }) => waiting.asks.requestId !== requestId))
+      return queued
+    }
+
+    /**
+     * What's waiting to be asked that can be now: the first that's due, on a
+     * machine whose threads can be seen. One on a machine whose can't, like
+     * rig's while it can't be reached, waits for them to be back, without
+     * holding up the rest.
+     */
+    const askable = (now: number) =>
+      Effect.findFirst(asked, ({ asking: waiting, notBefore }) =>
+        (notBefore ?? now) > now ? Effect.succeed(false) : Effect.map(threads.unseen(waiting.ref.machine), Option.isNone),
+      )
+
+    const mint = (at: number, prefix: string) => `${prefix}${at.toString(36)}${crypto.randomUUID().slice(0, 4)}`
+
+    /**
+     * How long what's said of what he said took by `at`, as it's told, from
+     * the press that sent it or his last word: to hear it, to work it out and
+     * to do it, to log as it plays, under how it came and was worked out and
+     * what was decided, like "dictation, model, look", or what the outcome
+     * says it was, like where work started. None for what wasn't worked out
+     * from his words.
+     */
+    const timed = (thought: Thought, at: number, outcome?: Pick<Outcome, "timed">): Latency.Timing | undefined => {
+      const { utterance } = thought
+      const worked = workedOut.get(utterance)
+      if (worked === undefined) return undefined
+      const anchor = utterance.stopped ?? utterance.at
+      const what = `${utterance.via === "shortcut" ? "dictation" : utterance.via}, ${thought.source}, ${outcome?.timed ?? thought.decision.act}`
+      const since = utterance.via === "shortcut" ? "the press" : utterance.via === "typed" ? "when it was typed" : "his last word"
+      const steps: ReadonlyArray<readonly [string, number]> = [
+        ["heard", worked.began - anchor],
+        ["worked out", worked.decided - worked.began],
+        ["done", at - worked.decided],
+      ]
+      return steps.reduce((timing, [name, ms]) => Latency.stage(timing, name, ms), Latency.from(what, anchor, since))
+    }
+
+    /**
+     * Whether yapd was turned off or on since it had been turned on or off
+     * `turns` times, so nothing is done now for what was said by then. What he
+     * asks by the shortcut while it's off is still answered.
+     */
+    const outdated = (turns: number) => Effect.map(options.power, (power) => power.turns !== turns)
+
+    /**
+     * Under way for a request heard when yapd had been turned on or off
+     * `turns` times, and stoppable even when begun from what can't be
+     * stopped, like an answer being taken in. It's among the jobs from when
+     * it's begun, not from when it starts running, so turning yapd off just
+     * after can't miss it; and begun as yapd is being turned off, it's
+     * stopped like the rest.
+     */
+    const job = <A, E>(effect: Effect.Effect<A, E>, turns: number) =>
+      Effect.gen(function* () {
+        const fiber = yield* effect.pipe(Effect.interruptible, FiberSet.run(jobs))
+        if (turns <= dropped) yield* Fiber.interruptFork(fiber)
+        return fiber
+      })
+
+    /** In the background for a request, which nothing waits for. */
+    const background = <A, E>(effect: Effect.Effect<A, E>, turns: number) =>
+      Effect.asVoid(
+        job(
+          Effect.catchAllCause(effect, (cause) => (Cause.isInterruptedOnly(cause) ? Effect.void : Effect.logError("Something went wrong", cause))),
+          turns,
+        ),
+      )
+
+    /**
+     * A request being worked out and acted on, which turning yapd off stops
+     * like what's in the background for it, from the model to the prompt
+     * being written: then nothing comes of it, as if it had been said before,
+     * and what's asked once yapd is on again doesn't wait for it. Stopped too
+     * when whatever waits for it is.
+     */
+    const stoppable = (request: Effect.Effect<Option.Option<string>>, utterance: Utterance) =>
+      // Begun and among the jobs before anything can stop whatever waits for it, so it's never left running on its own.
+      Effect.uninterruptibleMask((restore) =>
+        Effect.gen(function* () {
+          const fiber = yield* job(request, utterance.turns)
+          const exit = yield* restore(Fiber.await(fiber)).pipe(Effect.onInterrupt(() => Fiber.interrupt(fiber)))
+          if (Exit.isSuccess(exit) || !Cause.isInterruptedOnly(exit.cause)) return yield* exit
+          yield* Effect.logInfo("Stopped working on it, since yapd was turned off").pipe(Effect.annotateLogs({ utterance: utterance.id }))
+          return Option.none<string>()
+        }),
+      )
+
+    /** Whether he'd heard it, as `at` says he had, by the time he said this: what he said before can't be about it, however late it's handed on. */
+    const heardBy = (utterance: Pick<Utterance, "at">, at: number | undefined) => at !== undefined && at <= utterance.at
+
+    /**
+     * What he'd heard of a line he spoke over, as what it hadn't said yet
+     * tells, marked cut short, so the exchange the model reads holds only
+     * that: all of it when that isn't known, or isn't the end of this line.
+     */
+    const heardOf = (line: string, unsaid: string | undefined) => {
+      if (unsaid === undefined || !line.endsWith(unsaid)) return line
+      const heard = line.slice(0, line.length - unsaid.length).trimEnd()
+      return heard === "" ? line : `${heard}…`
+    }
+
+    /**
+     * The open question, unless it's been open so long it no longer counts:
+     * for an approval or a thread's question, with whether he'd heard all of
+     * it as it was last asked by the time he said what's answering it, `by`,
+     * which a plain yes to it needs, and what a yes to a question is to.
+     */
+    const current = (now: number, by = Number.POSITIVE_INFINITY) => {
+      if (asking === undefined || now - asking.open.at >= fresh) return Option.none<Open>()
+      const { open, whole } = asking
+      const asks = open.asks
+      if (asks === undefined || asks._tag === "Agent") return Option.some(open)
+      return Option.some({ ...open, asks: { ...asks, inFull: heardBy({ at: by }, whole) }, ...leaning(open) })
+    }
+
+    /**
+     * The open question, if it was asked by the time this was said, and he
+     * hadn't started hearing it only after: one asked after, or one said to
+     * him only once he'd said this, can't be what it's about, so it never
+     * answers, dismisses or closes it. One he hasn't heard at all yet is his
+     * to have something new take its place.
+     */
+    const before = (utterance: Pick<Utterance, "at">) =>
+      asking !== undefined && asking.open.at <= utterance.at && (asking.said === undefined || heardBy(utterance, asking.said)) ? asking : undefined
+
+    /**
+     * Whether what he said was said back to something other than the
+     * question, like an answer he follows up, which it can't be the answer
+     * to, however it's taken: only what's said back to the question itself,
+     * or dictated or typed, can be.
+     */
+    const apart = (utterance: Pick<Utterance, "via">, about: Subject, open: Pick<Open, "id" | "asked">) =>
+      utterance.via === "reply" && !(about._tag === "Answer" && (about.question?.id === open.id || about.said === open.asked))
+
+    /**
+     * What "it" means now: what's playing, or the latest heard lately, an
+     * update or an answer, but nothing from before yapd was last turned off.
+     */
+    const subject = Effect.gen(function* () {
+      const now = yield* Clock.currentTimeMillis
+      const { turns } = yield* options.power
+      const update = Option.filter(yield* options.lastHeard, (heard) => heard.turns === turns && (heard.playing || now - heard.at < recall))
+      const said = answered !== undefined && answered.turns === turns && now - answered.at < recall ? answered : undefined
+      if (Option.isSome(update) && (said === undefined || update.value.playing || update.value.at >= said.at)) {
+        return { _tag: "Session", update: update.value.update, said: update.value.said } satisfies Subject
+      }
+      return said === undefined ? ({ _tag: "Nothing" } satisfies Subject) : dictated(said.subject)
+    })
+
+    /**
+     * What "it" means as what he said is worked out, however long after it
+     * was found: a question it asks that's closed since, however quietly,
+     * like by "hide that", a thanks, or what's typed while he dictates, is
+     * told as what it asked, never asked again (I4).
+     */
+    const meaning = (about: Subject, now: number) =>
+      Effect.gen(function* () {
+        const question = about._tag === "Answer" ? about.question : undefined
+        if (about._tag !== "Answer" || question === undefined || Option.exists(current(now), ({ id }) => id === question.id)) return about
+        const { question: _, ...told } = about
+        return { ...told, said: Brain.recalled(question, yield* persona.lines), asked: about.said } satisfies Subject
+      })
+
+    /**
+     * What something was worked out against, with "it" as it means once it's
+     * acted on: a question closed since, like one let go meanwhile as it went
+     * unanswered too long, is told as what it asked, never asked again (I4).
+     */
+    const afresh = (situation: Brain.Situation) =>
+      Effect.map(
+        Effect.flatMap(Clock.currentTimeMillis, (now) => meaning(situation.subject, now)),
+        (subject): Brain.Situation => ({ ...situation, subject }),
+      )
+
+    /** What yapd asked in the last ten minutes, so no question is asked in the same words again. */
+    const askedLately = Effect.gen(function* () {
+      const kept = yield* journal.since((yield* Clock.currentTimeMillis) - fresh, { kinds: ["answer"] })
+      const lines = yield* persona.lines
+      // In its own words, without "it's on your screen" when it went up on a card as it was asked, and the question alone, since saying it
+      // again may leave out the news before it, like "Send it again?" without that the message may not have got there.
+      return kept.filter(question).flatMap((kept) => [...(kept.said === undefined ? [] : [kept.said, Show.offScreen(kept.said, lines)]), ...alone(kept)])
+    })
+
+    /**
+     * Threads a search for his words turns up, to add to the desk. T3 Code
+     * answers in a few ms, so only what each machine found within the cap is
+     * taken: rig, further off, being slow never costs what this one found.
+     */
+    const searching = (heard: string) =>
+      Threads.searched(heard, (words) => Effect.map(threads.search(words, cap), ({ matches }) => matches)).pipe(
+        Effect.orElseSucceed((): ReadonlyArray<Threads.Ref> => []),
+      )
+
+    /**
+     * What yapd sent a thread that was one of his routines' steps, of the
+     * last twenty it sent it, as an update's turn is told of, so what it was
+     * asked is shown by the routine's name however long ago it went.
+     */
+    const routinesSent = (ref: Threads.Ref) =>
+      Effect.map(journal.byThread(ref.machine, ref.id, 20, ["sent"]), (sent) => sent.filter((kept) => routinesIn(kept).length > 0))
+
+    /** What the brain goes by, from memory: the desk, the journal and what's known of usage. */
+    const situate = (utterance: Utterance, meant: Subject, lines: ReadonlyArray<Line>) =>
+      Effect.gen(function* () {
+        const now = yield* Clock.currentTimeMillis
+        const about = yield* meaning(meant, now)
+        // One he hadn't heard by the time he said this can't be what he's answering, nor one asked after; nor, said back to something said
+        // since, like an answer he follows up, one that isn't what he's saying it back to.
+        const open = Option.filter(current(now, utterance.at), (open) => before(utterance)?.said !== undefined && !apart(utterance, about, open))
+        const focus = Brain.about(about)
+        const pending = Option.match(open, { onNone: () => [], onSome: ({ candidates }) => candidates })
+        // A reply is about what he just heard, which is on the desk already; going on from a step that went to another thread over an
+        // update, so is the update's own thread, which "this one" still is.
+        const found = utterance.via === "reply" ? Brain.besideIt(about) : yield* searching(utterance.heard)
+        const [shortlist, recent, said, usage, asked, coming, acted, mutes, muteChange, mode, modeChange, reminders, kept, written, reading, tidied] = yield* Effect.all([
+          threads.desk(focus, pending, utterance.via === "reply" ? desk.reply : desk.asked, found, desk.named, utterance.heard),
+          // Never what was held for later, which he was never told.
+          journal.since(now - lately.span, { most: 2 * lately.most, kinds: ["update", "reply", "dictation", "answer", "started", "notice", "sent", "action", "brief"], held: false }),
+          journal.since(now - day, { most: 20, kinds: ["dictation", "reply"] }),
+          threads.usage,
+          askedLately,
+          options.upcoming,
+          // The last thing done, whatever it was, so "scratch that" never reaches past it to something before.
+          ledger.latest(scratchable),
+          options.mutes?.list ?? Effect.succeed<ReadonlyArray<Mutes.Mute>>([]),
+          options.mutes?.last ?? Effect.succeedNone,
+          options.modes === undefined ? Effect.succeedNone : Effect.map(options.modes.current, Option.some),
+          options.modes?.last ?? Effect.succeedNone,
+          options.reminders?.pending ?? Effect.succeed<ReadonlyArray<Reminders.Reminder>>([]),
+          options.memories?.list ?? Effect.succeed<ReadonlyArray<Memory.Memory>>([]),
+          options.routines ?? Effect.succeed<ReadonlyArray<Preferences.Routine>>([]),
+          options.mutes?.reading ?? Effect.succeed<ReadonlyArray<Mutes.Reading>>([]),
+          // What yapd tidied for him lately, for what it archived that he can have back.
+          ledger.steps(now - day, { kinds: ["tidy", "undo"], states: ["sent"] }),
+        ])
+        // What it archived, unless it's back since, as by his hand in T3 Code.
+        const archived = yield* Effect.filter(Hands.archives(tidied), ({ ref }) =>
+          Effect.map(threads.find(ref), (found) => !Option.exists(found, ({ archivedAt }) => archivedAt === null)),
+        )
+        // Every thread taking back the tidy just done would act on, even one T3 Code never said it tidied.
+        const last = Option.getOrUndefined(Option.filter(acted, ({ kind }) => kind === "tidy"))
+        const untidies =
+          last === undefined ? undefined : Hands.untidies(yield* ledger.steps(0, { kinds: ["tidy"], utterance: last.utterance, step: last.step }))
+        // Said back to a "done" line, every step taking something back could reach, as far back as letting a stop carry on goes, so it's
+        // worked out as the hands find it, and the line's own steps however much was done since, with the archives that dropped reminders.
+        const reachable = utterance.afterDone === undefined ? undefined : yield* ledger.steps(now - Duration.toMillis(Ledger.resumable))
+        // What he hasn't heard, a thread at a time: what was never read out, however much he's spoken since, and what was cut off since
+        // he last said something, other than catching up, which he may never have heard the answer to, or something only heard as noise,
+        // like a cough taken for "Thank you.". Not what's waiting to be read, like an update his asking cut off: he's told of that as
+        // it's read, not twice. Nor what a thread's subagents said that yapd kept to itself, which he never asked to hear.
+        const since = said.findLast(spoke)?.at ?? now - day
+        const missed = yield* Missed.gather(journal, { now, spoke: since, coming: [...coming, ...(yield* options.telling ?? Effect.succeed([]))], desk: shortlist })
+        // What was done, like a stop, even what he was never told of since he turned yapd off, but not the bookkeeping of questions closed, which says nothing,
+        // nor what a thread's subagents said that yapd kept to itself, which he never asked to hear.
+        const done = recent
+          .filter((kept) => (kept.kind !== "action" || kept.said !== undefined || Brain.unsaid(kept) !== undefined) && !Missed.withheld(kept))
+          .slice(-lately.most)
+        const sent = about._tag === "Session" && about.update.about !== undefined ? yield* routinesSent(about.update.about) : []
+        const seen = yield* options.show.seen
+        return {
+          utterance,
+          subject: about,
+          lines,
+          open,
+          desk: shortlist,
+          lately: [...done, ...starting.values()].toSorted((one, other) => one.at - other.at),
+          ...(sent.length === 0 ? {} : { sent }),
+          missed,
+          ...Option.match(mode, { onNone: () => ({}), onSome: (mode) => ({ mode }) }),
+          mutes,
+          ...(reading.length === 0 ? {} : { reading }),
+          muteChange,
+          modeChange,
+          usage,
+          second: Option.none(),
+          asked,
+          acted,
+          ...(untidies === undefined ? {} : { untidies }),
+          ...(reachable === undefined ? {} : { recent: reachable, dropping: reachable.filter(Hands.dropped).map(({ commandId }) => commandId) }),
+          reminders,
+          noted: Option.filter(Option.fromNullable(noted), ({ at }) => now - at <= Duration.toMillis(scratchable)),
+          memories: { kept, written },
+          archived,
+          now,
+          ...Option.match(seen, { onNone: () => ({}), onSome: ({ title }) => ({ showing: title }) }),
+        } satisfies Brain.Situation
+      })
+
+    /** What it comes to without the model, when that's enough. */
+    const glance = (utterance: Utterance, about: Subject, lines: ReadonlyArray<Line>) =>
+      Effect.gen(function* () {
+        const against = version
+        const situation = yield* situate(utterance, about, lines)
+        return { version: against, situation, quick: Brain.fast(situation, yield* persona.lines) } satisfies Glance
+      })
+
+    /** What was worked out, about what "it" meant as it was. */
+    const worked = (glanced: Glance, utterance: Utterance, decision: Brain.Decision, source: Thought["source"]): Thought => ({
+      utterance,
+      subject: glanced.situation.subject,
+      decision,
+      situation: glanced.situation,
+      version: glanced.version,
+      source,
+    })
+
+    /** What the model makes of it, or, when it can't be asked, a line saying so. */
+    const decide = (glanced: Glance, utterance: Utterance) =>
+      brain.decide(glanced.situation).pipe(
+        Effect.map((decision) => worked(glanced, utterance, decision, "model")),
+        Effect.catchAll((error) =>
+          Effect.gen(function* () {
+            yield* Effect.logWarning("Could not work out what you meant", error)
+            const spoken = `I couldn't work that out just now${addressed(yield* persona.lines)}. What you said is in my log.`
+            return worked(glanced, utterance, Brain.decision({ act: "answer", spoken }), "failed")
+          }),
+        ),
+      )
+
+    /**
+     * What he meant, with how long the model took, when it was asked. Handed
+     * over from an update, only what `atOnce` takes is taken without it,
+     * however often it's worked out, a later step of it too.
+     */
+    const weigh = (utterance: Utterance, about: Subject, lines: ReadonlyArray<Line>) =>
+      Effect.flatMap(glance(utterance, about, lines), (glanced) => {
+        const quick = glanced.quick !== undefined && (utterance.handed === undefined || Brain.atOnce(glanced.quick, utterance, glanced.situation.subject)) ? glanced.quick : undefined
+        return quick === undefined
+          ? Effect.map(Effect.timed(decide(glanced, utterance)), ([took, thought]) => ({ thought, modelMs: Duration.toMillis(took) }))
+          : Effect.succeed<{ readonly thought: Thought; readonly modelMs?: number }>({ thought: worked(glanced, utterance, quick, "fast") })
+      })
+
+    const think = (utterance: Utterance, about: Subject, lines: ReadonlyArray<Line>) => Effect.map(weigh(utterance, about, lines), ({ thought }) => thought)
+
+    const called = (situation: Brain.Situation, handle: string) => situation.desk.threads.find((listed) => listed.handle === handle)
+
+    /** How a decision reads in the log: what, about which thread, how sure, and how it was reached. */
+    const routed = (thought: Thought, ms: number) => {
+      const { act, target, sure, pending } = thought.decision
+      const listed = called(thought.situation, target)
+      return [
+        `${act}${listed === undefined ? "" : ` → ${listed.called} (${listed.ref.machine})`}`,
+        sure,
+        ...(pending === "" ? [] : [`${pending} the question`]),
+        thought.source === "fast" ? "at once" : thought.source === "failed" ? "the model failed" : `${(ms / 1000).toFixed(1)} s`,
+      ].join(", ")
+    }
+
+    /** Closes the open question, with what became of it, and stops it being asked again. */
+    const close = (open: Open, how: string, by?: string) =>
+      Effect.gen(function* () {
+        if (asking?.open.id !== open.id) return
+        const { repeat, whole, from, said, due } = asking
+        // Put by till its machine's threads can be seen again, a thread's question is still to be heard, even by a yapd restarted
+        // meanwhile, which asks what waits on him that he hasn't heard, under the entry it was kept under.
+        const unheard = from?.kept !== undefined && open.kind === "question" && how === "dropped: out of sight" ? Option.flatten(from.kept) : Option.none<number>()
+        if (how === "dropped: out of sight" && open.kind === "question") putBy.add(open.id)
+        if (from !== undefined && open.kind === "question") {
+          // A thread's question still waits for him in T3 Code, so whatever took its place, even what made no sense, it's asked again
+          // first thing after, from the part he'd got to, or when it was due to be anyway; the third time it's let go with a word.
+          // Turned off, it's asked once yapd is on again, out of sight, like rig's while it can't be reached, once its machine's
+          // threads can be seen again, and cut off by a press that came to nothing, at once: none is any asking of his, nor anything
+          // taking its place, so none costs it the words it's asked in.
+          const waits = how === "dropped: off" || how === "dropped: out of sight" || how === "dropped: nothing said"
+          const interrupted = (from.interrupted ?? 0) + (!waits && said !== undefined ? 1 : 0)
+          const back = said === undefined ? from.back : "here"
+          if (waits) asked.unshift(resumed(from, open, { asks: asking.asks, back, costless: true }))
+          else if (how === "replaced" || how === "dropped: unclear") {
+            asked.unshift(resumed(from, open, { asks: asking.asks, back, interrupted, notBefore: due, letGo: interrupted >= interruptions }))
+          }
+        } else if (from !== undefined && (whole === undefined || how === "dropped: out of sight")) {
+          // What a thread waits on him for, cut off before he heard all of it by something new, or what made no sense, is asked once more,
+          // after; cut off by turning yapd off, it's asked once it's on again, since it still waits on him, and that's no asking of his.
+          // Out of sight, heard or not, it's asked once its machine's threads can be seen again: in other words, when he'd heard it.
+          if (how === "dropped: off") asked.unshift({ ...from, costless: true })
+          else if (how === "dropped: out of sight") asked.unshift({ ...from, ...(said === undefined ? {} : { back: "here" as const }), costless: true })
+          else if (!from.again && (how === "replaced" || how === "dropped: unclear")) asked.unshift({ ...from, again: true, costless: undefined })
+        }
+        asking = undefined
+        version++
+        if (repeat !== undefined) yield* Fiber.interruptFork(repeat)
+        if (Option.isSome(unheard)) yield* journal.markUnheard([unheard.value])
+        yield* Effect.logInfo(`Closed the question, ${how}: ${open.asked}`)
+        yield* journal.write({
+          at: yield* Clock.currentTimeMillis,
+          kind: "action",
+          utterance: open.utterance,
+          detail: { open: how, asked: open.asked, ...(by === undefined ? {} : { by }) },
+        })
+        // Offered once: not taken up, it's never offered again on its own.
+        if (how !== "answered") yield* forgo(open, `The question was ${how}.`)
+      })
+
+    /**
+     * A message offered to be sent again that he didn't take up, which is
+     * never offered again on its own. It may still have got there, so the
+     * same words said again are asked about, never sent under new ids.
+     */
+    const forgo = (open: Pick<Open, "resend">, reason: string) =>
+      Option.match(open.resend, { onNone: () => Effect.void, onSome: (commandId) => hands.leave(commandId, reason) })
+
+    /**
+     * What a thread waits on him for that he let go, or that was let go with
+     * a word, noted as heard under the entry it was asked under, however
+     * little of it he heard: it's never brought up again of yapd's own accord,
+     * as when its machine's T3 Code catches up again, though it still waits
+     * for him in T3 Code, where he can ask for it.
+     */
+    const letBe = (from: Queued | undefined) =>
+      Effect.gen(function* () {
+        const row = from?.kept === undefined ? Option.none<number>() : Option.flatten(from.kept)
+        if (Option.isSome(row)) yield* journal.markHeard([row.value], yield* Clock.currentTimeMillis)
+      })
+
+    /**
+     * Opens a question in place of any other, unless yapd was turned off
+     * since what it's about was said, or another was asked since, which stays
+     * open: only one ever is, so this one is left with a word instead, with
+     * what didn't go and the rest of its request, and a message it would have
+     * offered to send again is never offered on its own. Code's own question
+     * of what may all be yapd's own words is let go as they are, with
+     * nothing said, not even that it wasn't asked.
+     */
+    const opening = (open: Omit<Open, "id" | "version" | "at">, utterance: Utterance | Pick<Utterance, "turns" | "at">) =>
+      Effect.gen(function* () {
+        if (yield* outdated(utterance.turns)) return quiet({ _tag: "Nothing" })
+        if (asking !== undefined && before(utterance) === undefined) {
+          yield* forgo(open, "Another question was asked before it could be.")
+          if ("heard" in utterance && Brain.mayBeOwn(utterance)) return yield* Effect.as(notActing(utterance), quiet({ _tag: "Nothing" }))
+          yield* Effect.logInfo(`Leaving it, rather than ask in place of a question asked since: ${open.asked}`)
+          const said = yield* persona.lines
+          const waiting = "since I'm waiting on your answer to something else"
+          const left =
+            open.kind === "which"
+              ? said.cantTell
+              : open.news !== undefined
+                ? `${open.news} ${unaskedAfter(open)}, ${waiting}.`
+                : Brain.yesNo(open.kind)
+                  ? `I didn't ask whether to ${open.about}, ${waiting}${addressed(said)}.`
+                  : unasked(open.about, said)
+          return unfinished(withoutWords(ofRoutines(reply(left, { _tag: "Nothing" }), askedRoutines(open)), open), open.decision.rest, said)
+        }
+        if (asking !== undefined) {
+          // Its place taken only by a step after the first of what he said, like code's own question from the rest of what may all be
+          // yapd's own words, he's told what was left of it all the same, as when the first step's is: of one he was yet to hear, what
+          // didn't go and the rest of its request, and of one he'd heard, the rest of its request.
+          const { open: replaced, said: heard } = asking
+          yield* close(replaced, "replaced")
+          const said = yield* persona.lines
+          const left = heard === undefined ? unheardLeft(replaced, said) : ahead(quiet({ _tag: "Nothing" }), replaced.decision.rest, said)
+          yield* deliver(left, "heard" in utterance ? utterance : { id: replaced.utterance, turns: utterance.turns })
+        }
+        const at = yield* Clock.currentTimeMillis
+        version++
+        // A dictation begun before it was asked can't be answering it, so nothing holds it yet. Asked of what was said over an update, an
+        // answer to it is held to what it was: never written to the update's own thread unless that's steered, nor to any about mutes.
+        const guarded = "heard" in utterance ? { ...(utterance.own === undefined ? {} : { own: utterance.own }), ...(utterance.handed === undefined ? {} : { handed: utterance.handed }) } : {}
+        const opened = { ...open, ...guarded, id: mint(at, "o"), version, at }
+        asking = { open: opened, asks: 1, repeat: undefined, due: undefined, held: new Set(), said: undefined, whole: undefined, skipped: false }
+        yield* Effect.logInfo(`Asked: ${open.asked}`)
+        // Its words holding one of his routines' steps, a model is only told of it by the routine's name.
+        return { say: open.asked, subject: { _tag: "Answer", said: open.asked, about: askedAbout(open), question: opened, ...askedRoutines(open) }, kind: "question" } satisfies Outcome
+      })
+
+    /** Something being said may answer the open question, so it isn't said meanwhile, nor asked again until that's known. */
+    const hold = (key: string, since?: number) =>
+      Effect.suspend(() => {
+        // What began before the question was asked can't be answering it.
+        if (asking === undefined || (since !== undefined && since < asking.open.at)) return Effect.void
+        const repeat = asking.repeat
+        asking.held.add(key)
+        asking.repeat = undefined
+        return repeat === undefined ? Effect.void : Fiber.interruptFork(repeat)
+      })
+
+    /** Lets a question go that went unanswered as often as it's asked, and says so: a thread's is then what "it" means, for him to ask for it. */
+    const letGo = (open: Open) =>
+      Effect.gen(function* () {
+        const from = asking?.open.id === open.id ? asking.from : undefined
+        const { turns } = yield* options.power
+        const said = yield* persona.lines
+        // With a message he dictated among what he answered of it, the message goes, as `parting` has it, or it's put by till it can.
+        const message = leftWith(open.asks)
+        const away = message === undefined ? Option.none<Outcome>() : yield* putBack(open, said)
+        if (Option.isNone(away)) yield* close(open, "dropped: unanswered")
+        if (message !== undefined) {
+          yield* deliver(Option.isSome(away) ? away.value : yield* unbidden(open.candidates[0], message, said), { id: open.utterance, turns })
+          return yield* offering
+        }
+        yield* letBe(from)
+        const left = withoutWords(ofRoutines(regarding(Brain.dropped(open, said), open.kind === "question" ? askedAbout(open) : Option.none()), askedRoutines(open)), open)
+        yield* deliver(unfinished(left, open.decision.rest, said), { id: open.utterance, turns })
+        yield* offering
+      })
+
+    /**
+     * Asks the open question once more, now, in words not asked lately, or
+     * lets it go once every wording has been used. However often it was asked
+     * already: he asked to hear it, so he's still there to answer it. A
+     * thread's question is asked as `how` says: in full, as he asked to hear
+     * it again, which uses up none of its asks; with what its options mean;
+     * which one then, without yapd's pick; which of them all, to a form his
+     * words didn't fit; as a part T3 Code needs an answer to; or, by
+     * default, once more as it went unanswered.
+     */
+    const reask = (said: Lines, how: "still" | "again" | "more" | "instead" | "which" | "needed" = "still") =>
+      Effect.gen(function* () {
+        const before = yield* askedLately
+        if (asking === undefined) return quiet({ _tag: "Nothing" })
+        const { open, repeat, from } = asking
+        asking.repeat = undefined
+        asking.due = undefined
+        if (repeat !== undefined) yield* Fiber.interruptFork(repeat)
+        const { wording } = open
+        // Asked once more as it went unanswered, words it was only brought back in at no cost to him lately, like as a press came to
+        // nothing, are still his to hear once more, rather than it being let go for want of others: its asks still bound it.
+        const spare = how === "still" ? before.filter((line) => !(from?.free ?? []).includes(line)) : before
+        const anew = (question: typeof open) => Brain.reworded(question, before, said) ?? Brain.reworded(question, spare, said)
+        // Asked which one, which of them, or for a part it needs already, the same words again would only get the same answer, and no
+        // question is asked twice in the same words: it's let go instead. What its options mean is said as often as he asks.
+        const asked =
+          wording === undefined
+            ? anew(open)
+            : how === "more"
+              ? wording.more
+              : how === "instead" || how === "which" || how === "needed"
+                ? open.asked === wording[how]
+                  ? undefined
+                  : wording[how]
+                : anew({ ...open, rewordings: how === "again" ? wording.again : wording.still })
+        if (asked === undefined) {
+          const message = leftWith(open.asks)
+          const away = message === undefined ? Option.none<Outcome>() : yield* putBack(open, said)
+          if (Option.isSome(away)) return away.value
+          yield* close(open, "dropped: asked enough")
+          if (message !== undefined) return yield* unbidden(open.candidates[0], message, said)
+          yield* letBe(from)
+          const left = wording === undefined ? reply(said.leaving, { _tag: "Nothing" }) : regarding(wording.letGo, askedAbout(open))
+          return unfinished(left, open.decision.rest, said)
+        }
+        // Heard again on his asking, or with what its options mean, a thread's question is asked no more often: a minute on, it's still asked once more.
+        const counted = wording === undefined || how === "still" || how === "instead" || how === "which" || how === "needed"
+        // In other words, it follows no news, so it's the question on its own. Its wording stays as it was: asked which one then, what a yes
+        // is to is worked out from these words, as `leaning` has it.
+        const reworded = { ...open, asked, question: asked }
+        asking = { ...asking, open: reworded, asks: asking.asks + (counted ? 1 : 0), repeat: undefined, due: undefined, held: new Set(), whole: undefined }
+        yield* Effect.logInfo(`Asked again: ${asked}`)
+        return { say: asked, subject: { _tag: "Answer", said: asked, about: askedAbout(open), question: reworded, ...askedRoutines(open) }, kind: "question" } satisfies Outcome
+      })
+
+    /**
+     * Asked to see the open question, it's asked once more as `reask` does,
+     * `how` it says, with what's said put on his screen as it's said, rather
+     * than closed and said again in the words it was asked in.
+     */
+    const reshown = (said: Lines, situation: Brain.Situation, how: Parameters<typeof reask>[1] = "still") =>
+      Effect.gen(function* () {
+        const asked = yield* reask(said, how)
+        if (asked.kind !== "question") return asked
+        const { say, card, unseen } = yield* options.show.present("said", Option.none(), { ...situation, subject: asked.subject }, said)
+        return {
+          ...asked,
+          say,
+          ...Option.match(card, { onNone: () => ({}), onSome: (card) => ({ card }) }),
+          ...(unseen === undefined ? {} : { unseen }),
+        } satisfies Outcome
+      })
+
+    /**
+     * What came in while yapd was off is offered the once: anything but a
+     * yes lets it go without a word, nothing marked heard, and what's next is
+     * asked. It's never asked again, nor put back behind a thread's question.
+     */
+    const passOver = (open: Open): Effect.Effect<void> => Effect.zipRight(close(open, "dropped: unanswered"), offering)
+
+    /** A minute on, the question is asked once more in other words, or let go with a word if it's been asked as often as it will be. */
+    const due = (id: string): Effect.Effect<void> =>
+      Effect.gen(function* () {
+        if (asking?.open.id !== id) return
+        // This is the asking again, so it's no longer waited for.
+        asking.repeat = undefined
+        asking.due = undefined
+        const power = yield* options.power
+        if (!power.on || asking?.open.id !== id) return
+        if (asking.offer?.kind === "missed") return yield* passOver(asking.open)
+        if (asking.asks >= asks) return yield* letGo(asking.open)
+        const { utterance } = asking.open
+        yield* deliver(yield* reask(yield* persona.lines), { id: utterance, turns: power.turns })
+        // Let go, as when it's been asked every way lately, what's next is asked.
+        yield* offering
+      })
+
+    /** Asks it again, or lets it go, a minute from now, unless something said meanwhile closes it first. */
+    const later = (id: string) =>
+      Effect.gen(function* () {
+        if (asking?.open.id !== id || asking.held.size > 0 || asking.repeat !== undefined) return
+        const at = (yield* Clock.currentTimeMillis) + Duration.toMillis(again)
+        const repeat = yield* Effect.sleep(again).pipe(Effect.zipRight(turn.withPermits(1)(due(id))), Effect.interruptible, Effect.forkIn(scope))
+        if (asking?.open.id === id) {
+          asking.repeat = repeat
+          asking.due = at
+        }
+      })
+
+    /**
+     * Its listening window ended without an answer: asked again in other
+     * words a minute later the first time, let go with a word the second,
+     * whatever it asks, as he wants it. A thread's question gives way to
+     * another waiting to be asked, which is asked at once, and comes back to
+     * be asked once more no sooner than a minute later.
+     */
+    const unanswered = (id: string): Effect.Effect<void> =>
+      Effect.gen(function* () {
+        // Not while something's being said that may answer it, nor twice over, nor while yapd is off, when he answers it with the shortcut,
+        // and it isn't asked again of yapd's own accord.
+        if (asking?.open.id !== id || asking.held.size > 0 || asking.repeat !== undefined) return
+        if (!(yield* options.power).on) return
+        // What came in while yapd was off is offered the once: not taken up, it's let go without a word, nothing marked heard, and what's
+        // next is asked.
+        if (asking.offer?.kind === "missed") return yield* passOver(asking.open)
+        if (asking.asks >= asks) return yield* letGo(asking.open)
+        const now = yield* Clock.currentTimeMillis
+        const { open, from, asks: count, offer } = asking
+        if ((open.kind === "question" && from !== undefined) || offer !== undefined) {
+          if (Option.isNone(yield* askable(now)) || asking?.open.id !== id) return yield* later(id)
+          yield* close(open, "dropped: unanswered, others waiting")
+          // A catch-up offered gives way to what a thread waits on him for, as a thread's question does to another's, and is offered
+          // once more no sooner than a minute later.
+          if (offer !== undefined) offered = { ...offer, asks: count + 1, notBefore: now + Duration.toMillis(again) }
+          else if (from !== undefined) asked.push(resumed(from, open, { asks: count + 1, back: "still", notBefore: now + Duration.toMillis(again) }))
+          return yield* offering
+        }
+        yield* later(id)
+      })
+
+    /**
+     * What was being said has been dealt with, and left the open question
+     * open, so as far as that goes it came to nothing: once nothing else
+     * being said holds it, it's taken up again as `resume` has it. Unless
+     * all of it may have been yapd's own words, `own`, let go as never said:
+     * then it's left as it was, like an offer of what he missed still
+     * waiting its turn, and only one he'd begun to hear is waited on again.
+     */
+    const release = (key: string, own = false) =>
+      Effect.suspend(() => {
+        if (asking === undefined || !asking.held.delete(key) || asking.held.size > 0) return Effect.void
+        if (own) return asking.said === undefined ? Effect.void : later(asking.open.id)
+        return resume(asking.open.id)
+      })
+
+    /**
+     * The open question, once a press or a request that came to nothing, like
+     * a faint word Whisper hears in silence, no longer holds it, nor anything
+     * else: a thread's he hadn't heard all of, which the press may have cut
+     * off or kept from being said at all, comes back at once from the part
+     * he'd got to, using up none of its asks nor its interruptions, since that
+     * was no asking of his, nor anything taking its place; anything else is
+     * waited on again, as if it went unanswered.
+     */
+    const resume = (id: string) =>
+      Effect.suspend(() => {
+        if (asking?.open.id !== id || asking.held.size > 0) return Effect.void
+        // What came in while yapd was off is offered the once: a press that came to nothing over it lets it go, as anything but a yes does.
+        if (asking.offer?.kind === "missed") return Effect.zipRight(close(asking.open, "dropped: unanswered"), Effect.forkIn(turn.withPermits(1)(offering), scope))
+        if (asking.open.kind !== "question" || asking.from === undefined || asking.whole !== undefined) return later(id)
+        return Effect.zipRight(close(asking.open, "dropped: nothing said"), Effect.forkIn(turn.withPermits(1)(offering), scope))
+      })
+
+    /** Says something now, ahead of the rest of the answer, like that it's looking. */
+    const meanwhile = (spoken: string, thought: Thought) =>
+      Effect.flatMap(Clock.currentTimeMillis, (at) => {
+        const timing = timed(thought, at, { timed: `${thought.decision.act}, meanwhile` })
+        return options.tell(
+          { id: mint(at, "a"), kind: "answer", priority: "needs-you", spoken, at, stale: Effect.succeed(false), ...(timing === undefined ? {} : { timing }) },
+          thought.utterance.turns,
+        )
+      })
+
+    /**
+     * An answer, which what he said next can be about, decided at once or on a
+     * `second` look, with the `card` that goes up with it for what it couldn't
+     * read aloud, and what's said in its place if no app shows it by then, as
+     * a step of its request: the rest of it follows.
+     */
+    const answer = (
+      spoken: string,
+      about: Option.Option<Threads.Listed>,
+      thought: Thought,
+      said: Lines,
+      step: number,
+      second?: Brain.Decision,
+      aside?: { readonly card: Show.Draft; readonly unseen?: string },
+    ) =>
+      Effect.gen(function* () {
+        const text = spoken.trim() === "" ? said.misheard : spoken.trim()
+        const ref = Option.map(about, ({ ref }) => ref)
+        const told = {
+          say: text,
+          subject: overSubagent(thought.subject, ref, text) ?? { _tag: "Answer", said: text, about: ref },
+          kind: "answer",
+          ...(second === undefined ? {} : { second }),
+          ...(aside === undefined ? {} : { card: aside.card, unreadable: true }),
+          ...(aside?.unseen === undefined ? {} : { unseen: aside.unseen.trim() }),
+        } satisfies Outcome
+        return yield* onward(thought, told, ref, step + 1, said)
+      })
+
+    /** Reads what a thread is doing now, and answers from it with a second look. */
+    const look = (target: Threads.Listed, thought: Thought, said: Lines, step: number) =>
+      Effect.gen(function* () {
+        yield* meanwhile(said.checking, thought)
+        const detail = yield* threads.detail(target.ref, target.thread.pendingRuntimeRequest?.id).pipe(Effect.either)
+        if (Either.isLeft(detail)) {
+          yield* Effect.logWarning(`Could not read ${target.called}`, detail.left)
+          return reply(`I couldn't read ${target.called} just now${addressed(said)}. ${detail.left.reason}`, thought.subject)
+        }
+        const sent = [...(thought.situation.sent ?? []), ...(yield* routinesSent(target.ref))]
+        const second = { ...thought.situation, ...(sent.length === 0 ? {} : { sent }), second: Option.some({ ref: target.ref, detail: detail.right }) }
+        const decided = yield* brain.decide(second).pipe(Effect.either)
+        if (Either.isLeft(decided) || decided.right.spoken.trim() === "") {
+          if (Either.isLeft(decided)) yield* Effect.logWarning("Could not answer from what I read", decided.left)
+          return reply(`I read ${target.called}, but couldn't put it into words just now${addressed(said)}.`, thought.subject)
+        }
+        const spoken = decided.right.spoken.trim()
+        // What it waits on can't be read out, so its card goes up with the answer, ahead of whatever the rest of the request comes to.
+        return yield* Option.match(yield* options.show.aside(target, detail.right, spoken, said), {
+          onNone: () => answer(spoken, Option.some(target), thought, said, step, decided.right),
+          onSome: (aside) => answer(aside.say, Option.some(target), thought, said, step, decided.right, aside),
+        })
+      })
+
+    /** Searches the threads, or what yapd heard and said, and answers from what's found with a second look. */
+    const find = (thought: Thought, said: Lines, step: number) =>
+      Effect.gen(function* () {
+        const { decision, situation } = thought
+        const wanted = decision.text.trim() || thought.utterance.heard
+        const now = yield* Clock.currentTimeMillis
+        let found: ReadonlyArray<string>
+        /** The machines whose threads a search couldn't look through, so finding nothing isn't said as if there were nothing there. */
+        const missed = new Set<string>()
+        if (decision.how === "journal") {
+          const words = Threads.distinctive(wanted)
+          const kept = yield* journal.since(now - 30 * day, { most: 2000 })
+          found = kept
+            .map((entry) => ({ entry, score: words.filter((word) => `${entry.said ?? ""} ${entry.text ?? ""}`.toLowerCase().includes(word)).length }))
+            .filter(({ score }) => score > 0)
+            .toSorted((one, other) => other.score - one.score || other.entry.at - one.entry.at)
+            .slice(0, 8)
+            // His own words, where they're what's shown, with what of them may have been yapd's own voice.
+            .map(({ entry }) =>
+              `${ago(entry.at, now)}, ${entry.kind}${entry.project === undefined || entry.project.trim() === "" ? "" : ` in ${entry.project}`}: ${Brain.fenced(unroutined(entry).said ?? unroutined(entry).text ?? "")}${
+                entry.said === undefined && (entry.kind === "dictation" || entry.kind === "reply") ? Brain.ownVoice(Brain.overheardIn(entry)) : ""
+              }`,
+            )
+        } else {
+          const search = (words: string) =>
+            Effect.map(threads.search(words), (searched) => {
+              for (const name of searched.missed) missed.add(name)
+              return searched.matches
+            })
+          const matches = yield* Threads.matching(wanted, search).pipe(Effect.either)
+          if (Either.isLeft(matches)) return reply(`I couldn't search your threads just now${addressed(said)}. ${matches.left.reason}`, thought.subject)
+          found = yield* Effect.forEach(matches.right.slice(0, 8), ({ ref, snippet }) =>
+            Effect.gen(function* () {
+              const listed = situation.desk.threads.find((listed) => Threads.same(listed.ref, ref))
+              const title = listed?.handle ?? Option.match(yield* threads.find(ref), { onNone: () => "a thread", onSome: ({ title }) => Brain.fenced(title, 90) })
+              return `${title}: ${Brain.fenced(snippet, 300)}`
+            }),
+          )
+        }
+        if (found.length === 0) {
+          const unsearched = [...missed].map((name) => `${name}'s`).join(" or ")
+          return reply(
+            missed.size === 0
+              ? `I couldn't find anything like that${addressed(said)}.`
+              : `I couldn't find anything like that${addressed(said)}, but I couldn't search ${unsearched} threads just now.`,
+            thought.subject,
+          )
+        }
+        const decided = yield* brain.decide({ ...situation, second: Option.some({ found }) }).pipe(Effect.either)
+        if (Either.isLeft(decided) || decided.right.spoken.trim() === "") {
+          return reply(`I found something, but couldn't put it into words just now${addressed(said)}.`, thought.subject)
+        }
+        const about = Option.fromNullable(called(situation, decided.right.target))
+        return yield* answer(decided.right.spoken, about, thought, said, step, decided.right)
+      })
+
+    /**
+     * Notes work as it starts, as part of starting it, so turning yapd off can't
+     * come between the two: with what he dictated for it, and what of that may
+     * have been yapd's own voice, which is kept with the journal's entry for it.
+     */
+    const noting =
+      (utterance: Utterance, dictated: { readonly heard: string } & Brain.Overheard): Drafts.Noted =>
+      ({ started, machine, request, spoken, about }) =>
+        Effect.gen(function* () {
+          yield* threads.keep({ machine: machine.name, id: started.thread }, { prompt: request.prompt, dictated: dictated.heard, description: about })
+          const now = yield* Clock.currentTimeMillis
+          yield* journal.write({
+            at: now,
+            kind: "started",
+            machine: machine.name,
+            project: started.project,
+            thread: started.thread,
+            directory: started.directory,
+            said: spoken,
+            text: request.prompt,
+            utterance: utterance.id,
+            ...(dictated.echo === undefined ? {} : { detail: { dictated: Brain.overheard(dictated) } }),
+          })
+          yield* Effect.logInfo(`Started ${started.thread}, ${((now - utterance.at) / 1000).toFixed(1)} s after it was said`)
+        })
+
+    /**
+     * Shows work as being started for a request, in place of whatever was
+     * shown for it before, and gives back what stops showing it, unless
+     * something else is shown for it by then.
+     */
+    const underWay = (utterance: Utterance, where: { readonly project: string; readonly machine: Drafts.Machine }, said: string) =>
+      Effect.gen(function* () {
+        const shown: Kept = {
+          id: 0,
+          at: yield* Clock.currentTimeMillis,
+          kind: "started",
+          machine: where.machine.name,
+          project: where.project,
+          said,
+          utterance: utterance.id,
+        }
+        starting.set(utterance.id, shown)
+        return Effect.sync(() => {
+          if (starting.get(utterance.id) === shown) starting.delete(utterance.id)
+        })
+      })
+
+    /**
+     * What's said of new work. `asked` is whether the request was asked about
+     * already, which it never is twice, nor while another question is open.
+     */
+    const begun = (outcome: Drafts.Outcome, thought: Thought, said: Lines, asked: boolean): Effect.Effect<Outcome> =>
+      Effect.gen(function* () {
+        const { utterance } = thought
+        switch (outcome._tag) {
+          case "Said":
+            return reply(outcome.spoken, { _tag: "Nothing" })
+          case "Started": {
+            const { started, machine, spoken } = outcome
+            return {
+              say: spoken,
+              subject: { _tag: "Answer", said: spoken, about: Option.some({ machine: machine.name, id: started.thread }) },
+              kind: "done",
+              timed: `start on ${machine.name}, ${started.worktree ? "in a worktree" : "without a worktree"}`,
+              changed: { what: "acted", utterance: utterance.id },
+              // Only once it's known to play, so a line for going ahead that's dropped as yapd is turned off, or can't be played, never counts as the last one he heard.
+              confirmed: persona.said(spoken),
+            } satisfies Outcome
+          }
+          case "Asked": {
+            const about = outcome.about || "that"
+            if (asked || asking !== undefined) {
+              yield* Effect.logInfo(`Leaving it, rather than ask: ${outcome.question}`)
+              return reply(unasked(outcome.about, said), { _tag: "Nothing" })
+            }
+            const words = Brain.unrepeated({ kind: "project", asked: outcome.question, about: outcome.about }, yield* askedLately, said)
+            if (words === undefined) return reply(`I still can't tell which project ${about} goes in, so I left it${addressed(said)}.`, { _tag: "Nothing" })
+            return yield* opening(
+              {
+                kind: "project",
+                utterance: utterance.id,
+                heard: utterance.heard,
+                // With what may have been its own voice in it, for whatever reads it back.
+                ...overItself(utterance),
+                decision: Brain.decision({ act: "start", text: utterance.heard }),
+                candidates: [],
+                asked: words,
+                about: outcome.about,
+                material: Option.some(outcome.material),
+                resend: Option.none(),
+              },
+              utterance,
+            )
+          }
+          case "Launching": {
+            // T3 Code can take minutes to get a worktree ready, so what comes of it is said when it's ready, and nothing else waits for it meanwhile.
+            // The speaker stays ready only for a start without one: a worktree takes longer than it would wait for anything on its way.
+            const arrived = yield* options.awaiting
+            const letGo = outcome.worktree ? Effect.void : yield* options.coming
+            const settled = yield* underWay(utterance, outcome, `Starting ${outcome.about || "it"}, which T3 Code is still getting ready.`)
+            // Under way until the launch itself settles, not only until what's said of it stops: turning yapd off stops that, but not the launch.
+            yield* outcome.then.pipe(Effect.ensuring(settled), Effect.forkIn(scope))
+            yield* background(
+              outcome.then.pipe(
+                Effect.flatMap((after) => begun(after, thought, said, asked)),
+                Effect.flatMap((told) => deliver(told, thought)),
+                Effect.ensuring(arrived),
+                Effect.ensuring(letGo),
+                Effect.annotateLogs({ utterance: utterance.id }),
+              ),
+              utterance.turns,
+            )
+            return quiet({ _tag: "Nothing" })
+          }
+        }
+      })
+
+    /**
+     * The prompt for what was said, begun as it was heard when it might be new
+     * work, or now. None if yapd was turned off meanwhile: nothing starts for
+     * what was said before.
+     */
+    const written = (utterance: Utterance, lines: ReadonlyArray<Line>, answering?: Material) =>
+      Effect.gen(function* () {
+        const ahead = writing.get(utterance.id)
+        // Written here when it wasn't begun ahead, so it stops with whatever stops this, like yapd being turned off.
+        const prompt = yield* ahead === undefined ? drafts.begin(lines, answering) : Fiber.join(ahead)
+        return (yield* outdated(utterance.turns)) ? Option.none() : Option.some(prompt)
+      })
+
+    /** Starts new work, as a step of its request. Whether it is new work, the brain decided; where it goes and what it says, the writer. */
+    const start = (thought: Thought, said: Lines, step: number) =>
+      Effect.gen(function* () {
+        const { utterance } = thought
+        // Said over yapd's first seconds, the writer is told what of it may be its own voice, as the brain was.
+        const ready = yield* written(utterance, [{ speaker: "user", text: utterance.heard, ...overItself(utterance) }])
+        if (Option.isNone(ready)) return quiet(thought.subject)
+        const prompt = ready.value
+        if (Either.isLeft(prompt)) return reply(prompt.left, thought.subject)
+        const outcome = yield* drafts.start(prompt.right, noting(utterance, utterance), { utterance: utterance.id, step })
+        const told = yield* begun(outcome, thought, said, false)
+        // What comes of starting it is known only later, so the rest isn't done on the strength of it, and he's told so, ahead of any question.
+        const rest = thought.decision.rest.trim()
+        if (rest === "") return told
+        const left = `I left the rest for now${addressed(said)}: ${Brain.speakable(rest, thought.situation.desk).replace(/[.!?]+$/, "")}.`
+        return told.kind === "question"
+          ? { ...told, say: joined(left, told.say, said) }
+          : { ...told, say: joined(told.say, left, said), kind: told.kind === "none" ? "answer" : told.kind }
+      })
+
+    /** An answer to which project new work is for: the prompt is written again with it, and a second question isn't asked. */
+    const project = (open: Open, thought: Thought, said: Lines) =>
+      Effect.gen(function* () {
+        const { utterance } = thought
+        const lines: ReadonlyArray<Line> = [
+          { speaker: "yapd", text: open.asked },
+          { speaker: "user", text: utterance.heard, ...overItself(utterance) },
+        ]
+        const ready = yield* written(utterance, lines, Option.getOrUndefined(open.material))
+        if (Option.isNone(ready)) return quiet(thought.subject)
+        const prompt = ready.value
+        if (Either.isLeft(prompt)) return reply(prompt.left, thought.subject)
+        if (["ask", "wait", "drop"].includes(prompt.right.decision.action)) {
+          yield* Effect.logInfo(`Leaving it, since that didn't settle the project. ${prompt.right.decision.why}`)
+          return reply(said.leaving, thought.subject)
+        }
+        const outcome = yield* drafts.start(prompt.right, noting(utterance, open), { utterance: utterance.id, step: 0 })
+        if (outcome._tag === "Asked") {
+          yield* Effect.logInfo("Leaving it, since that didn't settle the project")
+          return reply(said.leaving, thought.subject)
+        }
+        return yield* begun(outcome, thought, said, true)
+      })
+
+    /** What a thread is called in what's said, unless it's the one he's on about, which goes without saying. */
+    const naming = (ref: Threads.Ref, situation: Brain.Situation) =>
+      Option.exists(Brain.focused(situation), ({ ref: focus }) => Threads.same(focus, ref))
+        ? Option.none<string>()
+        : Option.fromNullable(situation.desk.threads.find((listed) => Threads.same(listed.ref, ref))?.called)
+
+    /**
+     * How the part of a thread's question being asked would be answered by
+     * picking each of its options, as what's done says it of the thread he's
+     * on: only its last part, or its only one, since a pick on a part before
+     * that is followed by the next part instead.
+     */
+    const picks = (open: Open, said: Lines): ReadonlyArray<string> => {
+      const { asks } = open
+      const to = open.candidates[0]
+      if (asks?._tag !== "Question" || to === undefined || asks.part !== asks.questions.length - 1) return []
+      const question = asks.questions[asks.part]
+      if (question === undefined) return []
+      const part = Questions.said(question, Option.none())
+      return part.options.map((_, index) =>
+        Hands.done({ _tag: "Reply", to, requestId: asks.requestId, answers: {}, said: Option.some(Questions.spoken(part, [index])) }, "now", said, Option.none()),
+      )
+    }
+
+    /** Two steps' lines as one, "sir" said once. */
+    const joined = (first: string, then: string, said: Lines) => {
+      const sir = addressed(said)
+      return `${first} ${sir !== "" && first.includes(sir) ? then.replace(sir, "") : then}`.trim()
+    }
+
+    /** An outcome with what's said of it changed, both as it's worked out and as it's said in its place if no app shows its card by then. */
+    const retold = (outcome: Outcome, change: (say: string) => string): Outcome => ({
+      ...outcome,
+      say: change(outcome.say),
+      ...(outcome.unseen === undefined ? {} : { unseen: change(outcome.unseen) }),
+    })
+
+    /**
+     * What's said of a step that didn't go, or wasn't done, with what was left
+     * of its request after it, since a failure stops the rest, and nothing he
+     * asked for goes without a word. `desk` is the one the rest was worked out
+     * against, which a handle in it is named by; none names nothing. Held
+     * back as a secret, the rest is his words too, which may be what gave it
+     * away, so it's said to be left without them, never read out or noted;
+     * `unsaid`, it's said to be left without them too.
+     */
+    const unfinished = (outcome: Outcome, rest: string, said: Lines, desk: Threads.Desk = nowhere, unsaid = false): Outcome => {
+      const left = Brain.speakable(rest, desk).replace(/[.!?]+$/, "")
+      if (left === "") return outcome
+      const line = outcome.withheld === true || unsaid ? `I left the rest${addressed(said)}.` : `I left the rest${addressed(said)}: ${left}.`
+      return { ...retold(outcome, (say) => joined(say, line, said)), kind: outcome.kind === "none" ? "answer" : outcome.kind }
+    }
+
+    /** What's said ahead of what comes of something new, when the question it took the place of held more of its request: that it was left. */
+    const ahead = (outcome: Outcome, rest: string, said: Lines): Outcome => {
+      const left = Brain.speakable(rest, nowhere).replace(/[.!?]+$/, "")
+      if (left === "") return outcome
+      return { ...retold(outcome, (say) => joined(`I left the rest${addressed(said)}: ${left}.`, say, said)), kind: outcome.kind === "none" ? "answer" : outcome.kind }
+    }
+
+    /**
+     * What's said of a question he was yet to hear when something new took
+     * its place, since he'd moved on: what didn't go, and the rest of its
+     * request. Nothing is of what a thread waits on him for, which is asked
+     * after instead.
+     */
+    const unheardLeft = (open: Open, said: Lines): Outcome => {
+      if (requestOf(open) !== undefined) return quiet({ _tag: "Nothing" })
+      const left = open.news === undefined ? Brain.left(open, said) : `${open.news} ${unaskedAfter(open)}, since you'd moved on.`
+      return unfinished(withoutWords(ofRoutines(reply(left, { _tag: "Nothing" }), askedRoutines(open)), open), open.decision.rest, said)
+    }
+
+    /**
+     * What a decision to change a thread asks of the hands, if it says enough
+     * to do it, from what he said, `utterance`, as the step `at` is. `last` is
+     * the last thing done, which taking back means.
+     */
+    const acted = (
+      decision: Brain.Decision,
+      target: Option.Option<Threads.Listed>,
+      utterance: Pick<Utterance, "heard" | "echo">,
+      last: Option.Option<Ledger.Row>,
+      at: Pick<Stepping, "step" | "working" | "pinned">,
+      asks?: Asks,
+      situation: Pick<Brain.Situation, "desk" | "archived"> = { desk: nowhere },
+    ): Hands.Act | undefined => {
+      // Taking back what was done to a thread yapd archived, it's named by its handle in ARCHIVED, never on the desk.
+      const to = Option.orElse(Option.map(target, ({ ref }) => ref), () =>
+        decision.act === "undo" ? Option.map(Brain.archivedBy(decision.target, situation), ({ ref }) => ref) : Option.none(),
+      )
+      // Taking back a stop is letting it carry on, unless he means a message.
+      const stopped = Option.exists(
+        last,
+        (row) =>
+          row.kind === "stop" &&
+          row.state === "sent" &&
+          Option.match(to, { onNone: () => true, onSome: ({ machine, id }) => row.machine === machine && row.thread === id }),
+      )
+      switch (decision.act) {
+        case "send": {
+          if (Option.isNone(to)) return undefined
+          // To a thread waiting on a question he's heard, it goes as the answer to the part he'd got to, as `answerFor` filled it in.
+          if (asks?._tag === "Question") {
+            const replied = replying(asks)
+            return replied === undefined ? undefined : { _tag: "Reply", to: to.value, requestId: asks.requestId, answers: replied.answers, said: Option.none(), as: "message" }
+          }
+          // With its words left out, it's his as he said them, unless some of them may have been yapd's own voice: then there's nothing to send.
+          const text = decision.text.trim() || ownWords(utterance)
+          return text === "" ? undefined : { _tag: "Message", to: to.value, text, how: when(decision.how) }
+        }
+        case "stop":
+          return Option.isNone(to) ? undefined : { _tag: "Stop", to: to.value }
+        case "undo": {
+          // Taking back a message, or what tidying did, is only that, whatever came after.
+          const only = decision.how === "message" || decision.how === "tidy" ? decision.how : undefined
+          // Several he named of what tidying just did, by their handles in ARCHIVED, are all that's taken back: any of them not there is
+          // nothing taken back, never all of it.
+          if (Brain.tidyHandles(decision.target).length > 1) {
+            const among = Option.getOrUndefined(Brain.tidyTargets(decision.target, situation))
+            if (only !== "tidy" || among === undefined) return undefined
+            return { _tag: "Undo", to: Option.none(), carry: false, only, among: among.map(({ ref }) => ref) }
+          }
+          return {
+            _tag: "Undo",
+            to,
+            carry: decision.how === "carry" || (only === undefined && stopped),
+            ...(only === undefined ? {} : { only }),
+            // The step he said yes to taking back, asked about by what it did, whatever was done since.
+            ...(at.pinned === undefined ? {} : { pinned: at.pinned }),
+          }
+        }
+        case "tidy": {
+          // Exactly the threads it names, each as it's called, never fewer: one not there is nothing done.
+          const named = Brain.tidyTargets(decision.target, situation)
+          const what = decision.how
+          if (Option.isNone(named) || named.value.length === 0 || !Hands.isTidying(what)) return undefined
+          const until = Brain.instant(decision.when)
+          if (what === "snooze" && Number.isNaN(until)) return undefined
+          return {
+            _tag: "Tidy",
+            to: named.value.map(({ ref, called }) => ({ ref, called })),
+            what,
+            ...(what === "rename" ? { title: decision.text.trim() } : {}),
+            ...(what === "snooze" ? { until: new Date(until).toISOString() } : {}),
+            ...(at.working === undefined || at.working.length === 0 ? {} : { working: at.working }),
+          }
+        }
+        case "decide": {
+          if (Option.isNone(to) || asks?._tag !== "Approval") return undefined
+          // Allowed only with "approve" as his answer, however it came here, never a plain yes, nor with more after it, nor in the rest of a
+          // request, whose words are the model's; for the rest of the thread's work only when he said so, whatever the model took it for;
+          // never for always.
+          const allowing = decision.how === "accept" || decision.how === "session"
+          if (allowing && (at.step > 0 || decision.rest.trim() !== "" || !Brain.approving(utterance.heard))) return undefined
+          const allowed: Hands.Decision | undefined =
+            decision.how === "decline" ? "decline" : decision.how === "session" && Brain.forSession(utterance.heard) ? "acceptForSession" : allowing ? "accept" : undefined
+          return allowed === undefined ? undefined : { _tag: "Decide", to: to.value, requestId: asks.requestId, decision: allowed }
+        }
+        case "reply": {
+          if (Option.isNone(to) || asks?._tag !== "Question") return undefined
+          const replied = replying(asks)
+          // A message he dictated, going as its answer once he let the rest of it go, is said to have gone as that.
+          return replied === undefined ? undefined : { _tag: "Reply", to: to.value, requestId: asks.requestId, ...replied, ...(decision.how === "left" ? { as: "left" as const } : {}) }
+        }
+        default:
+          return undefined
+      }
+    }
+
+    /**
+     * What a thread's question is answered with, from what he answered of
+     * each part: the options he picked, as it takes them, his own words as he
+     * said them, and nothing for a part he skipped. Never something he didn't
+     * say, nor nothing at all. What's said back is the options he picked for
+     * the part he just answered, when he picked any: never one from a part
+     * before, acknowledged already, as if it answered one he skipped.
+     */
+    const replying = (asks: QuestionAsks) => {
+      const sent = Questions.answers(asks, asks.collected)
+      if (Either.isLeft(sent) || Object.keys(sent.right).length === 0) return undefined
+      const just = asks.questions[asks.part - 1]
+      const answer = just === undefined ? undefined : asks.collected[just.id]
+      const said = just !== undefined && answer?._tag === "Picked" ? Option.some(Questions.spoken(Questions.said(just, Option.none()), answer.options)) : Option.none<string>()
+      return { answers: sent.right, said }
+    }
+
+    /**
+     * Says what came of changing a thread, and notes it, why too when it
+     * didn't go: as a question when there's one to ask, like whether to send
+     * again what may not have got there, under the same ids. Once a step is
+     * done, the rest of the request is worked out and done as the next step.
+     * `free` is how what follows the note is let be stopped, when the change
+     * and its note can't be. `putBy` when what an answer that didn't go was
+     * to is put back to be asked again, which he's told. `worded` when his
+     * own words went in an answer to a thread's question, as in a message.
+     */
+    const told = (
+      act: Hands.Act,
+      outcome: Hands.Outcome,
+      thought: Thought,
+      said: Lines,
+      at: {
+        readonly step: number
+        readonly commandId: string
+        readonly quietly?: boolean
+        readonly besides?: string
+        readonly putBy?: boolean
+        readonly routine?: string
+        readonly worded?: boolean
+      },
+      free: <A>(effect: Effect.Effect<A>) => Effect.Effect<A> = (effect) => effect,
+    ): Effect.Effect<Outcome> =>
+      Effect.gen(function* () {
+        const { utterance, situation } = thought
+        /** Sending again a message other than the one asked for now, like the word to carry on: as it went, with the rest of the request after it. */
+        const resending = (text: string, how: string) => Brain.decision({ act: "send", text, how, rest: thought.decision.rest })
+        const onceMore = "again" in outcome ? outcome.again : Option.none<string>()
+        // What may go again is about the thread it was for, which "carry on" needn't name.
+        const kept = Option.isSome(onceMore) ? yield* ledger.get(onceMore.value) : Option.none<Ledger.Row>()
+        // A question about it is about the words that went, or were to, at the time they went at, like behind a turn that was waiting, which an answer can't stand in for.
+        const went = Option.flatMap(kept, Hands.went)
+        const decision =
+          act._tag === "Message"
+            ? { ...thought.decision, text: act.text, ...Option.match(went, { onNone: () => ({}), onSome: ({ how }) => ({ how }) }) }
+            : thought.decision
+        const ref =
+          outcome._tag === "Done"
+            ? outcome.to
+            : outcome._tag === "Twin" || outcome._tag === "Read"
+              ? { machine: outcome.row.machine, id: outcome.row.thread }
+              : outcome._tag === "Tidied"
+                ? outcome.each.length === 1
+                  ? outcome.each[0]?.to
+                  : undefined
+                : Option.isSome(kept)
+                  ? { machine: kept.value.machine, id: kept.value.thread }
+                  : act._tag === "Undo"
+                    ? Option.getOrUndefined(act.to)
+                    : act._tag === "Tidy"
+                      ? act.to.length === 1
+                        ? act.to[0]?.ref
+                        : undefined
+                      : act.to
+        // Tidying, it's always named, focus or not, as it was called when he asked, which an archived one is only known by.
+        const called =
+          act._tag === "Tidy" && act.to.length === 1 ? Option.fromNullable(act.to[0]?.called) : ref === undefined ? Option.none<string>() : naming(ref, situation)
+        // In a question it's always named, since the question has to say what it's about.
+        const name = (ref === undefined ? undefined : situation.desk.threads.find((listed) => Threads.same(listed.ref, ref))?.called) ?? "it"
+        const subject: Subject = { _tag: "Answer", said: "", about: Option.fromNullable(ref) }
+        const now = yield* Clock.currentTimeMillis
+        // Held back since it could give a secret away, his words aren't kept, here or with what he said.
+        const withheld = Hands.guarded(outcome)
+        // One of his routines' steps, as code put them in for its name, is noted as that routine, and asked about as it, so a model is only
+        // ever told of it by its name.
+        const routine = act._tag === "Message" && at.routine !== undefined ? { routine: at.routine } : {}
+        /**
+         * The entry it's noted in: what went, or didn't and why, and what's
+         * said of it. Only a message that went is noted as sent; what didn't
+         * go, or only asks first, is something done or said. Once yapd was
+         * turned off since he said it, nothing is said of it, so nothing is
+         * noted as said: what would have been is kept aside.
+         */
+        const noting = (line: string | undefined, detail: Record<string, unknown>) =>
+          Effect.gen(function* () {
+            const unsaid = line !== undefined && (yield* outdated(utterance.turns))
+            yield* journal.write({
+              at: now,
+              kind: act._tag === "Message" && outcome._tag === "Done" ? "sent" : "action",
+              ...(ref === undefined ? {} : { machine: ref.machine, thread: ref.id }),
+              ...(act._tag === "Message" && !withheld ? { text: act.text } : {}),
+              ...(line === undefined || unsaid ? {} : { said: line }),
+              utterance: utterance.id,
+              detail: {
+                commandId: at.commandId,
+                act: act._tag,
+                outcome: outcome._tag,
+                ...(unsaid ? { unsaid: line } : {}),
+                ...(routine.routine === undefined ? {} : { routines: [routine.routine] }),
+                ...detail,
+              },
+            })
+          })
+        const asking = (open: Omit<Open, "id" | "version" | "at">) => free(opening(open, utterance))
+        const base = {
+          utterance: utterance.id,
+          heard: utterance.heard,
+          ...overItself(utterance),
+          material: Option.none(),
+          candidates: ref === undefined ? [] : [ref],
+        }
+        switch (outcome._tag) {
+          case "Done": {
+            // Gone as asked after a step said on its own, it's noted and not said; held behind a turn that's waiting, or in the queue a stop held till he says, he's told why.
+            const quietly = at.quietly === true && outcome.waiting === undefined && !Hands.held(outcome)
+            // His line for going ahead, a different one from the last he heard and from one the step before says with it, picked only when it's said, and noted only once it plays.
+            const onIt = !quietly && Hands.goesAhead(act, outcome.how, outcome) ? yield* persona.onIt(at.besides) : undefined
+            const line = quietly ? "" : Hands.done(act, outcome.how, onIt === undefined ? said : { ...said, onIt }, called, outcome)
+            yield* noting(line === "" ? undefined : line, {
+              how: outcome.how,
+              ...(outcome.waiting === undefined ? {} : { waiting: outcome.waiting }),
+              ...(outcome.stopped === undefined ? {} : { stopped: outcome.stopped }),
+            })
+            // What taking it back acts on, by the request its step is under, as a word to send again keeps the ids it first went under: a
+            // message, a stop or the word to carry on, never a message withdrawn or an answer to a thread's question, which it only refuses.
+            const undoable = act._tag === "Message" || act._tag === "Stop" || (act._tag === "Undo" && act.carry)
+            const by = undoable ? Option.match(yield* ledger.get(at.commandId), { onNone: () => utterance.id, onSome: (row) => row.utterance }) : undefined
+            const first: Outcome = {
+              say: line,
+              subject: { ...subject, said: line },
+              kind: "done",
+              ...(by === undefined ? {} : { changed: { what: "acted", utterance: by } }),
+              // Only once it's known to play, so a line for going ahead dropped as yapd was turned off, or that couldn't be played, never counts as the last one he heard.
+              // With none of its own, like a stop, the one said before it in the same breath is still the one the next is kept from being.
+              ...(onIt === undefined ? (at.besides === undefined ? {} : { onIt: at.besides }) : { onIt, confirmed: persona.said(onIt) }),
+            }
+            // Taking a stop back is two steps, letting go of the queue, then the message to carry on, as is a restart done as a stop, then the message.
+            return yield* free(onward(thought, first, Option.some(outcome.to), at.step + (act._tag === "Undo" || outcome.stopped !== undefined ? 2 : 1), said))
+          }
+          case "Twin": {
+            // One that may not have got there is offered again under its own ids; one that did, to a thread that hasn't answered since, is asked about.
+            const doing = `send that to ${name} again`
+            // Twinned by an earlier word to carry on, that's what a yes sends.
+            const twin = act._tag === "Message" ? decision : Option.match(Hands.went(outcome.row), { onNone: () => decision, onSome: ({ text, how }) => resending(text, how) })
+            yield* noting(undefined, { twin: outcome.row.commandId })
+            if (outcome.row.state !== "sent") {
+              const news = `I couldn't confirm that got ${Option.match(called, { onNone: () => "there", onSome: (name) => `to ${name}` })} before${addressed(said)}.`
+              const question = unaddressed(said.again, said)
+              const asked = `${news} ${question}`
+              // Sent again under its own ids, it goes at the time it first went, whatever time these words say, like at once for one told to a turn once it was stopped.
+              const again = Option.match(Hands.went(outcome.row), { onNone: () => twin, onSome: ({ how }) => ({ ...twin, how }) })
+              return yield* asking({ ...base, ...routine, kind: "resend", decision: again, asked, about: doing, resend: Option.some(outcome.row.commandId), news, question })
+            }
+            return yield* asking({
+              ...base,
+              ...routine,
+              kind: "confirm",
+              decision: twin,
+              asked: Hands.twice(outcome.row.at, now, said, called),
+              about: doing,
+              resend: Option.none(),
+              news: Hands.sentBefore(outcome.row.at, now, said, called),
+              question: Hands.twiceAsks,
+            })
+          }
+          case "Read": {
+            const text = typeof outcome.row.body === "object" && outcome.row.body !== null && "text" in outcome.row.body ? String(outcome.row.body.text) : ""
+            yield* noting(undefined, { read: outcome.row.commandId })
+            return yield* asking({
+              ...base,
+              kind: "offer",
+              decision: Brain.decision({ act: "send", text: Hands.ignore(text), how: "now", rest: decision.rest }),
+              asked: Hands.read(said, called),
+              about: `tell ${name} to ignore that`,
+              resend: Option.none(),
+              news: Hands.readAlready(said, called),
+              question: Hands.readAsks,
+            })
+          }
+          case "Tidied": {
+            // Every thread named, whatever he's on about, and with several, each that didn't go, and why.
+            const line = Hands.tidied(outcome, said, now)
+            const went = outcome.each.some(({ outcome }) => outcome._tag === "Done")
+            yield* noting(line, {
+              tidied: outcome.each.map(({ to, command, outcome, already }) => ({
+                ...to,
+                command: command._tag,
+                outcome: outcome._tag,
+                ...("reason" in outcome ? { reason: outcome.reason } : {}),
+                ...(already === true ? { already } : {}),
+              })),
+              ...(outcome.undone ? { undone: true } : {}),
+            })
+            // Only what went is a change "scratch that" takes back.
+            const first: Outcome = { say: line, subject: { ...subject, said: line }, kind: "done", ...(went ? { changed: { what: "acted", utterance: utterance.id } } : {}) }
+            // None of it went, the rest of the request doesn't either.
+            return went ? yield* free(onward(thought, first, Option.fromNullable(ref), at.step + 1, said)) : unfinished(first, decision.rest, said, situation.desk)
+          }
+          case "Moot": {
+            // Dealt with in T3 Code meanwhile: nothing's done, and he's told so, and the rest of the request still is.
+            const line = Brain.dealtWith(said)
+            yield* noting(line, { reason: "It no longer waited on it." })
+            return yield* free(onward(thought, { say: line, subject: { ...subject, said: line }, kind: "done" }, Option.fromNullable(ref), at.step + 1, said))
+          }
+          default: {
+            const line = `${Hands.failed(act, outcome, said, called)}${at.putBy === true ? ` ${onceBack}` : ""}`
+            yield* noting(line, { reason: outcome.reason, ...(outcome.stopped === undefined ? {} : { stopped: outcome.stopped }) })
+            // What didn't go, and why, without the question, which isn't always put as the line puts it, like "couldn't tell it yet" for "the
+            // message didn't get there": so the question is kept as the line asks it, never worked out from the news.
+            const news = Hands.failed(act, "again" in outcome ? { ...outcome, again: Option.none<string>() } : outcome, said, called)
+            const question = unaddressed(said.again, said)
+            if (Option.isSome(onceMore) && act._tag === "Message") {
+              return yield* asking({ ...base, ...routine, kind: "resend", decision, asked: line, about: `send that to ${name} again`, resend: onceMore, news, question })
+            }
+            // The word to carry on, after letting go of the queue, is offered again the same way.
+            if (Option.isSome(onceMore) && act._tag === "Undo" && act.carry) {
+              return yield* asking({
+                ...base,
+                kind: "resend",
+                decision: resending(Hands.carryOn, "now"),
+                asked: line,
+                about: `ask ${name} to carry on`,
+                resend: onceMore,
+                news,
+                question,
+              })
+            }
+            // A message, or an answer in his own words, that didn't go, with nothing offered, is said without its words, so nothing said
+            // after it is listened for.
+            const unsent = act._tag === "Message" || at.worded === true
+            return unfinished(
+              { say: line, subject: { ...subject, said: line }, kind: "done", ...(withheld ? { withheld } : {}), ...(unsent ? { unsent } : {}) },
+              decision.rest,
+              said,
+              situation.desk,
+            )
+          }
+        }
+      })
+
+    /**
+     * Once a step has gone as asked, the rest of its request, if there's any,
+     * as the next step. Once the request has taken as many steps as one takes,
+     * what's left of it is said to be left, never dropped without a word.
+     */
+    const onward = (thought: Thought, first: Outcome, on: Option.Option<Threads.Ref>, next: number, said: Lines): Effect.Effect<Outcome> =>
+      thought.decision.rest.trim() === ""
+        ? Effect.succeed(first)
+        : next < steps
+          ? rest(thought, first, on, next, said)
+          : Effect.succeed(unfinished(first, thought.decision.rest, said, thought.situation.desk))
+
+    /**
+     * The rest of a request with several steps, worked out again now that the
+     * step before is done, with "it" the thread that was, and done as the next
+     * step. One line covers the lot; a failure stops the rest, and says so.
+     */
+    const rest = (thought: Thought, first: Outcome, on: Option.Option<Threads.Ref>, step: number, said: Lines): Effect.Effect<Outcome> =>
+      Effect.gen(function* () {
+        // What he went on to say after, which yapd's own voice was never in, nor said back to the line before; but when all he said may be
+        // yapd's own words said back to a "done" line, so may the rest, and nothing of it is done.
+        const { echo: _, afterPause: __, echoRoutines: ___, carried: ____, afterDone: _____, ...before } = thought.utterance
+        const utterance: Utterance = {
+          ...before,
+          heard: thought.decision.rest,
+          whole: thought.utterance.whole ?? ownWords(thought.utterance),
+          ...(Brain.mayBeOwn(thought.utterance) ? { echoedBack: true as const } : {}),
+        }
+        yield* Effect.logInfo(`Then: ${logged(utterance.heard)}`)
+        // Working it out has no effect, so it carries on whether or not what's said waits for it, until yapd is turned off, which stops it like the rest of the request.
+        // "It" is the step before as it'll be said, part of catching up when that is, so what the rest comes to is too, however late it's said,
+        // and one of his routines' steps in it by its name alone. Said over one of a thread's subagents' update, it's still that subagent.
+        // Handed over from an update, the update stays FOCUS, with its own thread, so "…and tell this one to rebase" is the agent he was
+        // hearing; but after a step that went to another thread, "it" is that one, so "tell the Mina one to wait and tell it to rebase" is
+        // all the Mina one's.
+        const handed = thought.utterance.handed !== undefined && thought.subject._tag === "Session" ? Brain.itAfter(thought.subject, on) : undefined
+        const it = overSubagent(first.subject, on, first.say) ?? { _tag: "Answer", said: first.say, about: on }
+        const thinking = yield* job(
+          think(utterance, handed ?? along(thought, { ...it, ...routinesOf(first.subject) }), [
+            // All he said, still with what of it may have been yapd's own voice, so none of that is taken for more he asked.
+            { speaker: "user", text: thought.utterance.heard, ...overItself(thought.utterance) },
+            // Nothing said of the step before, like a thanks, is nothing to show. One of his routines' steps in it, by its name alone.
+            ...(first.say === "" ? [] : [{ speaker: "yapd", text: first.say, ...routinesOf(first.subject) } satisfies Line]),
+          ]),
+          utterance.turns,
+        )
+        const ready = yield* Effect.timeoutOption(Fiber.join(thinking), joining)
+        if (Option.isSome(ready)) return yield* then(ready.value, first, step, said, false)
+        // Not worked out in time, the step before is said now, on its own, and the rest is done once it is, one request at a time as ever.
+        yield* Effect.logInfo("Saying what's done so far, while the rest is worked out")
+        yield* background(
+          Fiber.join(thinking).pipe(
+            // Only what's done waits its turn, not working it out.
+            Effect.flatMap((next) => turn.withPermits(1)(Effect.flatMap(then(next, quiet(first.subject), step, said, true), (after) => deliver(after, thought)))),
+            Effect.annotateLogs({ utterance: thought.utterance.id }),
+          ),
+          thought.utterance.turns,
+        )
+        return first
+      })
+
+    /**
+     * A step whose card a step after it took down: it never goes up, nor is
+     * it said to be on his screen, and what it comes to took it down too, so
+     * no card from before it goes up either.
+     */
+    const unshown = (step: Outcome, said: Lines): Outcome => {
+      const { card, unreadable: _, unseen: __, ...rest } = step
+      const say = card === undefined ? step.say : Show.offScreen(step.say, said)
+      const subject: Subject = step.subject._tag !== "Nothing" && step.subject.said === step.say ? { ...step.subject, said: say } : step.subject
+      return { ...rest, say, subject, hides: true }
+    }
+
+    /** What comes of the rest of a request, worked out, said with what was said of the step before. `quietly` when that was said already. */
+    const then = (next: Thought, first: Outcome, step: number, said: Lines, quietly: boolean): Effect.Effect<Outcome> =>
+      Effect.gen(function* () {
+        // Nothing is said of what may all be yapd's own words, even that it couldn't be worked out: they're let go.
+        if (next.source === "failed") {
+          return Brain.mayBeOwn(next.utterance) ? yield* Effect.as(notActing(next.utterance), first) : retold(first, (say) => joined(say, `I couldn't work out the rest${addressed(said)}.`, said))
+        }
+        if (next.decision.act === "resume") return yield* Effect.as(fastLetGo(next), first)
+        if (next.decision.act === "dismiss" && next.decision.rest.trim() === "") return first
+        // A line for going ahead the step before says is kept from being said again in the same breath.
+        const after = yield* follow(Brain.check(next.decision, next.situation, said), next, said, {
+          step,
+          twice: false,
+          quietly,
+          ...(first.onIt === undefined ? {} : { besides: first.onIt }),
+        })
+        // Taken down by the rest, like "and hide that", the card of the step before never goes up once it's said.
+        const before = after.hides === true ? unshown(first, said) : first
+        if (after.say === "") return before
+        // What he missed that the step before told him is heard once he's heard the lot, as is what the rest told him.
+        const missed = [...(before.missed ?? []), ...(after.missed ?? [])]
+        const second = before.second ?? after.second
+        // One card goes up with the lot: the rest's, the last he asked for, unless only the step before's holds what couldn't be read aloud, like a
+        // command he couldn't hear. Only the line of the step it's for says it's on his screen, so he's never told so of one that isn't.
+        const kept = after.card === undefined || (before.card !== undefined && before.unreadable === true && after.unreadable !== true) ? before : after
+        const onScreen = (step: Outcome) => (step.card === undefined || step === kept ? step.say : Show.offScreen(step.say, said))
+        const say = joined(onScreen(before), onScreen(after), said)
+        // Said with no app to show its card by then, each step is said as it is with none watching.
+        const unseen = kept.unseen === undefined ? undefined : joined(before.unseen ?? before.say, after.unseen ?? after.say, said)
+        // What "it" means is what the rest was about, and what's said again is the lot, as heard, with what he missed that the lot told him, but never a question asked as part of it.
+        // Said with the step before, what's said again holds its routines' steps too, by their names alone for a model.
+        const routines = [...new Set([...(routinesOf(before.subject).routines ?? []), ...(routinesOf(after.subject).routines ?? [])])]
+        const subject: Subject =
+          after.kind === "question" || after.subject._tag === "Nothing"
+            ? after.subject
+            : after.subject._tag === "Answer"
+              ? { ...after.subject, said: say, ...(missed.length === 0 ? {} : { missed }), ...(routines.length === 0 ? {} : { routines }) }
+              : { ...after.subject, said: say, ...(routines.length === 0 ? {} : { routines }) }
+        const { unseen: _, ...rest } = after
+        // Of two lines for going ahead, the one said last is the one a step after both is kept from, and the last he heard: each is noted in turn, once it's known to play.
+        const onIt = after.onIt ?? before.onIt
+        // Said in one line, what either step changed is what "scratch that" may take back: the newer, the rest's when it changed one.
+        const changed = after.changed ?? before.changed
+        const confirmed =
+          before.confirmed === undefined || after.confirmed === undefined
+            ? (after.confirmed ?? before.confirmed)
+            : Effect.zipRight(before.confirmed, after.confirmed)
+        return {
+          ...rest,
+          say,
+          subject,
+          ...(missed.length === 0 ? {} : { missed }),
+          ...(second === undefined ? {} : { second }),
+          ...(kept.card === undefined ? {} : { card: kept.card }),
+          ...(kept.unreadable === true ? { unreadable: true } : {}),
+          ...(before.hides === true ? { hides: true } : {}),
+          ...(unseen === undefined ? {} : { unseen }),
+          ...(onIt === undefined ? {} : { onIt }),
+          ...(confirmed === undefined ? {} : { confirmed }),
+          ...(changed === undefined ? {} : { changed }),
+        }
+      })
+
+    /** Changes a thread as decided, once, unless yapd was turned off and on since it was said (I8): for what it waits on him for, only `asks`, the request he heard. */
+    const write = (plan: Brain.Plan, thought: Thought, said: Lines, at: Stepping, asks?: Asks) =>
+      Effect.gen(function* () {
+        const { utterance } = thought
+        if (yield* outdated(utterance.turns)) {
+          yield* Effect.logInfo("Not doing it, since yapd was turned off after it was said")
+          return quiet(thought.subject)
+        }
+        const act = acted(plan.decision, plan.target, utterance, thought.situation.acted, at, asks, thought.situation)
+        // A message with no words of its own to send, as when he began it over yapd's own voice, has him asked to say it again.
+        if (act === undefined) return reply(plan.decision.act === "send" && Option.isSome(plan.target) && asks?._tag !== "Question" ? said.misheard : said.cantTell, thought.subject)
+        // Answered now, however it was asked, what a thread waits on him for is never asked again of yapd's own accord, like a copy put
+        // by while its machine's threads couldn't be seen, which its T3 Code may not show as answered just yet.
+        const queued = asks !== undefined && asks._tag !== "Agent" && (act._tag === "Decide" || act._tag === "Reply") ? dequeue(asks.requestId) : []
+        // His own words go in an answer to a thread's question when a message he dictated goes as one, or he answered a part in words of his
+        // own: never only options he picked.
+        const worded =
+          act._tag === "Reply" &&
+          (act.as === "message" ||
+            (asks?._tag === "Question" && (asks.dictated !== undefined || Object.values(asks.collected).some(({ _tag }) => _tag === "Words"))))
+        // Once it's begun, it's seen through and noted: turning yapd off meanwhile only stops what's said of it, and any step not written yet, like one after a look at the thread, or telling a turn it stopped (I8).
+        const wanted = Effect.map(outdated(utterance.turns), (off) => !off)
+        return yield* Effect.uninterruptibleMask((free) =>
+          Effect.flatMap(hands.run({ utterance: utterance.id, step: at.step }, act, { twice: at.twice, wanted }), (outcome) =>
+            Effect.flatMap(restoring(act, outcome, queued), (putBy) =>
+              told(
+                act,
+                outcome,
+                thought,
+                said,
+                {
+                  step: at.step,
+                  commandId: Ledger.ids(utterance.id, at.step, false).commandId,
+                  ...(at.quietly === true ? { quietly: true } : {}),
+                  ...(at.besides === undefined ? {} : { besides: at.besides }),
+                  ...(putBy ? { putBy } : {}),
+                  ...(plan.routine === undefined ? {} : { routine: plan.routine }),
+                  ...(worded ? { worded } : {}),
+                },
+                free,
+              ),
+            ),
+          ),
+        )
+      })
+
+    /**
+     * What was taken out of what's waiting to be asked for an answer that
+     * didn't go, while its machine's threads can't be seen, like rig's as it
+     * drops out while the model works out what he said: it still waits on
+     * him, so it's put back, to be asked from the part he'd got to once they
+     * can be seen again, at no cost to it, as `reaching` puts an answer by.
+     * Whether it was, which he's told.
+     */
+    const restoring = (act: Hands.Act, outcome: Hands.Outcome, queued: ReadonlyArray<Queued>) =>
+      Effect.gen(function* () {
+        if (queued.length === 0 || (act._tag !== "Decide" && act._tag !== "Reply") || (outcome._tag !== "Refused" && outcome._tag !== "NotSent")) return false
+        if (Option.isNone(yield* threads.unseen(act.to.machine))) return false
+        yield* Effect.logInfo(`Putting it back to be asked, since ${act.to.machine}'s threads can't be seen right now`)
+        asked.unshift(...queued.map((waiting): Queued => ({ ...waiting, back: "here", letGo: undefined, costless: true })))
+        return true
+      })
+
+    /**
+     * What's said when his answer settles a message whose words he left out,
+     * and his request's may have been yapd's own voice: none of it is sent,
+     * and he's asked to say it again, told what was left of it after.
+     */
+    const unworded = (open: Open, thought: Thought, said: Lines) =>
+      Effect.as(
+        Effect.logInfo("Not sending it, since its words may have been my own voice"),
+        unfinished(reply(said.misheard, thought.subject), thought.decision.rest.trim() || open.decision.rest, said),
+      )
+
+    /**
+     * A yes to doing what was asked about: the same thing on the same thread,
+     * as it's known now, checked as anything done is, and never asked about a
+     * second time, with anything he added done after it. To sending again,
+     * it's the same step under the same ids, once; a yes that doesn't stand
+     * lets it go for good. The same words to the same thread at another time,
+     * like "yes, but once it's done", are still a yes to sending them, at that
+     * time, which sending again takes only when it never left yapd. A no
+     * with something else instead, like another thread or other words, is
+     * that something else, and what was asked about isn't done. Asked of what
+     * may all be yapd's own words, whatever the model gave his answer as more
+     * may be what it split off them, so none of it is done: he's told it was
+     * left, to say again.
+     */
+    const agreeing = (open: Open, thought: Thought, said: Lines) =>
+      Effect.gen(function* () {
+        const { utterance, situation } = thought
+        const target = Option.fromNullable(open.candidates[0]).pipe(
+          Option.flatMap((ref) => Option.fromNullable(situation.desk.threads.find((listed) => Threads.same(listed.ref, ref)))),
+        )
+        const handle = Option.match(target, { onNone: () => "", onSome: ({ handle }) => handle })
+        // A routine's name is the steps it sends, which is what was asked about when they're what went.
+        const given = Brain.resolved(thought.decision, situation)
+        // What he left out is what was asked about: its words, as for "no, the Mina one", and its thread, as for "no, stop it instead", or
+        // "no, C++ parser" to renaming it to "C parser", a new title for it, checked again as all of his answer.
+        const answered = filled(given, open)
+        if (answered === undefined) {
+          yield* forgo(open, "Its words may have been my own voice.")
+          return yield* unworded(open, thought, said)
+        }
+        const renamed = answered.act === "tidy" && answered.how === "rename" && open.decision.act === "tidy" && open.decision.how === "rename"
+        const instead =
+          answered.target === "" && handle !== "" && (answered.act === "send" || answered.act === "stop" || renamed)
+            ? { ...answered, target: handle, sure: "high" as const, others: "" }
+            : answered
+        const timed =
+          instead.act === "send" &&
+          open.decision.act === "send" &&
+          handle !== "" &&
+          instead.target === handle &&
+          Ledger.digest(instead.text) === Ledger.digest(open.decision.text)
+        const agreed = Brain.agrees(open, given, situation)
+        if (!agreed && !timed) {
+          yield* forgo(open, "He asked for something else instead.")
+          const checked = Brain.routined(Brain.check(instead, situation, said), sends(open, thought.decision, instead, situation))
+          if (checked._tag === "Ask") {
+            yield* Effect.logInfo("Leaving it, rather than ask again")
+            return unfinished(reply(said.leaving, thought.subject), instead.rest, said)
+          }
+          yield* Effect.logInfo("Doing what he asked instead of what I asked about")
+          return yield* follow(checked, { ...thought, decision: instead }, said, undefined, open)
+        }
+        // Tidying, never rebuilt from the first of the threads asked about: exactly those he agreed to.
+        if (agreed && open.decision.act === "tidy") return yield* retidying(open, thought, said)
+        // Taking back a step he was asked about, of a thread that isn't on the desk, like one it archived, keeps it as it was named then.
+        const named = handle === "" && open.pinned !== undefined ? open.decision.target : handle
+        const decision = !agreed
+          ? instead
+          : filled(Brain.decision({ ...open.decision, target: named, sure: "high", others: "", pending: "answers", rest: thought.decision.rest }), open)
+        if (decision === undefined) {
+          yield* forgo(open, "Its words may have been my own voice.")
+          return yield* unworded(open, thought, said)
+        }
+        // What was asked about, said yes to, or its same words at another time, is still one of his routines when it was, by its name.
+        const routine = sends(open, thought.decision, decision, situation)
+        const checked = Brain.routined(Brain.check(decision, situation, said), routine)
+        const resend = Option.filter(open.resend, () => checked._tag === "Do" && checked.plan.decision.act === "send" && Option.isSome(target))
+        if (Option.isNone(resend)) yield* forgo(open, "His yes didn't stand.")
+        if (checked._tag === "Ask") {
+          yield* Effect.logInfo("Leaving it, rather than ask again")
+          return unfinished(reply(said.leaving, thought.subject), decision.rest, said)
+        }
+        if (Option.isSome(resend) && Option.isSome(target)) {
+          if (yield* outdated(utterance.turns)) return quiet(thought.subject)
+          // Under the same ids, at the time he says now, which only one that never left can take.
+          const act: Hands.Act = { _tag: "Message", to: target.value.ref, text: decision.text, how: when(decision.how) }
+          const commandId = resend.value
+          return yield* Effect.uninterruptibleMask((free) =>
+            Effect.flatMap(hands.again(commandId, { how: act.how }), (outcome) =>
+              told(act, outcome, { ...thought, decision }, said, { step: 0, commandId, ...(routine === undefined ? {} : { routine }) }, free),
+            ),
+          )
+        }
+        // Taking back a step he was asked about by what it did is that step alone, whatever was done since, and a change, that change alone.
+        return yield* follow(
+          checked,
+          { ...thought, decision },
+          said,
+          {
+            step: 0,
+            twice: open.reminder === undefined,
+            ...(agreed && open.pinned !== undefined ? { pinned: open.pinned } : {}),
+            ...(agreed && open.pinnedChange !== undefined ? { pinnedChange: open.pinnedChange } : {}),
+          },
+          open,
+        )
+      }).pipe(Effect.map((outcome) => (open.alone === true ? unfinished(outcome, thought.decision.rest, said, thought.situation.desk) : outcome)))
+
+    /**
+     * His yes to tidying what he was asked about: exactly the threads he
+     * agreed to, every one asked about for a plain yes, or those he kept, as
+     * in "yes, but not the Tezos fees", never any other, in the order he
+     * heard them. Each is looked at again as it is now: one gone, or busy
+     * since, unless he was told it was and agreed to archive it as it is, is
+     * left out, and said, and the rest go, without asking again, which would
+     * only end in leaving them, as when he answers one asked while yapd was
+     * off long after.
+     */
+    const retidying = (open: Open, thought: Thought, said: Lines) =>
+      Effect.gen(function* () {
+        const { situation } = thought
+        const how = open.decision.how
+        const sir = addressed(said)
+        const rest = thought.decision.rest.trim() || open.decision.rest
+        const agreedTo =
+          thought.decision.target.trim() === ""
+            ? open.candidates
+            : Option.getOrElse(
+                Option.map(Brain.tidyTargets(thought.decision.target, situation), (named) => named.map(({ ref }) => ref)),
+                (): ReadonlyArray<Threads.Ref> => [],
+              )
+        const kept: Array<string> = []
+        const gone: Array<string> = []
+        const busy: Array<string> = []
+        for (const [index, ref] of open.candidates.entries()) {
+          if (!agreedTo.some((one) => Threads.same(one, ref))) continue
+          const called = open.tidying?.called[index] ?? "that thread"
+          if (how === "unarchive") {
+            const handle = Brain.archivedAs(ref, situation)
+            if (handle === undefined) gone.push(called)
+            else kept.push(handle)
+            continue
+          }
+          const listed = situation.desk.threads.find((one) => Threads.same(one.ref, ref))
+          if (listed === undefined) {
+            gone.push(called)
+            continue
+          }
+          // By its state now: busy since he was asked, it's left, unless he agreed to archive it busy as it was.
+          const told = (open.tidying?.working ?? []).some((one) => Threads.same(one, ref))
+          if ((how === "archive" || how === "settle") && Brain.occupied(listed) && !told) {
+            busy.push(called)
+            continue
+          }
+          kept.push(listed.handle)
+        }
+        const them = (names: ReadonlyArray<string>) => (names.length === 1 ? "it's" : "they're")
+        const left = [
+          ...(busy.length === 0 ? [] : [`I left out ${Brain.both(busy)}${sir}: ${them(busy)} working again.`]),
+          ...(gone.length === 0 ? [] : [`I left out ${Brain.both(gone)}${sir}: ${how === "unarchive" ? `${them(gone)} not archived any more` : `I can't find ${gone.length === 1 ? "it" : "them"} now`}.`]),
+        ].join(" ")
+        if (kept.length === 0) return unfinished(reply(left === "" ? said.cantTell : left, thought.subject), rest, said)
+        // Asked a while ago, its time may have gone by since.
+        if (how === "snooze" && Brain.instant(open.decision.when) <= (yield* Clock.currentTimeMillis)) {
+          return unfinished(reply(`That time's already gone${sir}.`, thought.subject), rest, said)
+        }
+        const decision = Brain.decision({ ...open.decision, target: kept.join(", "), sure: "high", others: "", pending: "answers", rest })
+        // Asked of what was handed over from an update, never the update's own thread, unless that's steered.
+        if (open.own !== undefined && Brain.leftOver(decision, open.own, open.handed, situation)) {
+          return yield* leaving({ ...thought, decision }, said, { step: 0, twice: false }, open.handed?.muting === true, open.heard)
+        }
+        const target = Option.fromNullable(kept.length === 1 ? situation.desk.threads.find(({ handle }) => handle === kept[0]) : undefined)
+        if (left !== "") yield* Effect.logInfo(`Leaving out of it what's gone or busy since he was asked: ${[...busy, ...gone].join(", ")}`)
+        // Only those he was told were busy are archived as they are: any other found busy as it's about to go is left too.
+        const outcome = yield* write({ decision, target }, { ...thought, decision }, said, { step: 0, twice: false, working: open.tidying?.working ?? [] })
+        if (left === "" || outcome.say === "") return outcome
+        const say = joined(outcome.say, left, said)
+        return { ...outcome, say, subject: outcome.subject._tag !== "Nothing" && outcome.subject.said === outcome.say ? { ...outcome.subject, said: say } : outcome.subject }
+      })
+
+    /**
+     * The thread his answer to what it waits on him for goes to, as it is
+     * now, before the question is closed: on the desk what he said was worked
+     * out against, or read again when it wasn't on it, like rig's while its
+     * threads couldn't be seen then, back since; none once it's gone. Given
+     * while its machine's threads can't be seen, like rig's while it can't be
+     * reached or this Mac's while T3 Code restarts, none of it goes, and he's
+     * told why, never that it's been dealt with, which can't be known then.
+     * It still waits on him, so it's put by, to be asked from the part he'd
+     * got to once they can be seen again. `message` when what goes is a
+     * message he dictated to its thread, as he lets the rest of it go, which
+     * is what he's told didn't.
+     */
+    const reaching = (open: Open, thought: Thought, said: Lines, message = false) =>
+      Effect.gen(function* () {
+        const { decision, utterance, situation } = thought
+        const ref = open.candidates[0]
+        if (ref === undefined) return Either.right(Option.none<Threads.Listed>())
+        const why = yield* threads.unseen(ref.machine)
+        if (Option.isNone(why)) {
+          const listed = situation.desk.threads.find((listed) => Threads.same(listed.ref, ref))
+          const now = listed ?? (yield* threads.desk(Option.none(), [ref], 1)).threads.find((listed) => Threads.same(listed.ref, ref))
+          return Either.right(Option.fromNullable(now))
+        }
+        yield* Effect.logInfo(`Not answering it, since ${ref.machine}'s threads can't be seen right now`)
+        yield* close(open, "dropped: out of sight", utterance.id)
+        const yours = message ? "your message" : open.kind === "approval" ? (decision.how === "decline" ? "your no" : "your go-ahead") : "your answer"
+        return Either.left(regarding(`I couldn't get ${yours} to it${addressed(said)}: ${Hands.after(why.value)} ${onceBack}`, askedAbout(open)))
+      })
+
+    /**
+     * His answer to what a thread waits on him for, as the question open
+     * asked it: about that thread, `target` as `reaching` found it, and the
+     * very request he heard, whatever the model took it for. Something else
+     * instead is done in its place, which leaves the request waiting in T3 Code.
+     */
+    const settle = (open: Open, target: Option.Option<Threads.Listed>, thought: Thought, said: Lines) =>
+      Effect.gen(function* () {
+        const { decision, situation } = thought
+        if (decision.act !== (open.kind === "approval" ? "decide" : "reply")) return yield* follow(Brain.check(decision, situation, said), thought, said)
+        if (Option.isNone(target)) return reply(Brain.dealtWith(said), thought.subject)
+        return yield* write({ decision: { ...decision, target: target.value.handle }, target }, thought, said, { step: 0, twice: false }, open.asks)
+      })
+
+    /**
+     * Puts a thread's question off ten minutes, as he said: it comes back
+     * then, from the part he'd got to. The third time, it's let go with a
+     * word instead, and still waits for him in T3 Code, where he can ask for it.
+     */
+    const putOff = (open: Open, from: Queued | undefined, thought: Thought, said: Lines) =>
+      Effect.gen(function* () {
+        const snoozed = (from?.snoozed ?? 0) + 1
+        const left = from === undefined || snoozed >= interruptions ? leftWith(open.asks) : undefined
+        if (left !== undefined) return yield* bidden(open, left, thought, said)
+        yield* close(open, "dropped: later", thought.utterance.id)
+        if (from === undefined || snoozed >= interruptions) {
+          yield* letBe(from)
+          return regarding(open.wording?.letGo ?? said.leaving, askedAbout(open))
+        }
+        asked.push(resumed(from, open, { back: "here", snoozed, notBefore: (yield* Clock.currentTimeMillis) + snooze }))
+        yield* Effect.logInfo(`Put off: ${open.asked}`)
+        return regarding(`I'll bring it back in ten minutes${addressed(said)}.`, askedAbout(open))
+      })
+
+    /**
+     * A message he dictated to a thread, taken as the answer to a part of its
+     * question, once he lets the rest of it go, by his word or as it goes
+     * unanswered: it still goes, as he asked, as its answer, with the parts
+     * he hadn't answered left out, as when he skips them, and he's told it
+     * went, or why it didn't, never that the question was left. To `target`,
+     * the thread as it is now; none once it's gone.
+     */
+    const parting = (target: Option.Option<Threads.Listed>, left: QuestionAsks, thought: Thought, said: Lines) =>
+      Effect.gen(function* () {
+        if (Option.isNone(target)) return reply(Brain.dealtWith(said), thought.subject)
+        const decision: Brain.Decision = { ...thought.decision, act: "reply", how: "left", target: target.value.handle }
+        yield* Effect.logInfo("Sending the message he dictated as its answer, with the parts he let go left out")
+        return yield* write({ decision, target }, { ...thought, decision }, said, { step: 0, twice: false }, left)
+      })
+
+    /** As `parting` has it, let go by his word: the question open closed as answered, or put by while its machine's threads can't be seen. */
+    const bidden = (open: Open, left: QuestionAsks, thought: Thought, said: Lines) =>
+      Effect.gen(function* () {
+        const target = yield* reaching(open, thought, said, true)
+        if (Either.isLeft(target)) return target.left
+        yield* close(open, "answered", thought.utterance.id)
+        return yield* parting(target.right, left, thought, said)
+      })
+
+    /**
+     * A thread's question let go with a message he dictated among what he
+     * answered of it, while its machine's threads can't be seen: nothing can
+     * go, nor can it be known to be dealt with, so it's put by, as `reaching`
+     * puts an answer by, and asked once they can be seen again, with what's
+     * said of it. None while they can be seen.
+     */
+    const putBack = (open: Open, said: Lines) =>
+      Effect.gen(function* () {
+        const ref = open.candidates[0]
+        const why = ref === undefined ? Option.none<string>() : yield* threads.unseen(ref.machine)
+        if (Option.isNone(why)) return Option.none<Outcome>()
+        yield* Effect.logInfo(`Not sending his message as its answer, since ${ref?.machine}'s threads can't be seen right now`)
+        yield* close(open, "dropped: out of sight")
+        return Option.some(regarding(`I couldn't get your message to it${addressed(said)}: ${Hands.after(why.value)} ${onceBack}`, askedAbout(open)))
+      })
+
+    /**
+     * The question open, with the message he dictated to its thread taken
+     * back out of it, as `withdrawn` has it, as it's open and as he's got to
+     * it, so it goes neither with the rest nor once it's let go.
+     */
+    const withdrawing = (open: Open): Open => {
+      if (asking?.open.id !== open.id || open.asks?._tag !== "Question" || open.asks.dictated === undefined) return open
+      const asks = withdrawn(open.asks)
+      const heard = known.get(asks.requestId)
+      if (heard?.asks._tag === "Question") known.set(asks.requestId, { ...heard, asks: withdrawn(heard.asks), through: undefined })
+      const taken = { ...open, asks }
+      asking = { ...asking, open: taken }
+      return taken
+    }
+
+    /** As `parting` has it, let go with nothing he said, under ids of its own, naming the thread it went to. */
+    const unbidden = (ref: Threads.Ref | undefined, left: QuestionAsks, said: Lines) =>
+      Effect.gen(function* () {
+        const at = yield* Clock.currentTimeMillis
+        const { turns } = yield* options.power
+        const utterance: Utterance = { id: mint(at, "n"), heard: "", via: "reply", at, voiced: 0, turns }
+        const situation = yield* situate(utterance, { _tag: "Nothing" }, [])
+        const thought: Thought = { utterance, subject: situation.subject, decision: Brain.decision({ act: "reply" }), situation, version, source: "fast" }
+        const found = (desk: Threads.Desk) => (ref === undefined ? undefined : desk.threads.find((listed) => Threads.same(listed.ref, ref)))
+        const listed = found(situation.desk) ?? (ref === undefined ? undefined : found(yield* threads.desk(Option.none(), [ref], 1)))
+        return yield* parting(Option.fromNullable(listed), left, thought, said)
+      })
+
+    /**
+     * What a thread's request is asked from, now it's open again some other
+     * way than from the queue, like read back on his asking: any copy still
+     * queued to come back is taken out, so it's never asked twice over, nor
+     * from a part he's past, once it's let go. How often it was put off, or
+     * had its place taken, carries over, as do the words it was brought back
+     * in at no cost to him.
+     */
+    const unqueued = (from: Queued): Queued => {
+      const queued = dequeue(from.asking.asks.requestId)
+      if (queued.length === 0) return from
+      const most = (count: "snoozed" | "interrupted") => Math.max(from[count] ?? 0, ...queued.map((waiting) => waiting[count] ?? 0)) || undefined
+      const free = [...new Set([from, ...queued].flatMap((waiting) => waiting.free ?? []))]
+      return { ...from, snoozed: most("snoozed"), interrupted: most("interrupted"), ...(free.length === 0 ? {} : { free }) }
+    }
+
+    /** Opens a part of a thread's question, in these words, with what he answered of it before, as it was asked from `from`. */
+    const askingPart = (open: Open, from: Queued | undefined, asks: QuestionAsks, wording: Questions.Wording, words: string, utterance: Pick<Utterance, "turns" | "at">) =>
+      Effect.gen(function* () {
+        const outcome = yield* opening(
+          {
+            kind: "question",
+            utterance: open.utterance,
+            heard: "",
+            decision: open.decision,
+            candidates: open.candidates,
+            asked: words,
+            about: open.about,
+            material: Option.none(),
+            resend: Option.none(),
+            asks,
+            rewordings: wording.still,
+            wording,
+          },
+          utterance,
+        )
+        if (asking?.open.asks === asks && from !== undefined) asking.from = unqueued(resumed(from, { asks }, {}))
+        return outcome
+      })
+
+    /**
+     * His answer to the part of a thread's question being asked, about that
+     * thread, `target` as `reaching` found it, and the very request he heard,
+     * whatever the model took it for: kept until the last part, then all of
+     * it sent at once. Each part but the last is acknowledged as the next is
+     * asked, as what comes of what he said, so it's said next; every part
+     * skipped, nothing's sent.
+     */
+    const answering = (open: Open, from: Queued | undefined, answer: Questions.Answer, target: Option.Option<Threads.Listed>, thought: Thought, said: Lines) =>
+      Effect.gen(function* () {
+        if (open.asks?._tag !== "Question") return reply(said.cantTell, thought.subject)
+        const asks = open.asks
+        if (Option.isNone(target)) return reply(Brain.dealtWith(said), thought.subject)
+        const question = asks.questions[asks.part]
+        if (question === undefined) return reply(said.cantTell, thought.subject)
+        const answered: QuestionAsks = { ...asks, collected: { ...asks.collected, [question.id]: answer }, part: asks.part + 1, inFull: false }
+        const next = from?.asking.parts?.[answered.part]
+        if (next !== undefined) {
+          // Where he's got to, so a dictation, or the question brought back, picks up from there: a part he's yet to hear.
+          const heard = known.get(asks.requestId)
+          if (heard !== undefined) known.set(asks.requestId, { ...heard, asks: answered, through: undefined })
+          const ack = Questions.ack(open.wording?.part ?? Questions.said(question, Option.none()), answer)
+          const words = answered.part === asks.questions.length - 1 ? next.last(ack) : next.next(ack)
+          return yield* askingPart(open, from, answered, next, words, thought.utterance)
+        }
+        if (Object.values(answered.collected).every(({ _tag }) => _tag === "Skip")) {
+          yield* letBe(from)
+          return regarding(said.leaving, Option.some(target.value.ref))
+        }
+        return yield* write({ decision: { ...thought.decision, act: "reply", target: target.value.handle }, target }, thought, said, { step: 0, twice: false }, answered)
+      })
+
+    /**
+     * What a thread waits on him for that he'd heard asked by the time he
+     * said this, `utterance`, and that this answers, an approval or a
+     * question: what it shows it waits on, or else the latest still waiting
+     * behind something it asked since, which T3 Code's summary of the thread
+     * shows in its place.
+     */
+    const meant = (ref: Threads.Ref, shown: string, kind: "Approval" | "Question", utterance: Pick<Utterance, "at">) =>
+      Effect.gen(function* () {
+        const answers = (heard: Heard) => Threads.same(heard.ref, ref) && heard.asks._tag === kind && heardBy(utterance, heard.through)
+        const showing = known.get(shown)
+        if (showing !== undefined && answers(showing)) return Option.some(showing.asks)
+        for (const heard of [...known.values()].toReversed()) {
+          if (heard.asks.requestId !== shown && answers(heard) && (yield* still(ref, heard.asks.requestId))) return Option.some(heard.asks)
+        }
+        return Option.none<Heard["asks"]>()
+      })
+
+    /**
+     * Allowing, turning down or answering what a thread waits on him for,
+     * said with no question about it open: done as he says only for a
+     * request he's heard asked, even one now behind something it asked
+     * since, and an approval only with "approve". Otherwise what it waits on
+     * is read back to him as its question, so his answer is to what he heard.
+     * A question he's heard is answered from the part he'd got to, and once
+     * he's answered every part, it's sent; until then, the next is asked. With
+     * nothing in his answer, he wants to hear it: it's read to him again from
+     * the part he'd got to, even once he's heard it, or let go of it.
+     */
+    const unprompted = (plan: Brain.Plan, target: Threads.Listed, thought: Thought, said: Lines, at: Stepping, dictated = false) =>
+      Effect.gen(function* () {
+        const { decision } = plan
+        const pending = target.thread.pendingRuntimeRequest
+        if (pending === null) return reply(Brain.dealtWith(said), thought.subject)
+        const heard = Option.getOrUndefined(yield* meant(target.ref, pending.id, decision.act === "decide" ? "Approval" : "Question", thought.utterance))
+        // Allowed only with "approve", whatever the model took his words for: a plain yes, however it's put, has it read back to him. So
+        // does an approve with more after it, which may as well be to what's in the rest, as the model split it, and one in the rest of a
+        // request, whose words are the model's, never his.
+        const unapproved =
+          heard?._tag === "Approval" && decision.how !== "decline" && (at.step > 0 || decision.rest.trim() !== "" || !Brain.approving(thought.utterance.heard))
+        const hearing = decision.act === "reply" && decision.text.trim() === ""
+        if (heard?._tag === "Approval" && !unapproved) return yield* write(plan, thought, said, at, heard)
+        // Words a form that takes only its options can't take ask the part he'd got to once more, as over the question itself.
+        const filled = heard?._tag === "Question" && !hearing ? fill(heard, decision.text, dictated) : undefined
+        if (heard?._tag === "Question" && filled !== undefined) {
+          if (filled.asks.part >= filled.asks.questions.length) return yield* write(plan, thought, said, at, filled.asks)
+          // Where he's got to, so what's asked next picks up from there: a part he's yet to hear.
+          known.set(heard.requestId, { ref: target.ref, asks: filled.asks, through: undefined })
+        }
+        const request = heard?.requestId ?? pending.id
+        // Asked since he said this, it's the question open, his to answer now he's heard it: it isn't read back over itself.
+        if (asking !== undefined && requestOf(asking.open) === request && Threads.same(asking.open.candidates[0] ?? { machine: "", id: "" }, target.ref)) {
+          yield* Effect.logInfo("Not reading back what it waits on, since it's the question open, asked since he said this")
+          return quiet(thought.subject)
+        }
+        const worded = yield* options.compose(target.ref, request)
+        if (Option.isNone(worded)) return reply(`I couldn't read what ${target.called} is waiting on just now${addressed(said)}.`, thought.subject)
+        const about = { _tag: "Answer", said: "", about: Option.some(target.ref) } satisfies Subject
+        // Said now, so it's never brought up again as news, and noted as heard once he's heard it, so it's nothing he missed.
+        const kept = yield* journal.claim(worded.value._tag === "Tell" ? worded.value.entry : worded.value.asking.entry)
+        if (worded.value._tag === "Tell") {
+          const missed = Option.toArray(Option.flatten(kept))
+          return { say: worded.value.spoken, subject: { ...about, said: worded.value.spoken }, kind: "answer", ...(missed.length === 0 ? {} : { missed }) } satisfies Outcome
+        }
+        const { asking: waiting } = worded.value
+        // From the part he'd got to, when he's heard it, with what he'd answered of it.
+        const progress = waiting.asks._tag === "Question" ? known.get(request)?.asks : undefined
+        const asks =
+          waiting.asks._tag === "Question" && progress?._tag === "Question"
+            ? { ...waiting.asks, part: progress.part, collected: progress.collected, ...(progress.dictated === undefined ? {} : { dictated: progress.dictated }) }
+            : waiting.asks
+        const part = asks._tag === "Question" ? waiting.parts?.[asks.part] : undefined
+        const words =
+          part === undefined || asks._tag !== "Question"
+            ? waiting.asked
+            : filled !== undefined
+              ? asks.part === asks.questions.length - 1
+                ? part.last(filled.ack)
+                : part.next(filled.ack)
+              : hearing || heard !== undefined || asks.part > 0
+                ? part.here
+                : waiting.asked
+        const why =
+          hearing
+            ? "since he asked to hear it"
+            : filled !== undefined
+              ? "from the part after the one he answered"
+              : heard?._tag === "Question"
+                ? "since it takes only its options"
+                : heard !== undefined
+                  ? "since only 'approve' allows one"
+                  : "since he hasn't heard it asked"
+        yield* Effect.logInfo(`Reading back what it waits on, ${why}`)
+        const read = yield* opening(
+          {
+            kind: asks._tag === "Approval" ? "approval" : "question",
+            utterance: thought.utterance.id,
+            heard: thought.utterance.heard,
+            ...overItself(thought.utterance),
+            decision: asks._tag === "Approval" ? Brain.decision({ act: "decide", how: "accept" }) : Brain.decision({ act: "reply" }),
+            candidates: [waiting.ref],
+            asked: words,
+            about: waiting.about,
+            material: Option.none(),
+            resend: Option.none(),
+            asks,
+            rewordings: part?.still ?? waiting.rewordings,
+            ...(part === undefined ? {} : { wording: part }),
+          },
+          thought.utterance,
+        )
+        // Asked as a notice would be, under the entry it was just kept under.
+        if (asking?.open.utterance === thought.utterance.id && asking.open.asks === asks) asking.from = unqueued({ asking: { ...waiting, asks }, again: false, kept })
+        // Read back for want of an approve on its own, what he said after it is said to be left.
+        return unapproved ? ahead(read, decision.rest, said) : read
+      })
+
+    /**
+     * What a message for now goes as instead, to a thread waiting on a
+     * question he's heard and it still waits on: its answer, since a message
+     * steered into the turn meanwhile may sit unread, or end the question.
+     * The part he'd got to is answered with it as with anything he'd answer
+     * it with: an option it names goes as that option, as the form takes it.
+     * Only the last part's answer sends it: with parts after it, those are
+     * asked first, as after a dictated answer. Never for one T3 Code takes
+     * as a message itself, nor a part he hadn't heard all of by the time he
+     * said it, like the next one cut off, which is asked after, nor a form
+     * that takes only its options, which can't take it: it goes as the
+     * message it is.
+     */
+    const answerFor = (plan: Brain.Plan, utterance: Pick<Utterance, "at" | "heard" | "echo">) =>
+      Effect.gen(function* () {
+        const { decision, target } = plan
+        if (Option.isNone(target) || when(decision.how) !== "now") return undefined
+        const pending = target.value.thread.pendingRuntimeRequest
+        const heard = pending === null ? undefined : known.get(pending.id)
+        if (heard?.asks._tag !== "Question" || heard.asks.mode !== "live" || !Threads.same(heard.ref, target.value.ref) || !heardBy(utterance, heard.through)) return undefined
+        // Its words left out, it's his as he said them, unless some of them may have been yapd's own voice: then it's no answer.
+        const text = decision.text.trim() || ownWords(utterance)
+        const answered = text === "" ? undefined : fill(heard.asks, text)
+        if (answered === undefined) return undefined
+        return (yield* still(heard.ref, heard.asks.requestId)) ? answered.asks : undefined
+      })
+
+    /**
+     * What a mute is about: the thread picked, or, said in so many words, what
+     * he's on about, by its thread, or by its session when it has none. With
+     * what it's called, and whether that's "it".
+     */
+    const muted = (
+      plan: Brain.Plan,
+      thought: Thought,
+    ): Option.Option<{ readonly key: string; readonly called: string | undefined; readonly project: string | undefined; readonly it: boolean }> => {
+      const { situation } = thought
+      if (Option.isSome(plan.target)) {
+        const listed = plan.target.value
+        const it = Option.exists(Brain.focused(situation), ({ handle }) => handle === listed.handle)
+        return Option.some({ key: Mutes.key.thread(listed.ref), called: `${listed.called}${listed.here ? "" : ` on ${listed.ref.machine}`}`, project: listed.project, it })
+      }
+      // One of what's muted by its own handle there, like a session in a terminal, which no thread on the desk is.
+      const by = Brain.mutedBy(plan.decision.target, situation)
+      if (Option.isSome(by)) {
+        const mute = by.value
+        return Option.some({ key: mute.key, called: Brain.mutedName(mute, situation.desk), project: mute.project, it: false })
+      }
+      // The subagent he's on about by its own handle in FOCUS, which is never on the desk: muted by itself, never the thread it's part of.
+      const subagent = Brain.subagentBy(plan.decision.target, situation)
+      if (Option.isSome(subagent) && subagent.value.subagent !== undefined) {
+        const { child, called } = subagent.value.subagent
+        return Option.some({ key: Mutes.key.thread(child), called, project: subagent.value.project, it: true })
+      }
+      // Only "mute it", worked out without the model, means what he's on about with nothing named.
+      if (thought.source !== "fast") return Option.none()
+      const { subject } = situation
+      if (subject._tag === "Session") {
+        const { update } = subject
+        const called = options.naming ?? ((host: string) => host.split(".")[0] ?? host)
+        const [key] = Mutes.keysOf(update, called)
+        if (key === undefined) return Option.none()
+        // One of a thread's subagents, which is never on the desk, is muted by itself, by what it's called.
+        if (update.subagent !== undefined) return Option.some({ key, called: update.subagent.called, project: update.project, it: true })
+        const machine = called(update.thread.origin.host ?? hostname())
+        const where = machine === called(hostname()) ? "" : ` on ${machine}`
+        const agent = update.thread.agent === "codex" ? "Codex" : "Claude"
+        return Option.some({ key, called: `the ${agent} session ${Threads.inProject(update.project)}${where}`, project: update.project, it: true })
+      }
+      return Option.map(Brain.about(subject), (ref) => ({ key: Mutes.key.thread(ref), called: undefined, project: undefined, it: true }))
+    }
+
+    /**
+     * Mutes or unmutes a thread, every thread, or takes back the last change
+     * to what's muted, and says so, naming the thread only when it isn't
+     * "it", which stays what "it" means. Never anything sent to a thread.
+     * Only a line for what changed says what "scratch that" takes back.
+     * Taking back the change he said yes to taking back, or the one the
+     * "done" line said, `pinned`, is that change alone, while it's still the
+     * last: once another is made since, like from the menu, nothing is, and
+     * he's told it changed.
+     */
+    const muting = (plan: Brain.Plan, thought: Thought, said: Lines, pinned?: Brain.Made) =>
+      Effect.gen(function* () {
+        const { decision } = plan
+        const { controls } = options
+        const sir = addressed(said)
+        const stays = (line: string, changed: Brain.Change | undefined): Outcome => ({
+          say: line,
+          subject: thought.subject._tag === "Session" ? { ...thought.subject, said: line } : { _tag: "Answer", said: line, about: Brain.about(thought.subject) },
+          kind: "done",
+          ...(changed === undefined ? {} : { changed }),
+        })
+        if (controls === undefined) return reply(Brain.notYet(said), thought.subject)
+        const now = yield* Clock.currentTimeMillis
+        if (decision.how === "clear") {
+          const cleared = (yield* controls.clear).length > 0
+          return stays(Brain.muteLines(said, "it", now).cleared(cleared), yield* muteChanged(cleared))
+        }
+        if (decision.how === "undo") {
+          const last = options.mutes === undefined ? Option.none<Mutes.Change>() : yield* options.mutes.last
+          if (pinned !== undefined && (pinned.what !== "mute" || Option.exists(last, ({ at }) => at !== pinned.at))) return reply(Brain.changedSince(said), thought.subject)
+          const undone = yield* controls.undo
+          return stays(Brain.takenBack(said, undone, now), yield* muteChanged(Option.isSome(undone)))
+        }
+        if (decision.how === "subagents" || decision.how === "nosubagents") return yield* reading(plan, thought, said, stays)
+        const target = muted(plan, thought)
+        if (Option.isNone(target)) return reply(said.cantTell, thought.subject)
+        const { key, called, project, it } = target.value
+        const told = Brain.muteLines(said, it || called === undefined ? "it" : called, now)
+        // Named, "it" is that thread from now on.
+        const about = Option.flatten(Option.map(Mutes.parse(key), (about) => (about._tag === "Thread" ? Option.some(about.ref) : Option.none<Threads.Ref>())))
+        const answered = (line: string, changed: Brain.Change | undefined): Outcome =>
+          it ? stays(line, changed) : { say: line, subject: { _tag: "Answer", said: line, about }, kind: "done", ...(changed === undefined ? {} : { changed }) }
+        if (decision.how === "unmute") {
+          const unmuted = yield* controls.unmute(key)
+          return answered(unmuted ? told.unmuted : told.notMuted, yield* muteChanged(unmuted))
+        }
+        // A time that's gone or can't be read leaves it muted until he unmutes it, which is the safer way to take it, and said so.
+        const lasts = Mutes.ending(decision.when, now)
+        const done = yield* controls.mute({ key, ...(called === undefined ? {} : { called }), ...(project === undefined ? {} : { project }) }, lasts)
+        return answered(done ? told.muted(lasts) : told.already, yield* muteChanged(done))
+      })
+
+    /** What "scratch that" takes back once what's muted, or whose subagents are read, `did` change: that change, as it was kept. */
+    const muteChanged = (did: boolean) =>
+      did && options.mutes !== undefined
+        ? Effect.map(options.mutes.last, (last) => Option.getOrUndefined(Option.map(last, ({ at }): Brain.Change => ({ what: "mute", at }))))
+        : Effect.succeed(undefined)
+
+    /**
+     * The thread whose subagents he means: the one picked, or, said in so many
+     * words, what he's on about, by its thread, the one a subagent's update is
+     * part of, or none for a session that isn't a T3 Code thread's. With what
+     * it's called, and whether that's "it".
+     */
+    const head = (plan: Brain.Plan, thought: Thought) => {
+      if (Option.isSome(plan.target)) {
+        const listed = plan.target.value
+        const it = Option.exists(Brain.focused(thought.situation), ({ handle }) => handle === listed.handle)
+        return { _tag: "Thread" as const, ref: listed.ref, called: `${listed.called}${listed.here ? "" : ` on ${listed.ref.machine}`}`, project: listed.project, it }
+      }
+      // Only "read its subagents", worked out without the model, means what he's on about with nothing named.
+      const { subject } = thought.situation
+      if (thought.source !== "fast") return { _tag: "Unknown" as const }
+      if (subject._tag === "Session") {
+        const { update } = subject
+        const ref = update.subagent === undefined ? (update.about ?? update.owner) : update.subagent.head?.ref
+        if (ref === undefined) return update.subagent === undefined ? { _tag: "Session" as const } : { _tag: "Unknown" as const }
+        return { _tag: "Thread" as const, ref, called: update.subagent?.head?.called, project: update.project, it: true }
+      }
+      return Option.match(Brain.about(subject), {
+        onNone: () => ({ _tag: "Unknown" as const }),
+        onSome: (ref) => ({ _tag: "Thread" as const, ref, called: undefined, project: undefined, it: true }),
+      })
+    }
+
+    /**
+     * Has a thread's subagents read to him from now on, or no longer, and says
+     * so, naming the thread only when it isn't "it": a lasting setting, which
+     * reads nothing now, so turned on, he's told he can ask what they said so
+     * far, when they said anything. Never anything sent to a thread.
+     */
+    const reading = (plan: Brain.Plan, thought: Thought, said: Lines, stays: (line: string, changed: Brain.Change | undefined) => Outcome) =>
+      Effect.gen(function* () {
+        const { controls } = options
+        if (controls === undefined) return reply(Brain.notYet(said), thought.subject)
+        const found = head(plan, thought)
+        if (found._tag === "Session") return reply(Brain.subagentLines(said, "it").session, thought.subject)
+        if (found._tag === "Unknown") return reply(said.cantTell, thought.subject)
+        const { ref, called, project, it } = found
+        const told = Brain.subagentLines(said, it || called === undefined ? "it" : called)
+        const on = plan.decision.how === "subagents"
+        const changed = yield* controls.subagents({ key: Mutes.key.thread(ref), ...(called === undefined ? {} : { called }), ...(project === undefined ? {} : { project }) }, on)
+        const change = yield* muteChanged(changed)
+        // Named, "it" is that thread from now on.
+        const answered = (line: string): Outcome =>
+          it ? stays(line, change) : { say: line, subject: { _tag: "Answer", said: line, about: Option.some(ref) }, kind: "done", ...(change === undefined ? {} : { changed: change }) }
+        if (!on) return answered(changed ? told.off : told.notOn)
+        if (!changed) return answered(told.already)
+        return answered((yield* Missed.keptBy(journal, ref, yield* Clock.currentTimeMillis)) ? `${told.on} ${told.kept}` : told.on)
+      })
+
+    /**
+     * Changes how yapd talks, and says so: focus or quiet until when, short or
+     * full updates, or back to normal, which gives him what was held for
+     * later at once, or takes back the last change he asked for, saying what's
+     * on now. "It" stays what it was. Never anything sent to a thread. Each
+     * is what "scratch that" takes back next. Taking back the change he said
+     * yes to taking back, or the one the "done" line said, `pinned`, is that
+     * change alone, while it's still the last he asked for and still stands:
+     * once another is made since, or the menu or its time running out has
+     * set it since, even just as it was, nothing is, and he's told it changed.
+     */
+    const moding = (plan: Brain.Plan, thought: Thought, said: Lines, pinned?: Brain.Made) =>
+      Effect.gen(function* () {
+        const { modes } = options
+        if (modes === undefined) return reply(Brain.notYet(said), thought.subject)
+        const now = yield* Clock.currentTimeMillis
+        const told = Brain.modeLines(said, now)
+        /** Said as what it changed, when it changed anything, which "scratch that" takes back. */
+        const stays = (line: string, changed: boolean) =>
+          Effect.map(changed ? modes.last : Effect.succeedNone, (last): Outcome => ({
+            say: line,
+            subject: thought.subject._tag === "Session" ? { ...thought.subject, said: line } : { _tag: "Answer", said: line, about: Brain.about(thought.subject) },
+            kind: "done",
+            ...Option.match(last, { onNone: () => ({}), onSome: ({ at }) => ({ changed: { what: "mode", at } satisfies Brain.Change }) }),
+          }))
+        const { how, when } = plan.decision
+        switch (how) {
+          case "focus":
+          case "quiet": {
+            // A time that's gone or can't be read is the mode's own default, which is said.
+            const { now: mode } = yield* modes.set(how, Mutes.ending(when, now), true)
+            const ends = mode.until ?? Modes.ending(how, undefined, now)
+            return yield* stays(how === "focus" ? told.focus(ends) : told.quiet(ends), true)
+          }
+          case "brief":
+          case "full": {
+            const was = yield* modes.detail
+            yield* modes.setDetail(how, true)
+            return yield* stays(how === "brief" ? told.brief : told.full, was !== how)
+          }
+          case "undo": {
+            const last = yield* modes.last
+            const since = Option.exists(last, ({ at }) => at !== pinned?.at) || !(yield* modes.standing)
+            if (pinned !== undefined && (pinned.what !== "mode" || since)) return reply(Brain.changedSince(said), thought.subject)
+            const undone = yield* modes.undo
+            return yield* stays(Brain.modeTakenBack(said, undone, now), Option.isSome(undone))
+          }
+          case "rundown":
+            return yield* rundown(thought.situation.desk, thought.situation.missed.spoke, said)
+          default: {
+            if ((yield* modes.current).mode.mode !== "normal") yield* modes.set("normal", undefined, true)
+            return yield* rundown(thought.situation.desk, thought.situation.missed.spoke, said)
+          }
+        }
+      })
+
+    /** When he last spoke, other than to catch up or as noise, for a catch-up worked out without what he said, like "I'm back" over an update. */
+    const lastSpoke = (now: number) =>
+      Effect.map(journal.since(now - day, { most: 20, kinds: ["dictation", "reply"] }), (said) => said.findLast(spoke)?.at ?? now - day)
+
+    /**
+     * What of a thread he missed falls in a catch-up's scope, if any of it
+     * does: by its thread, project or machine, what came since when, and, of
+     * a thread he muted, only when he asked about that thread or about what
+     * his muted threads said.
+     */
+    const within = (scope: Scope, group: Missed.Group, loosely = false) => {
+      // A thread's subagents', only theirs, whatever was kept of them, and never theirs otherwise but where a catch-up of everything tells of
+      // them, as when they were read to him and cut off.
+      if (scope.subagents !== undefined) return Missed.of(group, scope.subagents) ? Missed.only(group, (kept) => scope.since === undefined || kept.at >= scope.since) : undefined
+      // By its machine only when both are known: a session's rows kept before machines were, or a scope without one, go by the thread alone.
+      if (
+        scope.thread !== undefined &&
+        ((group.machine !== undefined && scope.thread.machine !== undefined && group.machine !== scope.thread.machine) || group.thread !== scope.thread.thread)
+      )
+        return undefined
+      if (scope.project !== undefined && !names(group.project, scope.project, loosely) && !names(group.called, scope.project, loosely)) return undefined
+      if (scope.machine !== undefined && group.machine?.toLowerCase() !== scope.machine.toLowerCase()) return undefined
+      return Missed.only(
+        group,
+        (kept) =>
+          (scope.since === undefined || kept.at >= scope.since) &&
+          (scope.muted === true ? Missed.muted(kept) && !Missed.subagent(kept) : scope.thread !== undefined || !Missed.muted(kept)),
+      )
+    }
+
+    /**
+     * Whether `asked`, a project as the model wrote it, names `name`: all of
+     * it, however its words are joined, or, `loosely`, whole words of it, so
+     * "connectors" names "integration-connectors".
+     */
+    const names = (name: string | undefined, asked: string, loosely: boolean) => {
+      if (name === undefined) return false
+      const [whole, part] = [spokenName(name), spokenName(asked)]
+      return part !== "" && (whole === part || (loosely && ` ${whole} `.includes(` ${part} `)))
+    }
+
+    /** What a catch-up decided by the model is about, as it named it: what's named in it only has to be there to be gathered. */
+    const scoping = (plan: Brain.Plan, situation: Brain.Situation): Scope => {
+      const { decision, target } = plan
+      const group = situation.missed.groups.find(({ handle }) => handle === decision.target)
+      // A muted thread or session that isn't on the desk, like one in a terminal, by its handle in MUTED: what it kept is under its thread, or its session.
+      const mute = Option.isSome(target) || group !== undefined ? undefined : Option.getOrUndefined(Brain.mutedBy(decision.target, situation))
+      const muted = mute === undefined ? undefined : Option.getOrUndefined(Mutes.parse(mute.key))
+      const thread = Option.match(target, {
+        onNone: () =>
+          group !== undefined
+            ? { machine: group.machine, thread: group.thread }
+            : muted === undefined
+              ? undefined
+              : muted._tag === "Thread"
+                ? { machine: muted.ref.machine, thread: muted.ref.id }
+                : { machine: muted.machine, thread: `${muted.agent}:${muted.session}` },
+        onSome: ({ ref }) => ({ machine: ref.machine, thread: ref.id }),
+      })
+      const project = decision.text.trim()
+      const machine = decision.machine.trim()
+      // A time to come, as when the model took his clock for another's, is no window at all: everything is gathered rather than nothing.
+      const at = decision.when.trim() === "" ? Number.NaN : Brain.instant(decision.when)
+      const since = at > situation.now ? Number.NaN : at
+      // What a thread's subagents said, which a subagent's own update means too, by the thread it's part of, since when he said too.
+      if (decision.how === "subagents") {
+        const { subject } = situation
+        const head = Option.match(target, {
+          onNone: () => (subject._tag === "Session" ? subject.update.subagent?.head : undefined),
+          onSome: ({ ref, called }) => ({ ref, called }),
+        })
+        if (head !== undefined) {
+          return {
+            subagents: head.ref,
+            ...(Number.isNaN(since) ? {} : { since }),
+            named: head.called === undefined ? "its subagents" : `the subagents of ${head.called}`,
+          }
+        }
+      }
+      const named =
+        Option.getOrUndefined(Option.map(target, ({ called }) => called)) ??
+        (group === undefined ? undefined : Brain.missedName(group)) ??
+        (mute === undefined ? undefined : Brain.mutedName(mute, situation.desk)) ??
+        (project === "" ? undefined : project) ??
+        (machine === "" ? undefined : machine) ??
+        (decision.how === "muted" ? "your muted threads" : undefined)
+      return {
+        ...(thread === undefined ? {} : { thread }),
+        ...(project === "" ? {} : { project }),
+        ...(machine === "" ? {} : { machine }),
+        ...(Number.isNaN(since) ? {} : { since }),
+        ...(decision.how === "muted" ? { muted: true as const } : {}),
+        ...(named === undefined ? {} : { named }),
+      }
+    }
+
+    /** Whether a catch-up is of everything he hasn't heard, muted threads aside. */
+    const whole = (scope: Scope) =>
+      scope.thread === undefined && scope.project === undefined && scope.machine === undefined && scope.since === undefined && scope.muted === undefined && scope.subagents === undefined
+
+    /**
+     * Catches him up on what he hasn't heard in `scope`, with the threads on
+     * `desk`, in one brief from the model: what needs him first, then eight
+     * threads at most, the rest left for "more". After a catch-up, `about`,
+     * more of it is what that one left out that he still hasn't heard, or,
+     * with none, the detail of what it told him. What it told him of counts
+     * as heard only once he's heard it to the end. With nothing to tell, he's
+     * told so without the model, `nothing` unless it names what he asked about,
+     * and nothing is marked; nor when it can't be summed up. It only reads:
+     * nothing reaches a thread.
+     */
+    const catchingUp = (
+      scope: Scope,
+      given: { readonly desk: Threads.Desk; readonly spoke: number; readonly about: Subject; readonly more?: boolean; readonly nothing?: string },
+      said: Lines,
+    ) =>
+      Effect.gen(function* () {
+        const now = yield* Clock.currentTimeMillis
+        const lines = Brain.catchupLines(said)
+        const { desk } = given
+        const coming = yield* options.upcoming
+        // Caught up, however he asked, what came in while yapd was off isn't offered after.
+        if (offered?.kind === "missed") offered = undefined
+        // What a thread's subagents said that yapd kept to itself too, which only asking about them by that thread tells of.
+        const missed = yield* Missed.gather(journal, { now, spoke: given.spoke, coming: [...coming, ...(yield* options.telling ?? Effect.succeed([]))], desk, withheld: true })
+        // A project he named as it's called, or else by whole words of its name, like "connectors"; one named nowhere, he's told yapd
+        // couldn't tell what he meant, rather than that nothing came in.
+        const { project } = scope
+        const projects = [...missed.groups.flatMap(({ project, called }) => [project, called]), ...desk.threads.flatMap(({ project, called }) => [project, called])]
+        const loosely = project !== undefined && !projects.some((name) => names(name, project, false))
+        if (project !== undefined && loosely && !projects.some((name) => names(name, project, true))) {
+          return { say: said.cantTell, subject: { _tag: "Answer", said: said.cantTell, about: Option.none(), catchingUp: true }, kind: "answer" } satisfies Outcome
+        }
+        const inScope = (groups: ReadonlyArray<Missed.Group>) => groups.flatMap((group) => Option.toArray(Option.fromNullable(within(scope, group, loosely))))
+        const before = given.more === true && given.about._tag === "Answer" ? given.about.catchup : undefined
+        let groups = inScope(missed.groups)
+        let kind: Brain.Brief["kind"] = "catchup"
+        if (before !== undefined) {
+          // More of it: what it didn't tell him of, or, with none, what it did, in detail, heard by now or not.
+          const left = groups.flatMap((group) => Option.toArray(Option.fromNullable(Missed.only(group, ({ id }) => !before.covered.includes(id)))))
+          if (left.length > 0) groups = left
+          else {
+            groups = inScope(Missed.group(yield* journal.rows(before.covered), desk))
+            kind = "detail"
+          }
+        }
+        const plain = (line: string): Outcome => ({ say: line, subject: { _tag: "Answer", said: line, about: Option.none(), catchingUp: true }, kind: "answer" })
+        if (groups.length === 0) return plain(scope.named === undefined ? (given.nothing ?? lines.caughtUp) : lines.nothingFrom(scope.named))
+        const ids = (all: ReadonlyArray<Missed.Group>) => all.flatMap(({ rows }) => rows.map(({ id }) => id))
+        // What needs him, a question in an agent's last words, a failure or a limit, is read to him first as it was kept, question, options and
+        // all, never summed up, and then what he's to hear whatever he muted, like the answer to what he asked a thread or a turn yapd couldn't
+        // sum up, which a brief could leave out: a few at most, the rest left for more, unheard. Not again for more of what he just heard.
+        const needing = groups
+          .flatMap(({ rows }) => rows.filter((kept) => Missed.audible(kept) && (kept.said ?? "").trim() !== "" && (kind !== "detail" || kept.heardAt === undefined)))
+          .toSorted((one, other) => Number(Missed.needs(other)) - Number(Missed.needs(one)) || one.at - other.at || one.id - other.id)
+        const read = needing.slice(0, inFull)
+        // Read word for word, what holds one of his routines' steps, like an offer of one that came due while yapd was off, is told the model
+        // by the routine's name alone; the brief is only ever shown it so.
+        const routines = [...new Set(read.flatMap(routinesIn))]
+        const unread = new Set(needing.slice(inFull).map(({ id }) => id))
+        const reading = new Set(read.map(({ id }) => id))
+        const others = groups.flatMap((group) => Option.toArray(Option.fromNullable(Missed.only(group, ({ id }) => !reading.has(id) && !unread.has(id)))))
+        const shown = others.slice(0, briefed)
+        const rest = [...others.slice(briefed), ...groups.flatMap((group) => Option.toArray(Option.fromNullable(Missed.only(group, ({ id }) => unread.has(id)))))]
+        const leftOut = ids(rest)
+        const left = { threads: new Set(rest.map(({ machine, thread }) => `${machine ?? ""}\n${thread ?? ""}`)).size, rows: leftOut.length }
+        const off = shown.some((group) => group.off > 0) ? missed.off : undefined
+        const brief =
+          shown.length === 0
+            ? Either.right(left.rows === 0 ? "" : lines.more)
+            : yield* brain
+                .brief(
+                  {
+                    kind,
+                    groups: shown,
+                    left,
+                    ...(read.length === 0 ? {} : { read: read.length }),
+                    ...(scope.named === undefined ? {} : { scope: scope.named }),
+                    ...(off === undefined ? {} : { off }),
+                  },
+                  desk,
+                  now,
+                )
+                .pipe(Effect.either)
+        if (Either.isLeft(brief)) {
+          yield* Effect.logWarning("Could not sum up what you missed", brief.left)
+          if (read.length === 0) return plain(lines.unbriefed)
+        }
+        // Told everything, the digest doesn't bring it up again.
+        if (whole(scope) && Either.isRight(brief)) yield* options.modes?.briefed() ?? Effect.void
+        const told = Either.isRight(brief) ? [...read.map(({ id }) => id), ...ids(shown)] : read.map(({ id }) => id)
+        const covered = new Set(told)
+        const coveredGroups = groups.flatMap((group) => Option.toArray(Option.fromNullable(Missed.only(group, ({ id }) => covered.has(id)))))
+        const say = `${[...read.map(Missed.full), Either.isRight(brief) ? brief.right.trim() : lines.unbriefedRest].filter((part) => part !== "").join(" ")}${comingUp(coming.length, said)}`
+        // "It" is the thread it told of, when it told of one the desk has.
+        const [only] = coveredGroups
+        const about =
+          coveredGroups.length === 1 && only !== undefined && only.called !== undefined && only.machine !== undefined && only.thread !== undefined
+            ? Option.some({ machine: only.machine, id: only.thread })
+            : Option.none<Threads.Ref>()
+        const catchup: Catchup = {
+          scope,
+          covered: told,
+          leftOut: Either.isRight(brief) ? leftOut : [...leftOut, ...ids(shown)],
+          left: left.threads,
+          told: coveredGroups.map((group) => ({
+            name: Brain.missedName(group),
+            ...(group.machine === undefined || group.thread === undefined ? {} : { ref: { machine: group.machine, id: group.thread } }),
+          })),
+        }
+        return {
+          say,
+          subject: { _tag: "Answer", said: say, about, missed: told, catchingUp: true, catchup, ...(routines.length === 0 ? {} : { routines }) },
+          kind: "answer",
+          missed: told,
+        } satisfies Outcome
+      })
+
+    /**
+     * Sets aside, unheard, what a catch-up of everything would tell him now,
+     * muted threads aside, as the menu counts it: never what's being told him
+     * or waiting to be, which isn't missed, nor what a thread waits on him for,
+     * which isn't in a catch-up. Asked by voice, by `utterance`, what he said
+     * it `over`, like a catch-up or a digest being read, by the entries it
+     * told him of, is set aside too: cut off, it's no longer being told him,
+     * whether it's dropped yet or put back. Noted in the journal with what it
+     * set aside, as said, `line`, when it's said, and as the change he made
+     * last, which "scratch that" takes back. What came in while yapd was off
+     * isn't offered after. How many it set aside, as of `now`, when it was
+     * asked.
+     */
+    const clearing = (
+      now: number,
+      voiced?: { readonly line: (cleared: number) => string; readonly utterance: string; readonly over: ReadonlyArray<number> },
+    ) =>
+      Effect.gen(function* () {
+        if (offered?.kind === "missed") offered = undefined
+        const coming = (yield* beingTold).filter((id) => !(voiced?.over.includes(id) ?? false))
+        const missed = yield* Missed.gather(journal, { now, spoke: yield* lastSpoke(now), coming, desk: nowhere })
+        const aside = yield* journal.setAside(
+          missed.groups.flatMap(({ rows }) => rows.filter((kept) => !Missed.muted(kept)).map(({ id }) => id)),
+          now,
+        )
+        if (aside.length === 0) return 0
+        const entry = yield* journal.write({
+          at: now,
+          kind: "action",
+          ...(voiced === undefined ? {} : { said: voiced.line(aside.length), utterance: voiced.utterance }),
+          detail: { cleared: aside.length, ids: aside },
+        })
+        noted = { at: now, kind: "cleared", id: Option.getOrElse(entry, () => 0), about: Option.none(), ids: aside }
+        yield* Effect.logInfo(`Set aside ${aside.length} of what you hadn't heard`)
+        return aside.length
+      })
+
+    /**
+     * Clears the catch-up, as he asked by voice, with what "it" told him of,
+     * like the catch-up or the digest he said it over, and says how much it
+     * set aside, or that there was nothing to.
+     */
+    const clearingUp = (thought: Thought, said: Lines) =>
+      Effect.gen(function* () {
+        const lines = Brain.catchupLines(said)
+        const { subject } = thought
+        const over = subject._tag === "Answer" ? (subject.missed ?? []) : []
+        const cleared = yield* clearing(yield* Clock.currentTimeMillis, { line: lines.cleared, utterance: thought.utterance.id, over })
+        return cleared === 0 ? reply(lines.nothingToClear, thought.subject) : ({ ...reply(lines.cleared(cleared), thought.subject), kind: "done", ...notedChange() } satisfies Outcome)
+      })
+
+    /**
+     * Takes back clearing the catch-up, or bringing it back: what it set aside
+     * that's still only set aside is his to hear again, never what he heard
+     * since; brought back, it's set aside again. Taken back, it's a change of
+     * its own, so taking that back too puts it as it was.
+     */
+    const unclearing = (last: Brain.Noted, thought: Thought, said: Lines) =>
+      Effect.gen(function* () {
+        const lines = Brain.catchupLines(said)
+        const now = yield* Clock.currentTimeMillis
+        const ids = last.ids ?? []
+        const changed = last.kind === "cleared" ? yield* journal.bringBack(ids, last.at) : yield* journal.setAside(ids, now)
+        if (changed.length === 0) return reply(`There's nothing to take back${addressed(said)}.`, thought.subject)
+        const line = last.kind === "cleared" ? lines.back(changed.length) : lines.cleared(changed.length)
+        const entry = yield* journal.write({
+          at: now,
+          kind: "action",
+          said: line,
+          utterance: thought.utterance.id,
+          detail: last.kind === "cleared" ? { undo: { cleared: changed.length, ids: changed } } : { cleared: changed.length, ids: changed },
+        })
+        noted = { at: now, kind: last.kind === "cleared" ? "restored" : "cleared", id: Option.getOrElse(entry, () => 0), about: Option.none(), ids: changed }
+        return { ...reply(line, thought.subject), kind: "done", ...notedChange() } satisfies Outcome
+      })
+
+    /** What the model decided he wants to catch up on, more of the catch-up he just heard when that's what it said, or else what it named, or to clear it. */
+    const catchup = (plan: Brain.Plan, thought: Thought, said: Lines) =>
+      Effect.gen(function* () {
+        const { decision } = plan
+        if (decision.how === "clear") return yield* clearingUp(thought, said)
+        const { situation } = thought
+        const about = (yield* afresh(situation)).subject
+        const before = about._tag === "Answer" ? about.catchup : undefined
+        const more = decision.how === "more"
+        const named = decision.target !== "" || decision.text.trim() !== "" || decision.machine.trim() !== "" || decision.when.trim() !== ""
+        const scope = more && before !== undefined && !named ? before.scope : scoping(plan, situation)
+        return yield* catchingUp(scope, { desk: situation.desk, spoke: situation.missed.spoke, about, more }, said)
+      })
+
+    /**
+     * What he hasn't heard, told him now, as he's back: a catch-up of
+     * everything, muted threads aside, or that nothing came in.
+     */
+    const rundown = (on: Threads.Desk, spoke: number, said: Lines) =>
+      Effect.flatMap(Clock.currentTimeMillis, (now) => catchingUp({}, { desk: on, spoke, about: { _tag: "Nothing" }, nothing: Brain.modeLines(said, now).nothing }, said))
+
+    /** Where a reminder is noted in the journal: under its thread, when it's about one. */
+    const under = (reminder: Pick<Reminders.Reminder, "machine" | "thread">) =>
+      Option.match(Reminders.ref(reminder), { onNone: () => ({}), onSome: ({ machine, id }) => ({ machine, thread: id }) })
+
+    /**
+     * What's said of a reminder he set, cancelled or took back, once it's
+     * noted, which "it" goes on meaning what it was about, if anything: of an
+     * offer of one of his routines, its name, which is all a model is told of
+     * the line.
+     */
+    const remindedOf = (line: string, reminder: Pick<Reminders.Reminder, "machine" | "thread" | "routine">): Outcome => ({
+      say: line,
+      subject: { _tag: "Answer", said: line, about: Reminders.ref(reminder), ...ofRoutine(reminder) },
+      kind: "done",
+      ...notedChange(),
+    })
+
+    /** Where what's said of an offer came from, noted with it: one of his routines, by its name, which is all a model is told of it. */
+    const ofRoutine = (reminder: Pick<Reminders.Reminder, "routine">) => (reminder.routine === undefined ? {} : { routines: [reminder.routine] })
+
+    /**
+     * Keeps what he asked to be told later, or to be offered to send a
+     * thread then, as the model put it, with his words as he said them
+     * beside it, and says so once it's kept, reading back what was: when, the
+     * thread by name, and what it's to say or offer. Never anything sent.
+     */
+    const reminding = (plan: Brain.Plan, thought: Thought, said: Lines) =>
+      Effect.gen(function* () {
+        const { reminders } = options
+        if (reminders === undefined) return reply(Brain.notYet(said), thought.subject)
+        const { decision, target } = plan
+        const now = yield* Clock.currentTimeMillis
+        const told = Reminders.lines(said, now)
+        const offer = decision.act === "offer"
+        const event = decision.how === "finished" || decision.how === "asked" ? decision.how : undefined
+        const listed = Option.getOrUndefined(target)
+        const called = listed === undefined ? "" : Reminders.named(listed)
+        const asked: Reminders.Asked = {
+          at: now,
+          utterance: thought.utterance.id,
+          // His words as he said them, all of them for the rest of a request, unless some may have been yapd's own voice, which never stand for his.
+          heard: thought.utterance.whole ?? ownWords(thought.utterance),
+          text: offer ? "" : decision.text.trim(),
+          ...(offer ? { propose: decision.text.trim(), ...(plan.routine === undefined ? {} : { routine: plan.routine }) } : {}),
+          ...(event === undefined ? { due: Brain.dueAt(decision.when, now) } : { event }),
+          ...(listed === undefined ? {} : { machine: listed.ref.machine, thread: listed.ref.id, called }),
+        }
+        const kept = yield* reminders.add(asked).pipe(Effect.either)
+        if (Either.isLeft(kept)) {
+          yield* Effect.logWarning("Could not keep a reminder", kept.left)
+          return reply(told.unwritten, thought.subject)
+        }
+        noted = { at: now, kind: "reminder", id: kept.right.id, about: Reminders.ref(asked) }
+        // A thread to hear finish that isn't at work now is heard of when it next finishes, which he's told.
+        const running = listed === undefined || ["running", "finishing", "queued", "approval", "question"].includes(listed.state)
+        const line = told.set(asked, called, running)
+        yield* journal.write({ at: now, kind: "action", ...under(asked), said: line, utterance: thought.utterance.id, detail: { reminder: kept.right.id, ...ofRoutine(asked) } })
+        return remindedOf(line, asked)
+      })
+
+    /**
+     * What's said of a reminder he'd cancel, or take back setting, that's no
+     * longer to come, by how it is now: gone off, or else cancelled already,
+     * as from the menu meanwhile.
+     */
+    const noLonger = (reminders: Reminders.Reminders, id: number, told: ReturnType<typeof Reminders.lines>) =>
+      Effect.map(reminders.get(id), (found) => (Option.exists(found, ({ state }) => state === "fired") ? told.over : told.already))
+
+    /** Cancels one of what he asked to be told later, as he pointed at it, and says which. */
+    const forgetting = (plan: Brain.Plan, thought: Thought, said: Lines) =>
+      Effect.gen(function* () {
+        const { reminders } = options
+        if (reminders === undefined) return reply(Brain.notYet(said), thought.subject)
+        const found = Brain.remindedBy(plan.decision.target, thought.situation)
+        if (Option.isNone(found)) return reply(said.cantTell, thought.subject)
+        const now = yield* Clock.currentTimeMillis
+        const told = Reminders.lines(said, now)
+        const cancelled = yield* reminders.cancel(found.value.id)
+        if (Option.isNone(cancelled)) return reply(yield* noLonger(reminders, found.value.id, told), thought.subject)
+        noted = { at: now, kind: "forgot", id: cancelled.value.id, about: Reminders.ref(cancelled.value) }
+        const line = told.cancelled(cancelled.value, Reminders.calling(cancelled.value, thought.situation.desk))
+        yield* journal.write({ at: now, kind: "action", ...under(cancelled.value), said: line, utterance: thought.utterance.id, detail: { forgot: cancelled.value.id } })
+        return remindedOf(line, cancelled.value)
+      })
+
+    /**
+     * Cancels one of his reminders by its id, as from the menu, as forgetting
+     * it does, but with nothing said, as clearing the catch-up from the menu:
+     * noted with no words of his or yapd's. Why not, when it's no longer to
+     * come, by how it is now.
+     */
+    const cancelling = (id: number) =>
+      Effect.gen(function* () {
+        const { reminders } = options
+        if (reminders === undefined) return "unknown" as const
+        const now = yield* Clock.currentTimeMillis
+        const cancelled = yield* reminders.cancel(id)
+        if (Option.isNone(cancelled)) {
+          const was = Option.getOrUndefined(Option.map(yield* reminders.get(id), ({ state }) => state))
+          return was === "fired" || was === "cancelled" ? was : ("unknown" as const)
+        }
+        noted = { at: now, kind: "forgot", id: cancelled.value.id, about: Reminders.ref(cancelled.value) }
+        yield* journal.write({ at: now, kind: "action", ...under(cancelled.value), detail: { forgot: cancelled.value.id } })
+        return "done" as const
+      })
+
+    /** Takes back the reminder he just set, or brings back the one he just cancelled, and says so, naming it. */
+    const retracting = (last: Brain.Noted, thought: Thought, said: Lines) =>
+      Effect.gen(function* () {
+        const { reminders } = options
+        if (reminders === undefined) return reply(Brain.notYet(said), thought.subject)
+        const now = yield* Clock.currentTimeMillis
+        const told = Reminders.lines(said, now)
+        const changed = last.kind === "reminder" ? yield* reminders.cancel(last.id) : yield* reminders.restore(last.id)
+        if (Option.isNone(changed)) return reply(last.kind === "reminder" ? yield* noLonger(reminders, last.id, told) : `There's nothing to take back${addressed(said)}.`, thought.subject)
+        // Taken back, it's a change of its own, so taking that back too puts it as it was.
+        noted = { at: now, kind: last.kind === "reminder" ? "forgot" : "reminder", id: changed.value.id, about: Reminders.ref(changed.value) }
+        const line = told.cancelled(changed.value, Reminders.calling(changed.value, thought.situation.desk), last.kind === "forgot")
+        yield* journal.write({
+          at: now,
+          kind: "action",
+          ...under(changed.value),
+          said: line,
+          utterance: thought.utterance.id,
+          detail: { undo: last.kind === "reminder" ? { reminder: changed.value.id } : { forgot: changed.value.id } },
+        })
+        return remindedOf(line, changed.value)
+      })
+
+    /**
+     * What's said of what he had kept in mind, forgotten or brought back,
+     * which is about no thread, `changed`, once it's noted, unless it was so
+     * already: of a routine read back, its name, which is all a model is told
+     * of the line.
+     */
+    const memorized = (line: string, changed: boolean, kept?: Pick<Memory.Memory, "kind" | "name">): Outcome => ({
+      say: line,
+      subject: { _tag: "Answer", said: line, about: Option.none(), ...(kept === undefined ? {} : readBack(kept)) },
+      kind: "done",
+      ...(changed ? notedChange() : {}),
+    })
+
+    /** Where what's said of a memory came from, noted with it: a routine read back, by its name, which is all a model is told of it. */
+    const readBack = (kept: Pick<Memory.Memory, "kind" | "name">) => (kept.kind === "routine" && kept.name !== undefined ? { routines: [kept.name] } : {})
+
+    /**
+     * Keeps what he asked yapd to keep in mind, in his words, with all he
+     * said as he said it beside it, and says so once it's kept, or was
+     * already, reading it back: a fact as it's kept, so he hears what of his
+     * words is, and a routine's steps, so he hears exactly what's sent for
+     * its name.
+     * Nothing that may have been yapd's own voice is kept, since it would be
+     * in every prompt as his, nor what may give a secret away, which isn't
+     * kept in the journal either: he's told why.
+     */
+    const remembering = (plan: Brain.Plan, thought: Thought, said: Lines) =>
+      Effect.gen(function* () {
+        const { memories } = options
+        const { decision } = plan
+        const { utterance } = thought
+        const told = Memory.lines(said)
+        // Before anything else would turn it down, even over yapd's own voice, since only this keeps his words out of the journal.
+        if (Brain.secretive(decision, utterance)) {
+          yield* Effect.logInfo("Not keeping it, since it looks like a secret")
+          return { ...reply(told.secret, thought.subject), withheld: true }
+        }
+        if (memories === undefined) return reply(Brain.notYet(said), thought.subject)
+        // All he said, for the rest of a request too, unless some of it may have been yapd's own voice.
+        const heard = utterance.whole ?? ownWords(utterance)
+        if (utterance.echo !== undefined || heard.trim() === "") return reply(told.echoed, thought.subject)
+        const routine = decision.how === "routine" ? Brain.routineOf(decision.text) : undefined
+        const text = routine?.steps ?? decision.text.trim()
+        if (decision.how === "routine" && routine === undefined) return reply(said.cantTell, thought.subject)
+        const now = yield* Clock.currentTimeMillis
+        const asked: Memory.Asked = { at: now, kind: routine === undefined ? "fact" : "routine", ...(routine === undefined ? {} : { name: routine.name }), text, heard, utterance: utterance.id }
+        const kept = yield* memories.add(asked).pipe(Effect.either)
+        if (Either.isLeft(kept)) {
+          yield* Effect.logWarning("Could not keep what he asked me to remember", kept.left)
+          return reply(told.unwritten, thought.subject)
+        }
+        if (kept.right._tag === "Full") return reply(told.full, thought.subject)
+        // Kept already, as when he didn't hear it was, nothing changed: what "scratch that" takes back is still what he last changed.
+        if (kept.right._tag === "Already") return memorized(told.kept(kept.right.memory, false), false, kept.right.memory)
+        const { memory, retired } = kept.right
+        noted = { at: now, kind: "memory", id: memory.id, about: Option.none(), ...Option.match(retired, { onNone: () => ({}), onSome: ({ id }) => ({ replaced: id }) }) }
+        const line = told.kept(memory, Option.isSome(retired))
+        yield* journal.write({
+          at: now,
+          kind: "action",
+          said: line,
+          utterance: utterance.id,
+          detail: { memory: memory.id, ...Option.match(retired, { onNone: () => ({}), onSome: ({ id }) => ({ replaced: id }) }), ...readBack(memory) },
+        })
+        return memorized(line, true, memory)
+      })
+
+    /** Forgets one of what he asked yapd to keep in mind, as he pointed at it, and says which. */
+    const unremembering = (found: Brain.Remembered, thought: Thought, said: Lines) =>
+      Effect.gen(function* () {
+        const { memories } = options
+        if (memories === undefined || Option.isNone(found.kept)) return reply(Brain.notYet(said), thought.subject)
+        const told = Memory.lines(said)
+        const now = yield* Clock.currentTimeMillis
+        const forgotten = yield* memories.forget(found.kept.value.id).pipe(Effect.either)
+        if (Either.isLeft(forgotten)) {
+          yield* Effect.logWarning("Could not forget what he asked me to", forgotten.left)
+          return reply(told.unwritten, thought.subject)
+        }
+        // Forgotten already, as it was just now, it's no change of his.
+        if (Option.isNone(forgotten.right)) return memorized(told.forgotten(found.kept.value), false)
+        noted = { at: now, kind: "forgotten", id: forgotten.right.value.id, about: Option.none() }
+        const line = told.forgotten(forgotten.right.value)
+        yield* journal.write({ at: now, kind: "action", said: line, utterance: thought.utterance.id, detail: { memory: forgotten.right.value.id, forgotten: true } })
+        return memorized(line, true)
+      })
+
+    /**
+     * Takes back what he just had kept in mind, or forgotten, and says so,
+     * naming it: kept, it's forgotten again, unless it took the place of a
+     * routine called the same, which then takes its place back; forgotten,
+     * it's brought back. Taken back, it's a change of its own, so taking that
+     * back too puts it as it was.
+     */
+    const recalling = (last: Brain.Noted, thought: Thought, said: Lines) =>
+      Effect.gen(function* () {
+        const { memories } = options
+        if (memories === undefined) return reply(Brain.notYet(said), thought.subject)
+        const told = Memory.lines(said)
+        const now = yield* Clock.currentTimeMillis
+        if (last.kind === "memory" && last.replaced === undefined) {
+          const forgotten = yield* memories.forget(last.id).pipe(Effect.either)
+          if (Either.isLeft(forgotten)) {
+            yield* Effect.logWarning("Could not take back what he asked me to remember", forgotten.left)
+            return reply(told.unwritten, thought.subject)
+          }
+          if (Option.isNone(forgotten.right)) return reply(told.over, thought.subject)
+          noted = { at: now, kind: "forgotten", id: last.id, about: Option.none() }
+          const line = told.forgotten(forgotten.right.value)
+          yield* journal.write({ at: now, kind: "action", said: line, utterance: thought.utterance.id, detail: { undo: { memory: last.id } } })
+          return memorized(line, true)
+        }
+        // One he forgot, or the routine one he had kept took the place of, which takes its place again.
+        const back = last.kind === "memory" ? (last.replaced ?? last.id) : last.id
+        const restored = yield* memories.restore(back).pipe(Effect.either)
+        if (Either.isLeft(restored)) {
+          yield* Effect.logWarning("Could not bring back what he asked me to remember", restored.left)
+          return reply(told.unwritten, thought.subject)
+        }
+        if (Option.isNone(restored.right)) return reply(told.over, thought.subject)
+        if (restored.right.value._tag === "Full") return reply(told.full, thought.subject)
+        // Kept since, as he said it again, nothing changed: this stays forgotten, and taking it back again still brings it back.
+        if (restored.right.value._tag === "Already") return memorized(told.restored(restored.right.value.memory, false), false, restored.right.value.memory)
+        const { memory, retired } = restored.right.value
+        noted = { at: now, kind: "memory", id: memory.id, about: Option.none(), ...Option.match(retired, { onNone: () => ({}), onSome: ({ id }) => ({ replaced: id }) }) }
+        const line = told.restored(memory, Option.isSome(retired))
+        yield* journal.write({ at: now, kind: "action", said: line, utterance: thought.utterance.id, detail: { undo: { memory: memory.id }, ...readBack(memory) } })
+        return memorized(line, true, memory)
+      })
+
+    /**
+     * Whether an archive dropped reminders he'd set on what it archived,
+     * since the last reminder he set or cancelled: with no thread named, the
+     * last thing done; of the thread he named, its own last tidy, still
+     * standing, within as long as "scratch that" reaches, whatever was done
+     * since, like taking back another of those it archived with it.
+     */
+    const droppedLately = (situation: Brain.Situation, named: Option.Option<Threads.Ref>) =>
+      Effect.gen(function* () {
+        const since = (row: Ledger.Row) => !Option.exists(situation.noted ?? Option.none(), ({ at }) => at >= row.at)
+        if (Option.isSome(named)) {
+          const own = yield* ledger.latest(scratchable, { kinds: ["tidy"], machine: named.value.machine, thread: named.value.id })
+          return Option.exists(own, (row) => Hands.dropped(row) && since(row))
+        }
+        const acted = Option.getOrUndefined(situation.acted)
+        if (acted === undefined || acted.kind !== "tidy" || !since(acted)) return false
+        const rows = yield* ledger.steps(0, { kinds: ["tidy"], utterance: acted.utterance, step: acted.step })
+        return rows.some(Hands.dropped)
+      })
+
+    /**
+     * Takes back what he just did, as the model said he meant it, never as
+     * whether it filled in a thread: the reminder or offer he just set or
+     * cancelled, of the thread he named if he did and it's of one, and
+     * nothing else then; what he just had kept in mind or forgotten, and
+     * nothing else then; what yapd last did to a thread, a message or a
+     * stop, of the thread he named if he did, never a reminder, a memory, a
+     * mute or a mode made since; and for no more than "scratch that", the
+     * newest change he made, whatever thread the model filled in, so a
+     * message sent a minute before a reminder or focus is never withdrawn in
+     * its place. Reminders
+     * an archive just dropped come back with the thread, as taking that back
+     * brings both, never as a reminder he set or cancelled before it: of the
+     * thread he named, on the desk or by its handle in ARCHIVED, that thread
+     * alone, as its own archive dropped them, though another archived with it
+     * was taken back since, only when the model's sure which. A reminder of
+     * a handle that's neither is nothing taken back, never one of another
+     * thread. Every thread a tidy did is taken back, with none named, for
+     * "scratch that" or when the model's sure he means that, never on a
+     * guess, which would tidy threads he didn't ask about. The change he said
+     * yes to taking back, or the one the "done" line said, is that change
+     * alone, while it's still the last of its kind: once another is made
+     * since, like the catch-up cleared from the menu, nothing is, and he's
+     * told it changed.
+     */
+    const undoing = (plan: Brain.Plan, thought: Thought, said: Lines, at: Stepping): Effect.Effect<Outcome> =>
+      Effect.gen(function* () {
+        const { situation } = thought
+        const taking = Brain.undoes(plan.decision.how)
+        const handle = plan.decision.target.trim()
+        const unsure = () => unfinished(reply(said.cantTell, thought.subject), plan.decision.rest, said, situation.desk)
+        const unnamed = handle === "" && Option.isNone(plan.target)
+        const pinned = at.pinnedChange
+        if (pinned?.what === "noted" && noted !== undefined && noted.at !== pinned.at) {
+          const outcome = reply(Brain.changedSince(said), thought.subject)
+          return yield* onward(thought, outcome, Brain.about(outcome.subject), at.step + 1, said)
+        }
+        if (taking === "thread") return plan.decision.how === "tidy" && unnamed && plan.decision.sure !== "high" ? unsure() : yield* write(plan, thought, said, at)
+        const archived = taking === "reminder" ? Brain.archivedBy(handle, situation) : Option.none()
+        // The thread he named, on the desk, even one taken for filled in for a reminder of none, or in ARCHIVED.
+        const listed = taking === "reminder" ? Option.orElse(plan.target, () => Option.fromNullable(situation.desk.threads.find((one) => one.handle === handle))) : plan.target
+        const whose = Option.orElse(Option.map(listed, ({ ref }) => ref), () => Option.map(archived, ({ ref }) => ref))
+        // Of the thread he named, what its own archive dropped, though another it archived with it was taken back since: that thread alone.
+        if (taking === "reminder" && Option.isSome(whose) && (yield* droppedLately(situation, whose))) {
+          if (!Brain.surely(plan.decision.sure, whose.value, situation)) return unsure()
+          return yield* write({ decision: { ...plan.decision, how: "tidy", target: handle }, target: listed }, thought, said, at)
+        }
+        const dropping = taking === "reminder" && (yield* droppedLately(situation, Option.none()))
+        if (dropping) {
+          if (unnamed && plan.decision.sure !== "high") return unsure()
+          if (unnamed) return yield* write({ decision: { ...plan.decision, how: "tidy", target: "" }, target: Option.none() }, thought, said, at)
+          if (Option.isNone(whose)) return unsure()
+        }
+        // A handle that's no thread, on the desk or in ARCHIVED, is never taken for none, which would take back another thread's reminder.
+        if (taking === "reminder" && handle !== "" && Option.isNone(whose)) return unsure()
+        // Of the thread he named, if he did, and while what an archive dropped is what he'd take back, even one taken for filled in: never
+        // a reminder of none he set before it, as if he'd named none.
+        const named = dropping ? whose : Option.orElse(Option.map(plan.target, ({ ref }) => ref), () => Option.map(archived, ({ ref }) => ref))
+        // A reminder, a memory or the catch-up, only when he means that, never another.
+        const changed = Option.filter(situation.noted ?? Option.none(), (last) => taking === "last" || Brain.changeOf(last) === taking)
+        const last = Option.getOrUndefined(changed)
+        const latest =
+          taking === "reminder" || taking === "memory" || taking === "catchup"
+            ? Brain.newest({ noted: changed, acted: Option.none(), muteChange: Option.none() }, taking === "reminder" ? Option.getOrUndefined(named) : undefined)
+            : Brain.newest(situation)
+        if (latest === "noted" && last !== undefined) {
+          const change = Brain.changeOf(last)
+          const taken = change === "catchup" ? unclearing(last, thought, said) : change === "memory" ? recalling(last, thought, said) : retracting(last, thought, said)
+          return yield* Effect.flatMap(taken, (outcome) => onward(thought, outcome, Brain.about(outcome.subject), at.step + 1, said))
+        }
+        if (taking === "reminder" || taking === "memory" || taking === "catchup") {
+          const outcome = reply(`There's nothing to take back${addressed(said)}.`, thought.subject)
+          return yield* onward(thought, outcome, Brain.about(outcome.subject), at.step + 1, said)
+        }
+        if (latest === "mute" && options.controls !== undefined) {
+          const mute = { ...plan, decision: { ...plan.decision, act: "mute" as const, how: "undo" } }
+          return yield* Effect.flatMap(muting(mute, thought, said, pinned), (outcome) => onward(thought, outcome, Brain.about(outcome.subject), at.step + 1, said))
+        }
+        if (latest === "mode" && options.modes !== undefined) {
+          const mode = { ...plan, decision: { ...plan.decision, act: "mode" as const, how: "undo" } }
+          return yield* Effect.flatMap(moding(mode, thought, said, pinned), (outcome) => onward(thought, outcome, Brain.about(outcome.subject), at.step + 1, said))
+        }
+        // Every thread a tidy just did, only when the model's sure he means all of it, as for "scratch that": never on a guess.
+        if (latest === "acted" && Option.exists(situation.acted, ({ kind }) => kind === "tidy") && plan.decision.sure !== "high") return unsure()
+        return yield* write({ decision: { ...plan.decision, target: "" }, target: Option.none() }, thought, said, at)
+      })
+
+    /** Does what was decided and checked: a step of its request, which changes a thread under that step's ids. */
+    const perform = (plan: Brain.Plan, thought: Thought, said: Lines, at: Stepping = { step: 0, twice: false }): Effect.Effect<Outcome> => {
+      const { decision, target } = plan
+      switch (decision.act) {
+        case "send":
+          return Effect.flatMap(answerFor(plan, thought.utterance), (asks) =>
+            // Never sent with parts he's yet to hear left out, as if skipped: he's asked the next, as when he dictates an answer.
+            asks !== undefined && asks.part < asks.questions.length && Option.isSome(target)
+              ? unprompted({ ...plan, decision: { ...decision, act: "reply", text: decision.text.trim() || ownWords(thought.utterance) } }, target.value, thought, said, at, true)
+              : write(plan, thought, said, at, asks),
+          )
+        case "stop":
+        case "tidy":
+          return write(plan, thought, said, at)
+        case "undo":
+          return undoing(plan, thought, said, at)
+        case "remind":
+        case "offer":
+          // Kept, then the rest of the request, done now, like "and tell the Mina one to rebase".
+          return Effect.flatMap(reminding(plan, thought, said), (outcome) => onward(thought, outcome, Brain.about(outcome.subject), at.step + 1, said))
+        case "forget":
+          return Effect.flatMap(
+            Option.match(Brain.rememberedBy(decision.target, thought.situation), {
+              onNone: () => forgetting(plan, thought, said),
+              onSome: (memory) => unremembering(memory, thought, said),
+            }),
+            (outcome) => onward(thought, outcome, Brain.about(outcome.subject), at.step + 1, said),
+          )
+        case "remember":
+          // Kept, then the rest of the request code split off the fact, done now. Nothing more of what may give a secret away, which he's told is
+          // left, without its words, nor a rest the model gave beside all he asked to be kept, which he's told is left, in its words only when
+          // they can be read out.
+          return Effect.flatMap(remembering(plan, thought, said), (outcome) => {
+            if (outcome.withheld === true) return Effect.succeed(unfinished(outcome, plan.left ?? decision.rest, said, thought.situation.desk))
+            if (plan.left !== undefined) return Effect.succeed(unfinished(outcome, plan.left, said, thought.situation.desk, !Brain.readable(plan.left)))
+            return onward(thought, outcome, Brain.about(outcome.subject), at.step + 1, said)
+          })
+        case "answer":
+          return answer(decision.spoken, target, thought, said, at.step)
+        case "look":
+          return Option.match(target, {
+            onNone: () => Effect.succeed(reply(said.cantTell, thought.subject)),
+            onSome: (target) => look(target, thought, said, at.step),
+          })
+        case "find":
+          return find(thought, said, at.step)
+        case "decide":
+        case "reply":
+          return Option.match(target, {
+            onNone: () => Effect.succeed(reply(said.cantTell, thought.subject)),
+            onSome: (target) => unprompted(plan, target, thought, said, at),
+          })
+        case "again":
+          return Effect.gen(function* () {
+            const situation = yield* afresh(thought.situation)
+            const { subject } = situation
+            // A dictation cut it off, so it's about to be said again from the start, and once is enough.
+            if (subject._tag !== "Nothing" && (yield* options.queued(subject.said))) {
+              yield* Effect.logInfo("Not saying it again, since it's about to be said again from the start")
+              return quiet(subject)
+            }
+            const last = subject._tag === "Nothing" ? Brain.nothingSaid(said) : subject.said
+            // Said again, what he missed that it told him is heard once he's heard it to the end this time.
+            const missed = subject._tag === "Answer" ? subject.missed : undefined
+            // The model's words only when there's something to say again that isn't a closed question: with nothing, they can only be from before yapd
+            // was turned off and on, and a question, closed or not, is never said again in the words it was asked in, whatever their case or
+            // punctuation or wherever it addresses him (I4), nor once "it's on your screen" is taken off it, in whatever case or punctuation, as
+            // it is before it's said.
+            const theirs = Show.offScreen(decision.spoken.trim(), said)
+            // Said again as it was, it's all of the line itself, never the model's copy of it, which it may only have been shown cut short.
+            const same = decision.how === "same" && subject._tag !== "Nothing"
+            const taken =
+              !same &&
+              subject._tag !== "Nothing" &&
+              !(subject._tag === "Answer" && subject.asked !== undefined) &&
+              !Brain.echoes(theirs, situation.asked, said)
+            // Whether what was asked to be seen is on his screen is told only as it goes up.
+            const say = Show.offScreen((taken ? theirs : "") || last, said)
+            // What it told of counts as heard only once all of the line it told of it in is said again, never the model's words for it.
+            const whole = !taken || theirs === ""
+            // Shown too while an app watches, for what's still not caught the second time.
+            const card = subject._tag === "Nothing" ? Option.none() : yield* options.show.caption(say, situation)
+            // The rest of an update said for "more" is what "say that again" says next, as when he asks for it over the update.
+            const told = decision.how === "more" && subject._tag === "Session" ? { ...subject, said: say } : subject
+            return {
+              say,
+              subject: told,
+              kind: "answer",
+              ...(missed === undefined || !whole ? {} : { missed }),
+              ...Option.match(card, { onNone: () => ({}), onSome: (card) => ({ card }) }),
+            } satisfies Outcome
+          })
+        case "start":
+          return start(thought, said, at.step)
+        case "mute":
+          return Effect.flatMap(muting(plan, thought, said, at.pinnedChange), (outcome) => onward(thought, outcome, Brain.about(outcome.subject), at.step + 1, said))
+        case "mode":
+          return Effect.flatMap(moding(plan, thought, said, at.pinnedChange), (outcome) => onward(thought, outcome, Brain.about(outcome.subject), at.step + 1, said))
+        case "catchup":
+          return Effect.flatMap(catchup(plan, thought, said), (outcome) => onward(thought, outcome, Brain.about(outcome.subject), at.step + 1, said))
+        case "show": {
+          // Shown, then the rest of the request, like "and tell it to fix the checks", with "it" the thread shown.
+          // A later step of the request takes down only a card it put up, like "show me everything, then hide that", never one asked for after it.
+          const mine = at.step === 0 ? undefined : thought.utterance.id
+          const shown = Effect.flatMap(afresh(thought.situation), (situation) => options.show.present(decision.how, target, situation, said, mine))
+          return Effect.flatMap(shown, ({ say, card, about, hides, unseen }) => {
+            if (hides === true) for (const kept of cards) if (at.step === 0 || kept.request === thought.utterance.id) kept.down = true
+            return onward(
+              thought,
+              {
+                say,
+                subject: say === "" ? thought.subject : { _tag: "Answer", said: say, about },
+                kind: say === "" ? "none" : "answer",
+                ...Option.match(card, { onNone: () => ({}), onSome: (card) => ({ card }) }),
+                ...(hides === true ? { hides } : {}),
+                ...(unseen === undefined ? {} : { unseen }),
+              },
+              about,
+              at.step + 1,
+              said,
+            )
+          })
+        }
+        case "dismiss":
+          // Nothing more to say to this, and the rest, like "thanks, and tell it to open a PR", still to do.
+          return onward(thought, quiet(thought.subject), Option.none(), at.step + 1, said)
+        case "resume":
+          return Effect.succeed(quiet(thought.subject))
+        default:
+          return Effect.succeed(reply(Brain.notYet(said), thought.subject))
+      }
+    }
+
+    /**
+     * A step of what was handed over from an update, or of an answer to what
+     * that asked, left rather than done, as `leftOver` has it: said, in his
+     * words for it, `words` or the step's own, with the rest of the request
+     * done after it; or tidying a session with no thread in T3 Code, or a
+     * subagent, which isn't tidied on its own, said plainly. Of what may all
+     * be yapd's own words, nothing is said.
+     */
+    const leaving = (thought: Thought, said: Lines, at: Stepping, muting: boolean, words?: string): Effect.Effect<Outcome> => {
+      if (Brain.mayBeOwn(thought.utterance)) return Effect.as(notActing(thought.utterance), quiet(thought.subject))
+      const { decision, subject } = thought
+      const lines = Brain.handoffLines(said)
+      if (!muting && decision.act === "tidy") {
+        const head = subject._tag === "Session" ? Brain.headCalled(subject.update, thought.situation.desk) : undefined
+        return Effect.zipRight(
+          Effect.logInfo(head === undefined ? "Left it, since the update's own session has no thread in T3 Code to tidy" : "Left it, since a subagent isn't tidied on its own"),
+          onward(thought, reply(lines.untidied(decision.how, head), subject), Option.none(), at.step + 1, said),
+        )
+      }
+      const step = words ?? (decision.rest.trim() === "" ? thought.utterance.heard : decision.text.trim() || thought.utterance.heard)
+      return Effect.zipRight(
+        Effect.logInfo(muting ? "Left it, as it's about mutes" : "Left it, since it's for the update's own session, which T3 Code mustn't reach"),
+        onward(thought, reply(lines.left(step, thought.situation.desk), thought.subject), Option.none(), at.step + 1, said),
+      )
+    }
+
+    /**
+     * Does what's checked. Handed over from an update, or `asked` of what was,
+     * a write to the update's own session that isn't steered, or any while
+     * it's about mutes, is left first, on the decision as it was given,
+     * before a question or "can't tell" gets in; and handed over while he
+     * isn't at hand, what only his word does is the shortcut's.
+     */
+    const follow = (
+      checked: Brain.Checked,
+      thought: Thought,
+      said: Lines,
+      at: Stepping = { step: 0, twice: false },
+      asked?: Pick<Open, "own" | "handed" | "heard">,
+    ): Effect.Effect<Outcome> => {
+      const own = asked === undefined ? thought.utterance.own : asked.own
+      const handed = asked === undefined ? thought.utterance.handed : asked.handed
+      if (own !== undefined && Brain.leftOver(thought.decision, own, handed, thought.situation)) return leaving(thought, said, at, handed?.muting === true, asked?.heard)
+      if (asked === undefined && thought.utterance.handed?.present === false && Brain.unattended(thought.decision)) {
+        return onward(thought, reply(Brain.handoffLines(said).shortcut, thought.subject), Option.none(), at.step + 1, said)
+      }
+      // Anything said back to a "done" line in what may all be yapd's own words, or in the rest of what was, is only ever asked about in
+      // code's own question, or let go, which is logged so how often that happens can be counted: as asked only once it is, since one
+      // asked since they were said lets it go, which `opening` logs.
+      const echoed = Brain.mayBeOwn(thought.utterance) && thought.decision.act !== "resume"
+      switch (checked._tag) {
+        case "Say":
+          return Effect.succeed(unfinished(reply(checked.spoken, thought.subject), thought.decision.rest, said, thought.situation.desk))
+        case "Ask":
+          return Effect.tap(Effect.map(opening(checked.open, thought.utterance), (outcome) => listing(outcome, checked.open)), (outcome) =>
+            echoed && outcome.kind === "question"
+              ? Effect.logInfo(`Asking rather than acting on it, since ${quoted(thought.utterance.heard)} may have been my own voice, sure ${thought.decision.sure}`)
+              : Effect.void,
+          )
+        case "Do":
+          if (echoed && checked.plan.decision.act === "resume") return Effect.as(notActing(thought.utterance), quiet(thought.subject))
+          // Taking back the step a "done" line said, said back to it, is that step alone, whatever's written before it's done, and the change
+          // it said, that change alone.
+          return perform(checked.plan, thought, said, {
+            ...at,
+            ...(checked.plan.pinned === undefined ? {} : { pinned: checked.plan.pinned }),
+            ...(checked.plan.pinnedChange === undefined ? {} : { pinnedChange: checked.plan.pinnedChange }),
+          })
+      }
+    }
+
+    /** A question about tidying several threads, with a card listing each, for an app to show as it's asked. */
+    const listing = (outcome: Outcome, open: Omit<Open, "id" | "version" | "at">): Outcome =>
+      outcome.kind !== "question" || open.tidying === undefined || open.tidying.called.length < 2
+        ? outcome
+        : {
+            ...outcome,
+            card: {
+              kind: "list",
+              title: `${Brain.capital(open.decision.how)} these?`,
+              markdown: open.tidying.called.map((name) => `- ${Show.plainly(name)}`).join("\n"),
+            },
+          }
+
+    /** Acting on it, with the turn already held. */
+    const acting = (thought: Thought): Effect.Effect<Outcome> =>
+      Effect.gen(function* () {
+        const { utterance } = thought
+        const off = outdated(utterance.turns)
+        const stopped = Effect.as(Effect.logInfo("Not acting on it, since yapd was turned off after it was said"), quiet(thought.subject))
+        // Turned off since, nothing is done for it, not even working it out again.
+        if (yield* off) return yield* stopped
+        let decided = thought
+        if (decided.version !== version) {
+          yield* Effect.logInfo("Working it out again, since the open question changed meanwhile")
+          decided = yield* think(utterance, decided.subject, decided.situation.lines)
+          if (yield* off) return yield* stopped
+        }
+        const { decision } = decided
+        // Nothing was really said, like words Whisper hears in silence, or what may all be yapd's own words were let go: a question stays open.
+        if (decided.source === "fast" && decision.act === "resume") return yield* Effect.as(fastLetGo(decided), quiet(decided.subject))
+        // Told to stop the update he was hearing, it isn't read again once the dictation that cut it off is dealt with: never in what may
+        // all be yapd's own words.
+        if (decision.act === "dismiss" && decided.subject._tag === "Session" && hushed(utterance.heard) && !Brain.mayBeOwn(utterance)) {
+          yield* options.skip(decided.subject.update)
+        }
+        const said = yield* persona.lines
+        // Nothing was made of it, so that's all that's said, and what he missed isn't marked heard. Still, he said something after the question he heard, which closes it.
+        // All he said may be yapd's own words, nothing is said of them, not even that, and a question is left as it was: they're let go.
+        if (decided.source === "failed") {
+          if (Brain.mayBeOwn(utterance)) return yield* Effect.as(notActing(utterance), quiet(decided.subject))
+          const heard = before(utterance)
+          if (heard?.said === undefined) return reply(decision.spoken, decided.subject)
+          const { open } = heard
+          yield* close(open, utterance.via === "reply" ? "dropped: unclear" : "replaced", utterance.id)
+          return ahead(reply(decision.spoken, decided.subject), open.decision.rest, said)
+        }
+        const now = yield* Clock.currentTimeMillis
+        if (asking !== undefined && Option.isNone(current(now))) yield* close(asking.open, "dropped: unanswered")
+        // One asked since he said this stays open, to be asked as usual, as if it weren't there.
+        const opened = before(utterance)
+        if (opened === undefined) return yield* follow(Brain.check(decision, decided.situation, said), decided, said)
+        // What may all be yapd's own words said back to a "done" line take its place only for code's own question about them, and he's told
+        // what was left of it, as for anything new: anything else, all let go, like an answer to it, hearing it again or something new, leaves
+        // it as it was, heard or waiting its turn, and nothing is said of it, so it's never lost to them, nor asked again, nor told as left.
+        if (Brain.mayBeOwn(utterance)) {
+          const checked = Brain.check(decision, decided.situation, said)
+          if (checked._tag !== "Ask") return yield* follow(checked, decided, said)
+          yield* close(opened.open, "replaced", utterance.id)
+          if (opened.said !== undefined) return ahead(yield* follow(checked, decided, said), opened.open.decision.rest, said)
+          yield* deliver(unheardLeft(opened.open, said), decided)
+          return yield* follow(checked, decided, said)
+        }
+        // Taking back what he just did, of the question's thread or none named, a message he dictated, taken as the answer to a part of the
+        // question, is taken back out of it. That was all he took back, since it never went: he's told so, and the question's asked again
+        // after, from the part it answered. Let go with "scratch that", it's let go without it. Never when the model took him to mean a reminder,
+        // a memory, the catch-up he cleared or what was done to tidy a thread.
+        const undone = decided.situation.desk.threads.find(({ handle }) => handle === decision.target)
+        // One yapd archived, by its handle in ARCHIVED, is never the question's.
+        const ours =
+          undone === undefined ? Option.isNone(Brain.archivedBy(decision.target, decided.situation)) : opened.open.candidates.some((ref) => Threads.same(ref, undone.ref))
+        const takenBack =
+          ours &&
+          ((decision.act === "undo" && decision.how !== "reminder" && decision.how !== "memory" && decision.how !== "catchup" && decision.how !== "tidy") ||
+            (decision.act === "dismiss" && Brain.takesBack(utterance.heard)))
+        const open = takenBack ? withdrawing(opened.open) : opened.open
+        if (open !== opened.open && decision.act === "undo") {
+          yield* close(open, "replaced", utterance.id)
+          return yield* onward(decided, reply(`Withdrawn${addressed(said)}.`, decided.subject), Option.none(), 1, said)
+        }
+        // Whether "it" is the question, as when he pressed the shortcut while it was being asked, even if it broke off before he'd heard it all.
+        const asked = decided.subject._tag === "Answer" && (decided.subject.question?.id === open.id || decided.subject.said === open.asked)
+        // Said back to something said since, like an answer he follows up, it's never the answer, however it was taken: it takes its place.
+        const aside = apart(utterance, decided.subject, open)
+        // He didn't catch the question, so it's asked again in other words, now rather than later, however that was taken: what he'd hear is the
+        // question, which is never closed and then said again (I4). Taken as an answer while "it" is something else, only once he's heard the
+        // question: until then it's still waiting its turn, and what he asks to hear again is what he was hearing. A thread's is asked in full,
+        // as he asked, or with what its options mean, or which one then, without yapd's pick.
+        if (decision.act === "again" && (asked || (decision.pending === "answers" && opened.said !== undefined && !aside))) {
+          const how = decision.how === "more" || decision.how === "instead" || decision.how === "which" ? decision.how : "again"
+          return yield* reask(said, open.kind !== "question" ? "still" : how)
+        }
+        // Nor when he asks to see it, which is hearing it again too.
+        if (decision.act === "show" && decision.how === "said" && asked) return yield* reshown(said, decided.situation, open.kind !== "question" ? "still" : "again")
+        // He never heard it, so what he said is something new, which takes its place, and he's told what was left for it: what didn't go, and the rest of its request.
+        if (opened.said === undefined) {
+          if (decision.act === "resume") return quiet(decided.subject)
+          const checked = Brain.check(decision, decided.situation, said)
+          yield* close(open, "replaced", utterance.id)
+          yield* deliver(unheardLeft(open, said), decided)
+          return yield* follow(checked, decided, said)
+        }
+        // Saying again just what was asked about, like the same message to the same thread, is a yes to it. To sending one again, whatever
+        // time the words say: it's asked about at the time it first went, which may not be theirs, like at once to a turn stopped for it.
+        // A routine's name is the steps it sends, so saying it again to "Again?" about them is a yes too.
+        const resolved = Brain.resolved(decision, decided.situation)
+        const same = open.kind === "resend" ? { ...resolved, how: "" } : resolved
+        const repeated = Brain.yesNo(open.kind) && decision.target !== "" && Brain.agrees(open, same, decided.situation)
+        // What a thread waits on him for is only answered for that thread: naming another, like "approve the Mina one instead", is
+        // something new, which the model's pick of thread stands for, and leaves the one asked about waiting.
+        const named = decided.situation.desk.threads.find(({ handle }) => handle === decision.target)
+        const elsewhere = requestOf(open) !== undefined && named !== undefined && !open.candidates.some((ref) => Threads.same(ref, named.ref))
+        const answers = (decision.pending === "answers" || repeated) && decision.act !== "resume" && !elsewhere && !aside
+        // An approval is allowed only by the word its asking named, "approve" or "allow", never a plain yes, "sure", "OK", "go ahead" or
+        // "do it", however risky it looks and whatever the model took them for: he's told it needs an "approve", in the same words for any,
+        // and it's left waiting for him to say it. Even with "approve", only once he's heard all of it as it was last asked, since what it
+        // would run comes last: otherwise it's asked once more, in full, then it's let go. A no needs neither.
+        const approval = open.asks?._tag === "Approval" ? open.asks : undefined
+        const allowing = answers && approval !== undefined && decision.act === "decide" && decision.how !== "decline"
+        // With more after it, like "approve it, and tell the Mina one to wait", his yes may as well be to what's in the rest, as the
+        // model split it: it's asked again on its own, saying the rest was left, so only an approve to it alone allows it.
+        if (allowing && decision.rest.trim() !== "") {
+          yield* Effect.logInfo("Asking it again on its own, since his yes came with more")
+          if ((asking?.asks ?? asks) < asks) return ahead(yield* reask(said), decision.rest, said)
+          yield* close(open, "dropped: not approved", utterance.id)
+          return unfinished(reply(Brain.unapproved(said), decided.subject), decision.rest, said, decided.situation.desk)
+        }
+        if (allowing && !Brain.approving(utterance.heard)) {
+          yield* close(open, "dropped: not approved", utterance.id)
+          return reply(Brain.unapproved(said), decided.subject)
+        }
+        if (allowing && !heardBy(utterance, opened.whole)) {
+          if ((asking?.asks ?? asks) < asks) return yield* reask(said)
+          yield* close(open, "dropped: not heard in full", utterance.id)
+          return reply(Brain.cutShort(said), decided.subject)
+        }
+        const question = open.kind === "question" && answers && open.asks?._tag === "Question" ? open.asks : undefined
+        // Put off, a thread's question comes back in ten minutes, from the part he'd got to.
+        if (question !== undefined && decision.act === "dismiss" && decision.how === "later") return yield* putOff(open, opened.from, decided, said)
+        // Let go with a message he dictated among what he answered of it, the message goes, as `parting` has it.
+        const left = question !== undefined && decision.act === "dismiss" ? leftWith(question) : undefined
+        if (left !== undefined) return yield* bidden(open, left, decided, said)
+        if (question !== undefined && decision.act === "reply") {
+          const asked = question.questions[question.part]
+          const leaned = { ...open, ...leaning(open) }.wording?.part
+          const part = leaned ?? (asked === undefined ? undefined : Questions.said(asked, Option.none()))
+          const answer: Questions.Reply | undefined = decision.how === "skip" ? { _tag: "Skip" } : part === undefined ? undefined : Questions.resolve(part, decision.text)
+          // Words that are only a handle the model was shown, in any case or punctuation, like p1 for a routine he named, are the model's,
+          // never his, and no agent could make anything of them: nothing goes, and the question is asked again after. An option called so
+          // is still that option, and words that only look like a handle, like his "r2" with no r2 shown, are his answer.
+          if (answer?._tag === "Words" && Brain.bareHandle(answer.text, decided.situation)) {
+            yield* close(open, "dropped: unclear", utterance.id)
+            return unfinished(reply(said.cantTell, decided.subject), decision.rest, said, decided.situation.desk)
+          }
+          // The part as it was worded, with the pick it said, and whether what the model took his words for is that pick alone.
+          const worded = open.wording?.part
+          const onlyPick = answer?._tag === "Picked" && answer.options.length === 1 && worded !== undefined && Option.contains(worded.recommended, answer.options[0]!)
+          // Said before he heard it all, what doesn't name an option, like "the last one" or a plain yes, may be to one he's yet to hear, or
+          // to yapd's pick he never heard, however the model took it, alone or with others he named: it's asked again in full. Not when he
+          // spoke over it and yapd knows what it hadn't said yet, which the model was told, to judge what he'd heard, as he asked on
+          // 2026-10-12, when his "Yes." to "shall I install … now" was asked again till it was let go: then only once he'd begun hearing
+          // yapd's pick, when his yes was to it, and anything but the pick that he didn't name is asked again, however the model took it.
+          // Asked which one then, the pick is the one option left, as `leaning` has it.
+          if (
+            decided.source === "model" &&
+            part !== undefined &&
+            (!Brain.spokeOver(utterance) || (worded !== undefined && Questions.heardPick(worded, open.asked, utterance.unsaid ?? "") && !onlyPick)) &&
+            !heardBy(utterance, opened.whole) &&
+            answer?._tag === "Picked" &&
+            answer.options.some((index) => !Questions.mentions(part, index, utterance.heard))
+          ) {
+            yield* Effect.logInfo("Asking it again in full, since he picked before he'd heard it all, without naming what he picked")
+            return yield* reask(said, "again")
+          }
+          switch (answer?._tag) {
+            // Nothing in it, he wants to hear it again; words a form can't take, which of them it takes, with yapd's pick.
+            case "Again":
+              return yield* reask(said, "again")
+            case "Which":
+              return yield* reask(said, "which")
+            case "Skip":
+              // A part T3 Code needs an answer to is asked once more, saying so; skipped again, the question is let go with a word.
+              if (question.mode === "message" && asked?.required === true) {
+                if (!opened.skipped) {
+                  opened.skipped = true
+                  return yield* reask(said, "needed")
+                }
+                yield* close(open, "dropped: skipped", utterance.id)
+                yield* letBe(opened.from)
+                return regarding(open.wording?.letGo ?? said.leaving, askedAbout(open))
+              }
+              break
+          }
+          if (answer?._tag === "Picked" || answer?._tag === "Words" || answer?._tag === "Skip") {
+            const { from } = opened
+            const target = yield* reaching(open, decided, said)
+            if (Either.isLeft(target)) return target.left
+            yield* close(open, "answered", utterance.id)
+            return yield* answering(open, from, answer, target.right, decided, said)
+          }
+        }
+        // Nor is an approval allowed or turned down, nor his answer to a question taken as it is, while its machine's threads can't be seen.
+        const target =
+          answers && decision.act === (open.kind === "approval" ? "decide" : open.kind === "question" ? "reply" : undefined)
+            ? yield* reaching(open, decided, said)
+            : Either.right(Option.none<Threads.Listed>())
+        if (Either.isLeft(target)) return target.left
+        // A thread's question is settled here only by letting it go: anything else, like a message to its thread that can't go as its
+        // answer, leaves it waiting in T3 Code, so it's asked again after, unless that dealt with it.
+        const settles = answers && (open.kind !== "question" || decision.act === "dismiss")
+        yield* close(open, decision.act === "resume" ? "dropped: unclear" : settles ? "answered" : "replaced", utterance.id)
+        if (!answers) return ahead(yield* follow(Brain.check(decision, decided.situation, said), decided, said), open.decision.rest, said)
+        if (decision.act === "dismiss") {
+          yield* forgo(open, "He said not to send it again.")
+          yield* letBe(opened.from)
+          // What he asked for after what's let go is left too, and what he says to do after the no is done. Let go of a thread's
+          // question, "it" is that thread, so he can ask for its question.
+          const left = open.kind === "question" ? regarding(said.leaving, askedAbout(open)) : reply(said.leaving, decided.subject)
+          return yield* onward(decided, unfinished(left, open.decision.rest, said), Option.none(), 1, said)
+        }
+        if (open.kind === "project") return yield* project(open, decided, said)
+        if (open.kind === "approval" || open.kind === "question") return yield* settle(open, target.right, decided, said)
+        // Said again, rather than heard as an answer, like "yes, but once it's done", it's a plain yes.
+        if (open.kind !== "which") return yield* agreeing(open, decision.pending === "answers" ? decided : { ...decided, decision: same }, said)
+        const picked = filled(decision, open)
+        if (picked === undefined) return yield* unworded(open, decided, said)
+        const checked = Brain.routined(Brain.check(picked, decided.situation, said), sends(open, decision, picked, decided.situation))
+        // Asked of what was handed over from an update, whichever thread he picks is left when it's the update's own and that isn't steered.
+        if (open.own !== undefined && Brain.leftOver(picked, open.own, open.handed, decided.situation)) {
+          return yield* follow(checked, { ...decided, decision: picked }, said, undefined, open)
+        }
+        // At most one question: one the answer doesn't settle is let go. Tidying the threads he picked, which it settles, what's asked
+        // before they're tidied, like whether to archive one that's busy, is asked.
+        if (checked._tag === "Ask" && checked.open.tidying === undefined) {
+          yield* Effect.logInfo("Leaving it, since the answer didn't settle which one")
+          return unfinished(reply(said.leaving, decided.subject), picked.rest, said)
+        }
+        return yield* follow(checked, { ...decided, decision: picked }, said, undefined, open)
+      }).pipe(
+        Effect.catchAllCause((cause) =>
+          Cause.isInterruptedOnly(cause)
+            ? Effect.as(Effect.logInfo("Stopped working on it, since yapd was turned off"), quiet(thought.subject))
+            : Effect.logError("Could not act on what you said", cause).pipe(
+                Effect.zipRight(persona.lines),
+                Effect.map((said) => reply(`Something went wrong on my side${addressed(said)}. What you said is in my log.`, thought.subject)),
+              ),
+        ),
+      )
+
+    /**
+     * What's said back to the question: worked out as he talks, acted on once
+     * he's stopped, in the background, with what it hadn't said yet when he
+     * spoke over it, `unsaid`, so the model knows what he'd heard. Only words
+     * nobody said, like Whisper hears in silence, leave it waiting: anything
+     * else closes it, even talk that wasn't meant for yapd.
+     */
+    const listen =
+      (open: Open) =>
+      (
+        heard: string,
+        voiced: number,
+        echo?: string,
+        afterPause?: string,
+        unsaid?: string,
+        _carried?: boolean,
+        stopped?: number,
+      ): Effect.Effect<Option.Option<Effect.Effect<void>>> =>
+      Effect.gen(function* () {
+        const at = yield* Clock.currentTimeMillis
+        const { turns } = yield* options.power
+        // Its words holding one of his routines' steps, a model is only told of them by the routine's name, as what he began over too.
+        const routines = askedRoutines(open)
+        const over = overItself({ echo, afterPause, echoRoutines: routines.routines })
+        const utterance: Utterance = {
+          id: mint(at, "u"),
+          heard,
+          via: "reply",
+          at,
+          voiced,
+          turns,
+          ...(stopped === undefined ? {} : { stopped }),
+          ...over,
+          ...(unsaid === undefined || unsaid === "" ? {} : { unsaid }),
+          // Asked of what was said over an update, anything said back to it, an answer or something new, is held to that update's own
+          // thread as what it asked of was: never written to by yapd's own hand unless that's steered.
+          ...(open.own === undefined ? {} : { own: open.own }),
+        }
+        /**
+         * What it asked was dealt with in T3 Code meanwhile, so a late answer to
+         * it does nothing, and he's told so: it's noted, but not in his words
+         * when they look like a secret, as an answer given in time isn't.
+         */
+        const late = Effect.gen(function* () {
+          const withheld = T3Actions.revealing(heard)
+          yield* Effect.logInfo(`Not acting on ${quoted(heard)}, since what it answers was dealt with in T3 Code`)
+          yield* journal.write({
+            at,
+            kind: "reply",
+            ...(withheld ? {} : { text: heard }),
+            utterance: utterance.id,
+            detail: { via: "reply", ...(withheld ? {} : over), gone: open.asked, ...(withheld ? { withheld } : {}) },
+          })
+          yield* deliver(regarding(Brain.dealtWith(yield* persona.lines), askedAbout(open)), utterance)
+        })
+        if (gone.has(open.id)) return Option.some(late)
+        const thought = yield* think(utterance, { _tag: "Answer", said: open.asked, about: askedAbout(open), question: open, ...routines }, [
+          { speaker: "yapd", text: heardOf(open.asked, utterance.unsaid), ...routines },
+        ])
+        // Taken by the model for yapd's own voice, over its first seconds, it's asked on from just before, as when only that was heard.
+        if ((thought.source === "fast" || echo !== undefined) && thought.decision.act === "resume") return Option.none()
+        // Too little speech to be his, a yes or a pick that would change a thread isn't taken: the question stays open, as if unanswered.
+        if (Brain.murmured(thought.decision, utterance)) {
+          yield* Effect.logInfo(`Not taking ${quoted(heard)} as the answer, with only ${voiced.toFixed(2)} s of speech`)
+          return Option.none()
+        }
+        return Option.some(takeUp(thought, { instead: { moot: Effect.sync(() => gone.has(open.id)), late } }))
+      })
+
+    /**
+     * What's said over an answer or right after it: a follow-up to it, with
+     * "it" what the answer was about, like "tell it to fix the tests" after
+     * how a thread is doing, worked out as he talks and acted on once he's
+     * stopped, as what he dictates is. Talk that wasn't meant for yapd, or a
+     * change to a thread with too little speech to be his, isn't taken: the
+     * answer carries on, or the microphone closes. `line` is what he heard of
+     * it, which can be its words for no app to show its card, cut to what
+     * he'd heard of it when he spoke over it, by what it hadn't said yet,
+     * `unsaid`. Begun over its first word, before he could know what it's
+     * about, it's most likely a late reply to the line before: then no
+     * thread is "it". Run on past its end from over its last words,
+     * `carried`, the model is told it's his reply to all of it. Said back to
+     * a "done" line, `done`, which only listens from its end, nothing but
+     * the change it says yapd made for him is taken back without the model,
+     * and when it says one that "scratch that" reaches, the model is told
+     * so, run on into it or not, and what's too faint to take is logged as
+     * said after what it did, so how often that's let go can be counted, as
+     * is what may all be yapd's own words let go without the model. Said of
+     * what he said over an update, `own` is that update's own thread, which
+     * nothing he says back writes to by yapd's own hand unless it's steered.
+     */
+    const followUp =
+      (about: Subject, line: Effect.Effect<string>, done?: Brain.Done, own?: Brain.Own) =>
+      (
+        heard: string,
+        voiced: number,
+        echo?: string,
+        afterPause?: string,
+        unsaid?: string,
+        carried?: boolean,
+        stopped?: number,
+      ): Effect.Effect<Option.Option<Effect.Effect<void>>> =>
+        Effect.gen(function* () {
+          const at = yield* Clock.currentTimeMillis
+          const { turns } = yield* options.power
+          const said = yield* line
+          const left = unsaid === undefined || unsaid === "" ? undefined : unsaid
+          const barely = left !== undefined && said.endsWith(left) && said.slice(0, said.length - left.length).trim().split(/\s+/).length <= 1
+          const it: Subject = barely ? { _tag: "Answer", said, about: Option.none(), ...routinesOf(about) } : about
+          // What he began over holding one of his routines' steps, a model is only told of it by the routine's name.
+          const utterance: Utterance = {
+            id: mint(at, "u"),
+            heard,
+            via: "reply",
+            at,
+            voiced,
+            turns,
+            ...(stopped === undefined ? {} : { stopped }),
+            ...overItself({ echo, afterPause, echoRoutines: routinesOf(about).routines }),
+            ...(echo === undefined || carried !== true ? {} : { carried }),
+            ...(done === undefined ? {} : { afterDone: done }),
+            ...(left === undefined ? {} : { unsaid: left }),
+            ...(own === undefined ? {} : { own }),
+          }
+          const thought = yield* think(utterance, it, [{ speaker: "yapd", text: heardOf(said, left), ...routinesOf(about) }])
+          if (thought.decision.act === "resume") return yield* Effect.as(fastLetGo(thought), Option.none())
+          if (Brain.murmured(thought.decision, utterance)) {
+            yield* Effect.logInfo(`Not taking ${quoted(heard)} as a follow-up${done?.change === undefined ? "" : " after what it did"}, with only ${voiced.toFixed(2)} s of speech`)
+            return Option.none()
+          }
+          // Taken, it holds a question asked since the answer that he's yet to hear, like one an agent asked meanwhile, so it isn't said
+          // while this is acted on: this takes its place, and it's asked after.
+          const holding = `reply:${utterance.id}`
+          return Option.some(Effect.zipRight(hold(holding, at), takeUp(thought, { holding })))
+        })
+
+    /**
+     * What's said back to something yapd said, once he's stopped: acted on in
+     * the background, in its turn, with nothing but answers said until what
+     * comes of it is, and noted like what he dictates. Unless what it was said
+     * back to is `moot` by then, like a question dealt with in T3 Code
+     * meanwhile: then only what's `late` is done. Whatever held the open
+     * question for it, `holding`, lets go once it's dealt with, however that
+     * ends; when all of it may have been yapd's own words, the question it
+     * held, still open since nothing was asked in its place, is left as it was.
+     */
+    const takeUp = (
+      thought: Thought,
+      given: {
+        readonly instead?: { readonly moot: Effect.Effect<boolean>; readonly late: Effect.Effect<void> }
+        readonly holding?: string
+        /** Handed over from an update, how: logged as heard there already. */
+        readonly handoff?: Handoff
+      } = {},
+    ) =>
+      // Put back, the update it was handed over from waits behind its answer, however long a dictation's request holds it up.
+      Effect.flatMap(given.handoff?.cutOff === true ? (options.awaitingFor?.(putBackFor) ?? options.awaiting) : options.awaiting, (arrived) =>
+        background(
+          // What comes of it says something, but for a dismissal or what's let go, so the speaker gets ready, or stays so, until it's said or
+          // comes to nothing.
+          Effect.acquireUseRelease(
+            thought.decision.act === "dismiss" || thought.decision.act === "resume" ? Effect.succeed(Effect.void) : options.coming,
+            () =>
+              turn.withPermits(1)(
+                Effect.gen(function* () {
+                  if (given.instead !== undefined && (yield* given.instead.moot)) return yield* given.instead.late
+                  // Worked out as he talked, and taken once he'd stopped.
+                  workedOut.set(thought.utterance, { began: thought.utterance.at, decided: yield* Clock.currentTimeMillis })
+                  if (given.handoff === undefined) yield* Effect.logInfo(`Heard: ${logged(thought.utterance.heard)}`)
+                  const outcome = yield* acting(thought)
+                  yield* note(thought, outcome, thought.utterance.at, given.handoff)
+                  yield* deliver(outcome, thought, given.handoff)
+                  yield* offering
+                }),
+              ),
+            (letGo) => letGo,
+          ).pipe(
+            Effect.ensuring(arrived),
+            Effect.ensuring(given.holding === undefined ? Effect.void : release(given.holding, Brain.mayBeOwn(thought.utterance))),
+            Effect.annotateLogs({ utterance: thought.utterance.id }),
+          ),
+          thought.utterance.turns,
+        ),
+      )
+
+    /**
+     * Says what came of a request ahead of anything else, and notes it in the
+     * journal. `of` is what he said that it came of, as it was worked out, or
+     * only which request it's for, like one a restart found.
+     */
+    const deliver = (outcome: Outcome, of: Thought | Utterance | Pick<Utterance, "id" | "turns">, handoff?: Handoff): Effect.Effect<void> =>
+      Effect.gen(function* () {
+        const utterance: Pick<Utterance, "id" | "turns" | "own"> = "utterance" in of ? of.utterance : of
+        if (outcome.say === "") return
+        // Of a request held back as a secret, as note has it, or said again of one, what's said is said, but kept and logged nowhere,
+        // whatever its words: the model's answer may give the secret away in words nothing recognises as one.
+        const words = "utterance" in of ? [of.utterance.heard, of.decision.rest] : "heard" in of ? [of.heard] : []
+        const withheld = outcome.withheld === true || secretly(outcome.subject) || words.some((said) => T3Actions.revealing(said))
+        const what = withheld ? "it" : `"${outcome.say}"`
+        // Turned off or on since, nothing about it is said, so nothing is noted as said. Off, only what answers what he asked by the
+        // shortcut is said, never anything yapd would bring up of its own accord.
+        const power = yield* options.power
+        if (power.turns !== utterance.turns) return yield* Effect.logInfo(`Not saying ${what}, since yapd was turned off`)
+        if (!power.on && !("utterance" in of || "heard" in of)) return yield* Effect.logInfo(`Not saying ${what}, since yapd is off`)
+        const at = yield* Clock.currentTimeMillis
+        const open = outcome.kind === "question" && asking !== undefined ? asking.open : undefined
+        const about = outcome.subject._tag === "Answer" ? outcome.subject.about : Option.none<Threads.Ref>()
+        // What a thread waits on him for is kept under its key as it's first said, even asked again after something cut it off, which is its entry, so it's said once, ever.
+        const from = open === undefined ? undefined : asking?.from
+        const claim = from !== undefined && from.kept === undefined ? from : undefined
+        const request = open === undefined ? undefined : requestOf(open)
+        // The question on its own too, apart from the news before it, for a catch-up what it told him of, and the routines whose steps it
+        // holds, by name, which is all a model is told of it.
+        const beside = {
+          ...(open === undefined
+            ? outcome.subject._tag === "Answer" && outcome.subject.catchup !== undefined
+              ? { covered: outcome.subject.catchup.covered }
+              : {}
+            : { question: Brain.alone(open), open: open.id }),
+          ...routinesOf(outcome.subject),
+          ...(withheld ? { withheld } : {}),
+        }
+        // Work that started has its own entry.
+        const entry =
+          outcome.kind === "done" || claim !== undefined
+            ? Option.none<number>()
+            : yield* journal.write({
+                at,
+                kind: "answer",
+                ...Option.match(about, { onNone: () => ({}), onSome: ({ machine, id }) => ({ machine, thread: id }) }),
+                ...(withheld ? {} : { said: outcome.say }),
+                utterance: utterance.id,
+                ...(Object.keys(beside).length === 0 ? {} : { detail: beside }),
+              })
+        yield* Effect.logInfo(withheld ? "Said what came of a request held back as a secret, so it isn't logged" : `Said: ${outcome.say}`)
+        const { missed, card } = outcome
+        // Said again, what came of a secret is kept and logged nowhere either.
+        const it = "utterance" in of ? along(of, outcome.subject) : outcome.subject
+        const subject: Subject = withheld && it._tag !== "Nothing" ? { ...it, withheld } : it
+        /** Puts back what "it" meant, and whether he'd heard the question, from before it started being said. */
+        let unsaid: Effect.Effect<void> = Effect.void
+        // Its card goes up under the line "say that again" repeats, which can be less than what's said now, like without "I couldn't work out the rest", so it comes back with that line.
+        const line = subject._tag === "Nothing" ? outcome.say : subject.said
+        // Taken down by voice before it's said, like by the rest of its request said on its own, its card never goes up.
+        const kept = card === undefined ? undefined : { request: utterance.id, down: false }
+        if (kept !== undefined) cards.add(kept)
+        // Told while an app was there to show its card, it's said as it is with none watching if none is by the time it's played, or the card won't go up.
+        const { unseen } = outcome
+        const instead = card === undefined || unseen === undefined || unseen === outcome.say || unseen === "" ? undefined : unseen
+        /**
+         * Whether it's played in the words said in its place, which are then
+         * what it's noted as having said, never "it's on your screen": only
+         * once they're rendered, since its own words go if they can't be.
+         */
+        let reworded = false
+        const off = Effect.map(options.show.watched, (watched) => !watched || kept?.down === true)
+        const used = Effect.sync(() => {
+          reworded = true
+        })
+        const kind = open !== undefined ? "question" : outcome.kind === "done" ? "done" : "answer"
+        // Of what was said over an update, a follow-up to what came of it is held to that update's own thread as that was: never written
+        // to by yapd's own hand unless it's steered, while its hook may still wait.
+        const { own } = utterance
+        const timing = "utterance" in of ? timed(of, at, outcome) : undefined
+        // A thread's question, answered by picking one of its options, is answered as he hears it, so each such answer is rendered then, one
+        // after another, on a guess: the one he picks plays at once.
+        const { guess } = options
+        const guessing = open === undefined || guess === undefined ? Effect.void : Effect.forkIn(Effect.forEach(picks(open, yield* persona.lines), guess, { discard: true }), scope)
+        yield* options.tell(
+          {
+            id: mint(at, "a"),
+            kind,
+            priority: "needs-you",
+            spoken: outcome.say,
+            ...(timing === undefined ? {} : { timing }),
+            ...(instead === undefined ? {} : { instead: { spoken: instead, when: off, used } }),
+            ...(withheld ? { withheld } : {}),
+            at,
+            // Handed over from an update, how long each part took, logged as it starts to play.
+            ...(handoff === undefined ? {} : { handoff: { since: handoff.since, responder: handoff.reply.ms, brain: handoff.brain, ran: handoff.ran } }),
+            // "It" means this once he's heard it, not while it waits behind something else he's hearing, and its card goes up as he hears of it.
+            saying: Effect.flatMap(Clock.currentTimeMillis, (now) =>
+              Effect.sync(() => {
+                const before = answered
+                // Asked again in other words, he may have heard it already, from when he first did.
+                const heard = asking?.said
+                const meant = { subject, at: now, turns: utterance.turns }
+                answered = meant
+                if (open !== undefined && asking?.open.id === open.id) asking.said ??= now
+                unsaid = Effect.sync(() => {
+                  if (answered === meant) answered = before
+                  if (open !== undefined && asking?.open.id === open.id) asking.said = heard
+                })
+              }),
+            ).pipe(
+              Effect.zipRight(
+                Effect.suspend(() => {
+                  if (kept === undefined || card === undefined) return Effect.void
+                  cards.delete(kept)
+                  return kept.down ? Effect.void : Effect.asVoid(options.show.put(card, { said: line, turns: utterance.turns, request: utterance.id }))
+                }),
+              ),
+              Effect.zipRight(Effect.suspend(() => (reworded && instead !== undefined && Option.isSome(entry) && !withheld ? journal.reword(entry.value, instead) : Effect.void))),
+              // Why a machine can't be reached, once he's heard it, isn't said again until it's been back and gone down again.
+              Effect.zipRight(threads.heard(outcome.say)),
+              Effect.zipRight(guessing),
+            ),
+            // What he missed that it tells him of isn't missed while it waits to be said or is said, nor told again by another catch-up.
+            ...(missed === undefined ? {} : { telling: Effect.succeed(missed) }),
+            // What he missed that it told him, even before a question it asks, as when he asked what he missed and what a thread wants.
+            ...(missed === undefined && (open === undefined || request === undefined)
+              ? {}
+              : {
+                  heard: Effect.gen(function* () {
+                    if (missed !== undefined) yield* journal.markHeard(missed, yield* Clock.currentTimeMillis)
+                    // Heard, or answered, what a thread waits on him for has its entry noted as heard, however many times it took to ask it: not
+                    // once it's put by, since it's still to be asked.
+                    if (open === undefined || request === undefined || putBy.has(open.id)) return
+                    const row = from?.kept === undefined ? Option.none() : Option.flatten(from.kept)
+                    if (Option.isSome(row)) yield* journal.markHeard([row.value], yield* Clock.currentTimeMillis)
+                  }),
+                }),
+            // Never said, like gone stale or dropped by a dictation that cut it off, its card is let go of all the same.
+            ...(kept === undefined
+              ? {}
+              : {
+                  gone: Effect.sync(() => {
+                    cards.delete(kept)
+                  }),
+                }),
+            ...(outcome.confirmed === undefined ? {} : { confirmed: outcome.confirmed }),
+            // An answer can be followed up about what it was about, in the words he heard it in, and what came of something he asked to be
+            // done, like "scratch that" right after "On it", from its end only: never one saying a message of his may not have gone, whose
+            // "send it again" the model could only send as it is. A no to it takes back only what the line says it changed, and only a line
+            // saying what "scratch that" reaches has a bare no to it told as said back to what it did, never one where nothing changed or
+            // something didn't go, which may follow what does by a minute.
+            ...(outcome.unsent === true
+              ? {}
+              : kind === "answer"
+              ? { followUp: followUp(subject, Effect.sync(() => (reworded && instead !== undefined ? instead : outcome.say)), undefined, own) }
+              : kind === "done"
+                ? {
+                    followUp: followUp(
+                      subject,
+                      Effect.sync(() => (reworded && instead !== undefined ? instead : outcome.say)),
+                      outcome.changed === undefined ? {} : { change: outcome.changed },
+                      own,
+                    ),
+                    window: Conversation.linger,
+                    after: true as const,
+                  }
+                : {}),
+            ...(open === undefined
+              ? { stale: Effect.succeed(false) }
+              : {
+                  open: open.id,
+                  // Only while it's the question open and nothing being said may answer it, so it's never said after what settles it.
+                  stale: Effect.gen(function* () {
+                    if (asking?.open.id !== open.id || asking.held.size > 0) return true
+                    if (request === undefined) return false
+                    // What a thread waits on him for, dealt with in T3 Code since, or said before, is let go without a word, and what's next is asked.
+                    // Its machine's threads can't be seen, like rig's while it can't be reached, it's put by without a word, never as dealt with,
+                    // heard or not: it's asked again once they can be, from the part he'd got to.
+                    const ref = open.candidates[0] ?? { machine: "", id: "" }
+                    const waits = yield* still(ref, request)
+                    if (waits && claim !== undefined && claim.kept === undefined) claim.kept = yield* journal.claim(claim.asking.entry)
+                    if (waits && (claim === undefined || Option.isSome(claim.kept ?? Option.none()))) return false
+                    const away = !waits && Option.isSome(yield* threads.unseen(ref.machine))
+                    if (asking?.open.id === open.id) {
+                      if (!waits && !away) gone.add(open.id)
+                      yield* close(open, waits ? "dropped: said before" : away ? "dropped: out of sight" : "dropped: dealt with in T3 Code")
+                      yield* Effect.forkIn(turn.withPermits(1)(offering), scope)
+                    }
+                    return true
+                  }),
+                  question: {
+                    // Heard to the end, a plain yes can only be to it, and what a thread waits on is his to answer by dictation too.
+                    through: Effect.flatMap(Clock.currentTimeMillis, (now) =>
+                      Effect.sync(() => {
+                        if (asking?.open.id !== open.id) return
+                        asking.whole ??= now
+                        const [ref] = open.candidates
+                        // From when he first heard all of it, which what he said before, however late it's handed on, can't answer: for a
+                        // thread's question, all of this part, since what he said before he heard it was about the part before, or nothing.
+                        if (open.asks !== undefined && open.asks._tag !== "Agent" && ref !== undefined) {
+                          const was = known.get(open.asks.requestId)
+                          const same = was !== undefined && (was.asks._tag !== "Question" || (open.asks._tag === "Question" && was.asks.part === open.asks.part))
+                          known.set(open.asks.requestId, { ref, asks: open.asks, through: (same ? was.through : undefined) ?? now })
+                        }
+                      }),
+                    ),
+                    answer: listen(open),
+                    // What a thread's question offers, for what he says back to be heard listening for.
+                    ...(open.wording === undefined ? {} : { terms: open.wording.terms }),
+                    unanswered: background(turn.withPermits(1)(unanswered(open.id)), utterance.turns),
+                    // Broken off, he can't be taken to have heard it, so what he says next is something new, as before it was said.
+                    unsaid: Effect.suspend(() => unsaid),
+                  },
+                }),
+          },
+          utterance.turns,
+        )
+      })
+
+    /**
+     * Notes what he said and what was made of it, at once and on a second
+     * look: not his words, when they or the rest of his request look like a
+     * secret, since a step after this one, like keeping it in mind, may only
+     * turn it down once this is written, worked out while this is said.
+     */
+    const note = (thought: Thought, outcome: Outcome, began: number, handoff?: Handoff) =>
+      Effect.gen(function* () {
+        const { utterance } = thought
+        const withheld = outcome.withheld === true || T3Actions.revealing(utterance.heard) || T3Actions.revealing(thought.decision.rest)
+        // Nor what the model would say of it, which may say it back, like "I won't keep sk-…, sir", nor its copy of what came of a secret,
+        // said again, like "say that again" after that.
+        const decision = withheld ? { ...thought.decision, spoken: "", text: "", rest: "" } : secretly(outcome.subject) ? { ...thought.decision, spoken: "" } : thought.decision
+        const second =
+          outcome.second === undefined
+            ? undefined
+            : withheld
+              ? { ...outcome.second, spoken: "", text: "", rest: "" }
+              : secretly(outcome.subject)
+                ? { ...outcome.second, spoken: "" }
+                : outcome.second
+        const ms = (yield* Clock.currentTimeMillis) - began
+        // Said back to what he missed, cutting it off or after it, it's part of catching up, so it never hides what he didn't hear
+        // of that from the next "what did I miss?": heard to the end, it's heard, and never told again anyway.
+        const over = utterance.via === "reply" && caughtUp(thought.subject) ? { over: "catch-up" } : {}
+        // Handed over from an update, the Responder's part, and whether the update was put back, which then isn't taken for his last word.
+        const handed =
+          handoff === undefined
+            ? {}
+            : {
+                over: "update",
+                ...(handoff.cutOff ? { cutOff: true } : {}),
+                replyMs: handoff.reply.ms,
+                ...(handoff.reply.modelMs === undefined ? {} : { replyModelMs: handoff.reply.modelMs }),
+              }
+        // His words that kept one of his routines hold its steps, which a model is only told of by its name.
+        const kept = thought.decision.act === "remember" ? routinesOf(outcome.subject) : {}
+        // What was said back has an entry of its own.
+        yield* journal.write({
+          at: utterance.at,
+          kind: utterance.via === "reply" ? "reply" : "dictation",
+          ...(withheld ? {} : { text: utterance.heard }),
+          utterance: utterance.id,
+          detail: {
+            ...kept,
+            via: utterance.via,
+            // What may have been its own voice in his words, kept with them for whatever reads them back.
+            ...(withheld ? {} : overItself(utterance)),
+            source: thought.source,
+            decision,
+            ...(second === undefined ? {} : { second }),
+            ...over,
+            ...handed,
+            ms,
+            outcome: outcome.kind,
+            ...(withheld ? { withheld } : {}),
+          },
+        })
+        yield* Effect.logInfo(`Timing: ${(ms / 1000).toFixed(1)} s from what was said to what to say`)
+      })
+
+    /**
+     * Asks what a thread waits on him for, as the one question open, unless
+     * it no longer waits on it: a thread's question from the part he'd got
+     * to, as it's brought back or asked once more, in words not asked lately,
+     * or, once it's had its place taken too often, let go with a word.
+     */
+    const put = (waiting: Queued, turns: number) =>
+      Effect.gen(function* () {
+        const { ref, asks: request, asked: words, about, rewordings, parts } = waiting.asking
+        if (!(yield* still(ref, request.requestId))) {
+          // Its machine's threads out of sight just now, it's put back to wait for them, since it may still wait on him: it's asked once
+          // they're back, from the part he'd got to, and holds up nothing meanwhile.
+          if (Option.isSome(yield* threads.unseen(ref.machine))) {
+            asked.unshift(waiting)
+            return yield* Effect.logInfo(`Not asking "${words}" until ${ref.machine}'s threads can be seen again`)
+          }
+          return yield* Effect.logInfo(`Not asking "${words}", since it no longer waits on it`)
+        }
+        const at = yield* Clock.currentTimeMillis
+        // Its own, since no request of his is what it's for.
+        const utterance = mint(at, "n")
+        const part = request._tag === "Question" ? parts?.[request.part] : undefined
+        const left = leftWith(request)
+        if (part !== undefined && waiting.letGo === true) {
+          yield* Effect.logInfo(`Letting go of the question on ${about}, since its place was taken too often`)
+          if (left !== undefined) return yield* deliver(yield* unbidden(ref, left, yield* persona.lines), { id: utterance, turns })
+          yield* letBe(waiting)
+          return yield* deliver(regarding(part.letGo, Option.some(ref)), { id: utterance, turns })
+        }
+        const before = yield* askedLately
+        const said = yield* persona.lines
+        /** In words not asked `lately`, of these: brought back, or asked once more, then the other way. */
+        const fresh = (wordings: ReadonlyArray<string>, lately: ReadonlyArray<string>) => Brain.reworded({ kind: "question", asked: "", about, rewordings: wordings }, lately, said)
+        const back = waiting.back ?? (request._tag === "Question" && request.part > 0 ? "here" : undefined)
+        // Brought back, a part of a question is put as `back` says, and an approval he'd heard in other words than it was asked in. Either
+        // way it names its thread, since it comes up of yapd's own accord: "Again, sir: …" is only for his asking to hear it again.
+        const worded = (lately: ReadonlyArray<string>) =>
+          back === undefined
+            ? words
+            : part === undefined
+              ? Brain.reworded({ kind: request._tag === "Approval" ? "approval" : "question", asked: words, about, rewordings }, lately, said)
+              : fresh(back === "still" ? [...part.still, part.here] : [part.here, ...part.still], lately)
+        // Words it was only brought back in at no cost to him lately are still its to be put in, rather than it being let go for want of
+        // others; and brought back at no cost to him now, it's put as it was first brought back, or asked, even in words asked lately.
+        const free = (waiting.free ?? []).filter((line) => before.includes(line))
+        const unsaid = worded(before)
+        const wording =
+          unsaid ?? worded(before.filter((line) => !free.includes(line))) ?? (waiting.costless === true ? (part?.here ?? words) : undefined)
+        if (wording === undefined) {
+          yield* Effect.logInfo(`Letting go of the question on ${about}, since it's been asked in every way lately`)
+          if (left !== undefined) return yield* deliver(yield* unbidden(ref, left, said), { id: utterance, turns })
+          yield* letBe(waiting)
+          return yield* deliver(regarding(part?.letGo ?? said.leaving, Option.some(ref)), { id: utterance, turns })
+        }
+        const outcome = yield* opening(
+          {
+            kind: request._tag === "Approval" ? "approval" : "question",
+            utterance,
+            heard: "",
+            decision: request._tag === "Approval" ? Brain.decision({ act: "decide", how: "accept" }) : Brain.decision({ act: "reply" }),
+            candidates: [ref],
+            asked: wording,
+            about,
+            material: Option.none(),
+            resend: Option.none(),
+            asks: request,
+            rewordings: part?.still ?? rewordings,
+            ...(part === undefined ? {} : { wording: part }),
+          },
+          { turns, at },
+        )
+        if (asking?.open.utterance === utterance) {
+          asking.from = { ...waiting, free: waiting.costless === true && unsaid !== undefined ? [...free, wording] : free }
+          // Asked once more as it went unanswered, it's asked no more after that.
+          if (waiting.asks !== undefined) asking.asks = waiting.asks
+        }
+        yield* deliver(outcome, { id: utterance, turns })
+      })
+
+    /** Wakes to ask what's put off once it's due, if nothing comes up before: one wake, for the soonest. */
+    let waking: { readonly at: number; readonly fiber: Fiber.RuntimeFiber<void> } | undefined
+
+    /** Asks the soonest of what's put off once it's due, unless it's set to already. */
+    const wake = (now: number) =>
+      Effect.gen(function* () {
+        // Not for what's due already, which waits for what's asked now to be done with, rather than wake for it over and over.
+        const soonest = Math.min(...[...asked, ...(offered === undefined ? [] : [offered])].flatMap(({ notBefore }) => (notBefore === undefined || notBefore <= now ? [] : [notBefore])))
+        if (!Number.isFinite(soonest) || (waking !== undefined && waking.at <= soonest)) return
+        if (waking !== undefined) yield* Fiber.interruptFork(waking.fiber)
+        const fiber = yield* Effect.sleep(Math.max(0, soonest - now)).pipe(
+          Effect.zipRight(
+            Effect.sync(() => {
+              waking = undefined
+            }),
+          ),
+          Effect.zipRight(turn.withPermits(1)(offering)),
+          Effect.interruptible,
+          Effect.forkIn(scope),
+        )
+        waking = { at: soonest, fiber }
+      })
+
+    /**
+     * A thread's question that went unanswered, and waits out its minute to
+     * be asked once more, gives way to another that's due, as it does when
+     * that one is waiting as it goes unanswered: the other is asked at once,
+     * and it comes back once its minute is up. Not while anything being said
+     * may answer it.
+     */
+    const givingWay = Effect.gen(function* () {
+      if (asking === undefined || asking.repeat === undefined || asking.held.size > 0 || presses.size > 0) return
+      const { open, from, due, offer } = asking
+      const now = yield* Clock.currentTimeMillis
+      if (!((open.kind === "question" && from !== undefined) || offer !== undefined) || due === undefined || Option.isNone(yield* askable(now))) return
+      if (asking?.open.id !== open.id) return
+      // What came in while yapd was off is offered the once, never put back.
+      if (offer?.kind === "missed") return yield* close(open, "dropped: unanswered")
+      if (asking.asks >= asks) return yield* letGo(open)
+      const count = asking.asks
+      yield* close(open, "dropped: unanswered, others waiting")
+      // A catch-up offered waits out its minute behind it too.
+      if (offer !== undefined) offered = { ...offer, asks: count + 1, notBefore: due }
+      else if (from !== undefined) asked.push(resumed(from, open, { asks: count + 1, back: "still", notBefore: due }))
+    })
+
+    /**
+     * Offers a catch-up, as `offer` has it: what was held as focus or quiet
+     * ended, or what came in while yapd was off, which a yes gives him. Asked
+     * once more as it went unanswered, it's in other words, or not at all once
+     * every wording was asked lately.
+     */
+    const offering1 = (offer: Offer, turns: number, now: number) =>
+      Effect.gen(function* () {
+        const said = yield* persona.lines
+        const { news, question } = offer.kind === "missed" ? Brain.catchupLines(said).offer(offer.count) : Brain.modeLines(said, now).offer(offer.count, offer.was ?? "focus")
+        const about = "give you the rundown"
+        const first = `${news} ${question}`
+        const asked = offer.asks === undefined ? first : Brain.reworded({ kind: "offer", asked: first, about, question }, yield* askedLately, said)
+        if (asked === undefined) return yield* Effect.logInfo(`Not offering it again, since it's been offered every way lately: ${first}`)
+        const id = mint(now, "u")
+        const opened = yield* opening(
+          {
+            kind: "offer",
+            utterance: id,
+            heard: "",
+            // The catch-up only: focus he began again since is his to end.
+            decision: offer.kind === "missed" ? Brain.decision({ act: "catchup" }) : Brain.decision({ act: "mode", how: "rundown" }),
+            candidates: [],
+            asked,
+            about,
+            material: Option.none(),
+            resend: Option.none(),
+            ...(offer.asks === undefined ? { news, question } : { question: asked }),
+          },
+          { turns, at: now },
+        )
+        if (asking?.open.utterance === id) {
+          asking.offer = offer
+          if (offer.asks !== undefined) asking.asks = offer.asks
+        }
+        yield* deliver(opened, { id, turns })
+      })
+
+    /**
+     * Asks whether to send what he set to be offered a thread, now it's due:
+     * the thread found again on the desk, and the message checked as one he
+     * sent now would be, with no new call to the model, since he settled both
+     * as he set it. Only his yes sends it, under ids of its own then. When it
+     * can't be asked, like once its thread is gone, it's said in words. Heard
+     * asked to the end, its entry in the journal is noted as heard.
+     */
+    const propose = (proposal: (typeof proposed)[number], turns: number) =>
+      Effect.gen(function* () {
+        const { reminder, kept } = proposal
+        const said = yield* persona.lines
+        const at = yield* Clock.currentTimeMillis
+        const told = Reminders.lines(said, at)
+        const id = mint(at, "n")
+        const missed = Option.toArray(kept)
+        const about = Reminders.ref(reminder)
+        // An offer of one of his routines, said in words, holds its steps: a model is only told of it by its name.
+        const tell = (line: string) =>
+          deliver({ say: line, subject: { _tag: "Answer", said: line, about, ...ofRoutine(reminder) }, kind: "answer", ...(missed.length === 0 ? {} : { missed }) }, { id, turns })
+        // Typed, as it were: nothing of it was heard, so nothing of it can be faint or yapd's own voice.
+        const utterance: Utterance = { id, heard: "", via: "typed", at, voiced: Number.POSITIVE_INFINITY, turns }
+        const situation = yield* situate(utterance, { _tag: "Nothing" }, [])
+        const on = Option.isNone(about) ? situation.desk : yield* threads.desk(about, [about.value], desk.asked)
+        const listed = Option.flatMap(about, (ref) => Option.fromNullable(on.threads.find((listed) => Threads.same(listed.ref, ref))))
+        // Its machine's threads out of sight, like rig's while it can't be reached, it isn't gone: he's told why it can't be asked.
+        const away = Option.isNone(about) ? Option.none<string>() : yield* threads.unseen(about.value.machine)
+        if (Option.isNone(listed) && Option.isSome(away)) return yield* tell(`${told.offer(reminder, reminder.called ?? "that thread")} ${away.value}`)
+        if (Option.isNone(listed) || reminder.propose === undefined) return yield* tell(told.gone(reminder, reminder.called ?? "that thread"))
+        const called = Reminders.named(listed.value)
+        const decision = Brain.decision({ act: "send", target: listed.value.handle, text: reminder.propose, how: "now", sure: "high" })
+        const checked = Brain.check(decision, { ...situation, desk: on }, said)
+        if (checked._tag !== "Do") return yield* tell(`${told.offer(reminder, called)}${checked._tag === "Say" ? ` ${unaddressed(checked.spoken, said)}` : ""}`)
+        const { doing, question } = told.asking(reminder, called)
+        const outcome = yield* opening(
+          {
+            kind: "offer",
+            utterance: id,
+            heard: "",
+            decision,
+            candidates: [listed.value.ref],
+            asked: question,
+            about: doing,
+            material: Option.none(),
+            resend: Option.none(),
+            reminder: reminder.id,
+            // One of his routines is asked about by its name alone, as a model is shown the question.
+            ...(reminder.routine === undefined
+              ? {}
+              : { routine: reminder.routine, shown: told.asking({ ...reminder, propose: routinesNamed([reminder.routine]) }, called).question }),
+          },
+          { turns, at },
+        )
+        yield* deliver(missed.length === 0 ? outcome : { ...outcome, missed }, { id, turns })
+      })
+
+    /**
+     * Says the next thing a restart found, once nothing else is asked, he
+     * isn't dictating and yapd is on: one question at a time, each offered
+     * once. A message that didn't get there is offered to be sent again, or,
+     * when it can't be by then, like one too long ago, said so with why; a
+     * step it couldn't confirm is said once, with why.
+     */
+    const offering: Effect.Effect<void> = Effect.gen(function* () {
+      yield* givingWay
+      while (asking === undefined && presses.size === 0) {
+        const power = yield* options.power
+        // Off, it waits for him to be back.
+        if (!power.on) return
+        const now = yield* Clock.currentTimeMillis
+        // What came in while yapd was off is offered first as it's turned on, before what threads wait on him for, which it gives way to
+        // once it goes unanswered.
+        const first = offered?.kind === "missed" && offered.asks === undefined ? offered : undefined
+        const next = first === undefined ? restarted.shift() : undefined
+        // Then an offer he set that came due, as he asked for it then.
+        const proposal = first === undefined && next === undefined ? proposed.shift() : undefined
+        if (proposal !== undefined) {
+          yield* propose(proposal, power.turns)
+          continue
+        }
+        // Then what threads wait on him for, one at a time: the first that's due, or, when none is yet, the soonest once it is. One on a
+        // machine whose threads can't be seen waits for them, which it's asked once they're back.
+        if (next === undefined) {
+          const due = yield* askable(now)
+          // Once nothing a thread waits on him for is due, the catch-up is offered, no sooner than it's to come back.
+          const offer = first ?? (Option.isNone(due) && offered !== undefined && (offered.notBefore ?? now) <= now ? offered : undefined)
+          if (offer !== undefined) {
+            offered = undefined
+            yield* offering1(offer, power.turns, now)
+            continue
+          }
+          if (Option.isNone(due)) return yield* wake(now)
+          const index = asked.indexOf(due.value)
+          if (index === -1) continue
+          asked.splice(index, 1)
+          yield* put(due.value, power.turns)
+          continue
+        }
+        const { row, offer } = next
+        const kept = yield* ledger.get(row.commandId)
+        // Sent again or taken back since it was found, or found to have gone after all, there's nothing to offer or say.
+        if (offer ? !Option.exists(kept, Ledger.offerable) : row.state !== "sent" && Option.exists(kept, ({ state }) => state === "sent")) {
+          yield* Effect.logInfo(`Not saying anything of ${row.commandId}, since something came of it meanwhile`)
+          continue
+        }
+        const went = Hands.went(row)
+        const sent = Option.match(went, { onNone: () => "", onSome: ({ text }) => text })
+        const ref = { machine: row.machine, id: row.thread }
+        const listed = (yield* threads.desk(Option.none(), [ref], 1)).threads.find((listed) => Threads.same(listed.ref, ref))
+        const said = yield* persona.lines
+        /** Said once, with why, and journaled with it: as unknown, unless it's known not to have gone, like new work found not to have started. */
+        const telling = (line: string, reason: string) =>
+          Effect.gen(function* () {
+            yield* journal.write({
+              at: yield* Clock.currentTimeMillis,
+              kind: "action",
+              machine: row.machine,
+              thread: row.thread,
+              said: line,
+              utterance: row.utterance,
+              detail: { commandId: row.commandId, act: row.kind === "message" ? "Message" : row.kind, outcome: row.state === "failed" ? "NotSent" : "Unknown", reason },
+            })
+            yield* deliver({ say: line, subject: { _tag: "Answer", said: line, about: Option.some(ref) }, kind: "done", unsent: true }, { id: row.utterance, turns: power.turns })
+          })
+        if (!offer) {
+          const reason = row.reason ?? Hands.unconfirmable
+          const called = Option.fromNullable(listed?.called)
+          // Threads one step tidied are said together, once, each named as it was called then, unless something came of one since.
+          if (Hands.tidies(row)) {
+            const along = restarted.filter((other) => !other.offer && other.row.utterance === row.utterance && other.row.step === row.step && Hands.tidies(other.row))
+            restarted.splice(0, restarted.length, ...restarted.filter((other) => !along.includes(other)))
+            const still = yield* Effect.filter(along, ({ row: other }) =>
+              Effect.map(ledger.get(other.commandId), (now) => !(other.state !== "sent" && Option.exists(now, ({ state }) => state === "sent"))),
+            )
+            const rows = [row, ...still.map(({ row: other }) => other)].map((one) => ({ ...one, called: Hands.tidiedAs(one) ?? listed?.called ?? "a thread" }))
+            yield* telling(Hands.untidied(rows, said), reason)
+            continue
+          }
+          yield* telling(row.kind === "message" ? Hands.unoffered(said, called, reason) : Hands.unsure(row, said, called, reason), reason)
+          continue
+        }
+        const why = Option.isNone(yield* hands.still(row.commandId)) ? Hands.tooLong : sent === "" ? "I can't read back what it said." : undefined
+        if (why !== undefined || listed === undefined) {
+          const archived = Option.exists(yield* threads.find(ref), ({ archivedAt }) => archivedAt !== null)
+          const reason = why ?? (archived ? "Its thread is archived now." : "I can't find its thread now.")
+          yield* hands.leave(row.commandId, reason)
+          yield* Effect.logWarning(`Could not offer to send ${row.commandId} again: ${reason}`)
+          yield* telling(Hands.unoffered(said, Option.fromNullable(listed?.called), reason), reason)
+          continue
+        }
+        const resending = yield* opening(
+          {
+            kind: "resend",
+            utterance: row.utterance,
+            heard: sent,
+            // As it went, so a plain yes sends it as it was.
+            decision: Brain.decision({ act: "send", text: sent, how: Option.match(went, { onNone: () => "now", onSome: ({ how }) => how }) }),
+            candidates: [ref],
+            asked: Hands.lost(said, Option.some(listed.called)),
+            about: `send that to ${listed.called} again`,
+            material: Option.none(),
+            resend: Option.some(row.commandId),
+            news: Hands.missing(said, Option.some(listed.called)),
+            question: unaddressed(said.again, said),
+          },
+          { turns: power.turns, at: yield* Clock.currentTimeMillis },
+        )
+        yield* deliver(resending, { id: row.utterance, turns: power.turns })
+      }
+      // Something's asked, or he's dictating: what's put off is looked at again once it's due, in case what's asked then waits out its minute.
+      yield* wake(yield* Clock.currentTimeMillis)
+    }).pipe(Effect.catchAllCause((cause) => Effect.logWarning("Could not say what I found after restarting, or ask what waits on you", cause)))
+
+    /**
+     * How much came in while yapd was off that he hasn't heard, as it's
+     * turned on again: updates kept while it was off, then or any time in
+     * the week a catch-up looks back over, and failures and limits, but not
+     * what was kept quiet as he muted its thread. None unless something of
+     * it is new since it was last on: what was waiting, being read or being
+     * summed up as he turned it off is, as it's kept as off too.
+     */
+    const keptWhileOff = Effect.gen(function* () {
+      const now = yield* Clock.currentTimeMillis
+      const off = Missed.off(yield* journal.switched(now - Missed.week, Missed.switches))
+      if (off === undefined || off.to !== undefined) return 0
+      const missed = yield* Missed.gather(journal, { now, spoke: now, coming: yield* beingTold, desk: nowhere })
+      const rows = missed.groups.flatMap(({ rows }) => rows).filter((kept) => !Missed.muted(kept) && (Missed.whileOff(kept) || (kept.kind === "notice" && Missed.needs(kept))))
+      const since = off.before ?? now - Missed.week
+      const heldAt = (kept: Kept) => (kept.detail as { readonly heldAt?: unknown } | undefined)?.heldAt
+      return rows.some((kept) => Math.max(kept.at, Number(heldAt(kept) ?? kept.at) || kept.at) >= since) ? rows.length : 0
+    })
+
+    /** Works out what he said and acts on it, then says what came of it, one request at a time. `pressed` is what "it" meant as its shortcut was pressed. */
+    const respond = (utterance: Utterance, pressed: Subject | undefined) => {
+      /** The prompt being written in case it's new work, if it is being. */
+      let ahead: Fiber.RuntimeFiber<Either.Either<Drafts.Written, string>> | undefined
+      /** Stops writing it, unless it was kept for what it was written for, which takes it from here. */
+      const letGo = Effect.suspend(() => {
+        writing.delete(utterance.id)
+        return ahead === undefined ? Effect.void : Fiber.interruptFork(ahead)
+      })
+      return Effect.gen(function* () {
+        // Checked again once it's its turn: yapd may have been turned off and on while it waited behind another.
+        if (yield* outdated(utterance.turns)) {
+          yield* Effect.logInfo(`Not worked out, since yapd was turned off after it was said: ${logged(utterance.heard)}`)
+          return Option.none<string>()
+        }
+        yield* Effect.logInfo(`Heard: ${logged(utterance.heard)}`)
+        // Whatever comes of it is said, so the speaker gets ready while it's worked out, until it's said or comes to nothing.
+        yield* Effect.acquireRelease(options.coming, (letGo) => letGo)
+        const began = yield* Clock.currentTimeMillis
+        const about = pressed ?? (yield* subject)
+        const glanced = yield* glance(utterance, about, [])
+        let thought: Thought
+        if (glanced.quick !== undefined) thought = worked(glanced, utterance, glanced.quick, "fast")
+        else {
+          // In case it's new work, or names the project asked about, the prompt is written while the model works out which.
+          const asked = Option.filter(glanced.situation.open, ({ kind }) => kind === "project")
+          const lines: ReadonlyArray<Line> = Option.match(asked, {
+            onNone: () => [{ speaker: "user", text: utterance.heard, ...overItself(utterance) }],
+            onSome: (open) => [
+              { speaker: "yapd", text: open.asked },
+              { speaker: "user", text: utterance.heard, ...overItself(utterance) },
+            ],
+          })
+          // Noted as it's begun, so it's stopped however this ends, even stopped while the model works it out.
+          yield* drafts.begin(lines, Option.getOrUndefined(Option.flatMap(asked, ({ material }) => material))).pipe(
+            Effect.interruptible,
+            Effect.forkIn(scope),
+            Effect.tap((fiber) =>
+              Effect.sync(() => {
+                ahead = fiber
+                writing.set(utterance.id, fiber)
+              }),
+            ),
+            Effect.uninterruptible,
+          )
+          thought = yield* decide(glanced, utterance)
+          const { act, pending } = thought.decision
+          // Kept only for what it was written for: new work, or the answer to which project.
+          const answering = Option.isSome(asked) && pending === "answers"
+          if (!(answering || (act === "start" && Option.isNone(asked)))) yield* letGo
+        }
+        const decided = yield* Clock.currentTimeMillis
+        workedOut.set(utterance, { began, decided })
+        yield* Effect.logInfo(`Routed: ${routed(thought, decided - began)}`)
+        const outcome = yield* acting(thought).pipe(Effect.ensuring(letGo))
+        yield* note(thought, outcome, began)
+        yield* deliver(outcome, thought)
+        yield* offering
+        return Option.some(utterance.id)
+      }).pipe(Effect.scoped, Effect.ensuring(letGo), turn.withPermits(1), Effect.annotateLogs({ utterance: utterance.id }))
+    }
+
+    /** The dictation a press began has ended, however long it took: what was kept for it, let go of. `cut` is the question it may have cut off. */
+    const ended = (press: number | undefined, cut?: string) =>
+      Effect.sync(() => {
+        if (press === undefined) return undefined
+        over.set(press, cut)
+        const kept = presses.get(press)
+        presses.delete(press)
+        return kept
+      })
+
+    const heard = (input: Omit<Utterance, "id">, press?: number) =>
+      Effect.suspend(() => {
+        const utterance: Utterance = { ...input, id: mint(input.at, "u") }
+        // Held by its press since it began, or from now for a typed request, and let go of however it ends, even
+        // stopped while it waits its turn.
+        const holding = press === undefined ? `request:${utterance.id}` : `press:${press}`
+        return Effect.gen(function* () {
+          // A dictation's answer was awaited from when the shortcut was pressed, and "it" is what he was listening to then.
+          const kept = yield* ended(press)
+          // Said before yapd was turned off, it isn't even worked out, however late it's handed on.
+          if (yield* outdated(utterance.turns)) return yield* Effect.as(kept?.arrived ?? Effect.void, Option.none<string>())
+          // "Mute." is his emergency off, and "unmute" or "turn on" while yapd is off turns it back on: either is done as the menu does
+          // it, at once, with nothing worked out or said for it, and carried through however this ends. Off, before what the press held
+          // is let go of, so what it held, like a thread's question, is dropped as turning off drops it. On, before what he dictated
+          // after is handed on, so it's taken for said once yapd is on, never waiting for what turning on says.
+          const switching = switches(utterance.heard, (yield* options.power).on)
+          if (options.turn !== undefined && switching !== undefined) {
+            yield* Effect.logInfo(switching ? `Turned on: he said ${once(utterance.heard)}` : "Turned off: he said mute")
+            yield* Fiber.join(yield* Effect.forkIn(options.turn(switching, press), scope))
+            return yield* Effect.as(kept?.arrived ?? Effect.void, Option.some(utterance.id))
+          }
+          const arrived = kept?.arrived ?? (yield* options.awaiting)
+          // Only a question asked by the time it was said is held by it, however late it's handed on.
+          return yield* Effect.zipRight(hold(holding, utterance.at), stoppable(respond(utterance, kept?.subject), utterance)).pipe(Effect.ensuring(arrived))
+        }).pipe(Effect.ensuring(release(holding)))
+      })
+
+    return {
+      think,
+      act: (thought) => turn.withPermits(1)(Effect.flatMap(acting(thought), (outcome) => Effect.as(deliver(outcome, thought), outcome))),
+      heard,
+      prepare: (press: number, turns: number, began?: number) =>
+        Effect.gen(function* () {
+          // Pressed then, however late it's got ready for: a question asked after can't be what it answers.
+          const at = began ?? (yield* Clock.currentTimeMillis)
+          // Presses are got ready for one at a time, in order, so none before this one will be again.
+          for (const earlier of over.keys()) if (earlier < press) over.delete(earlier)
+          // Pressed before yapd was turned off, however late it's handed on, there's nothing to get ready for.
+          if (yield* outdated(turns)) return
+          // What's dictated is answered before anything else is said, and kept with what "it" means now, for that dictation alone.
+          const about = yield* subject
+          const arrived = yield* options.awaiting
+          // Turned off and on while that was found out: dropping cleared what was kept, so this keeps and holds nothing.
+          if (yield* outdated(turns)) return yield* arrived
+          // Its dictation is over already, dealt with or come to nothing, so there's nothing left to keep or hold for it.
+          if (over.has(press)) {
+            // Come to nothing, it let go of nothing, so a question it would have held, which it may have cut off, is taken up again now instead.
+            const cut = over.get(press)
+            if (cut !== undefined && asking?.open.id === cut && at >= asking.open.at) {
+              yield* resume(cut)
+              yield* Effect.forkIn(turn.withPermits(1)(offering), scope)
+            }
+            return yield* arrived
+          }
+          presses.set(press, { subject: about, arrived })
+          yield* hold(`press:${press}`, at)
+          const shortlist = yield* threads.desk(Option.none(), [], desk.vocabulary)
+          // What the open question offers first, since what he dictates may answer it.
+          yield* drafts.prepare(
+            shortlist.threads.map(({ thread }) => thread.title),
+            asking?.open.wording?.terms ?? [],
+          )
+          yield* Effect.forkIn(threads.refreshUsage, scope)
+        }).pipe(Effect.catchAllCause((cause) => Effect.logWarning("Could not get ready for the dictation", cause))),
+      // Whatever it held is let go of: a press from before yapd was turned off holds nothing that's open now anyway.
+      nothing: (press) =>
+        Effect.gen(function* () {
+          yield* release(`press:${press}`)
+          // In case it isn't got ready for yet, so it held nothing, it keeps the question he'd heard by now, which it may have cut off.
+          const kept = yield* ended(press, asking?.said !== undefined ? asking.open.id : undefined)
+          yield* kept?.arrived ?? Effect.void
+          // What waited for the dictation to be over is asked now.
+          yield* Effect.forkIn(turn.withPermits(1)(offering), scope)
+        }),
+      // Not one he hasn't heard yet, which what he said can't have been about. What was left of its request is said.
+      replied: Effect.suspend(() => {
+        if (asking === undefined || asking.said === undefined) return Effect.void
+        const { open } = asking
+        return Effect.gen(function* () {
+          yield* close(open, "replaced")
+          const { turns } = yield* options.power
+          yield* deliver(ahead(quiet({ _tag: "Nothing" }), open.decision.rest, yield* persona.lines), { id: open.utterance, turns })
+          yield* Effect.forkIn(turn.withPermits(1)(offering), scope)
+        })
+      }),
+      open: Effect.map(Clock.currentTimeMillis, current),
+      drop: Effect.gen(function* () {
+        dropped = (yield* options.power).turns
+        // Nothing said before is on his screen once yapd is on again, where an app that connects would show it.
+        for (const pending of cards) pending.down = true
+        cards.clear()
+        yield* options.show.hide()
+        if (asking !== undefined) yield* close(asking.open, "dropped: off")
+        // What he'd answered of a thread's question is never sent once yapd's been turned off and on (I8): it's brought back from its
+        // first part, and only what he answers then goes. Nor is what he dictates taken for a part until he's heard it again.
+        for (const [index, waiting] of asked.entries()) {
+          const { asks } = waiting.asking
+          if (partway(asks)) asked[index] = { ...waiting, asking: { ...waiting.asking, asks: fromTheStart(asks) }, back: "here" }
+        }
+        for (const [requestId, heard] of known) {
+          if (partway(heard.asks)) known.set(requestId, { ...heard, asks: fromTheStart(heard.asks), through: undefined })
+        }
+        // An offer he set that came due and wasn't asked yet is kept for catching up, as anything due while yapd is off is.
+        const offers = proposed.splice(0, proposed.length).flatMap(({ kept }) => Option.toArray(kept))
+        yield* journal.hold(offers, "off")
+        // No answer is on its way any more, and the dictations they were for are dropped too.
+        const kept = [...presses.values()]
+        presses.clear()
+        yield* Effect.forEach(kept, ({ arrived }) => arrived, { discard: true })
+        yield* Effect.forEach([...writing.values(), ...jobs], Fiber.interruptFork, { discard: true })
+      }),
+      undelivered: (rows) =>
+        Effect.gen(function* () {
+          restarted.push(...rows.map((row) => ({ row, offer: true })))
+          yield* turn.withPermits(1)(offering)
+        }),
+      unconfirmed: (rows) =>
+        Effect.gen(function* () {
+          restarted.push(...rows.map((row) => ({ row, offer: false })))
+          yield* turn.withPermits(1)(offering)
+        }),
+      // In its turn, so turning yapd on never waits for it. What came in while it was off is offered once, first.
+      back: Effect.gen(function* () {
+        const count = yield* keptWhileOff
+        if (count > 0) offered = { kind: "missed", count }
+        yield* Effect.forkIn(turn.withPermits(1)(offering), scope)
+      }).pipe(Effect.catchAllCause((cause) => Effect.logWarning("Could not look at what came in while I was off", cause))),
+      mention: (ref, said) =>
+        Effect.flatMap(Effect.all([Clock.currentTimeMillis, options.power]), ([at, { turns }]) =>
+          Effect.sync(() => {
+            answered = { subject: { _tag: "Answer", said, about: Option.some(ref) }, at, turns }
+          }),
+        ),
+      // A late "On it" over an update keeps its own thread, which nothing written by yapd's own hand reaches unless it's steered.
+      following: (about, line, done?: Brain.Done, own?: Brain.Own) =>
+        followUp(
+          "session" in about ? { _tag: "Session", update: about, said: line } : { _tag: "Answer", said: line, about: Option.some(about) },
+          Effect.succeed(line),
+          done,
+          own,
+        ),
+      over: (update: Conversation.Update, lines: ReadonlyArray<Line>, line: string, given: Over) => (heard: string, voiced: number, echo?: string, afterPause?: string, unsaid?: string, stopped?: number) =>
+        Effect.gen(function* () {
+          const began = yield* Clock.currentTimeMillis
+          const { turns } = yield* options.power
+          const left = unsaid === undefined || unsaid === "" ? undefined : unsaid
+          // Its own thread, or the one on another machine it's only known to be from; none for a subagent's, reached only through its hook.
+          const ref = update.subagent === undefined ? (update.about ?? update.owner) : undefined
+          const utterance: Utterance = {
+            id: mint(began, "u"),
+            heard,
+            via: "reply",
+            at: began,
+            voiced,
+            turns,
+            ...(stopped === undefined ? {} : { stopped }),
+            ...overItself({ echo, afterPause }),
+            // As said back to a "done" line, so what may all be yapd's own words is let go, or at most asked about in code's own question.
+            afterDone: given.done,
+            ...(left === undefined ? {} : { unsaid: left }),
+            handed: { present: given.present, ...(given.muting === true || Mutes.mentionsMuting(heard) ? { muting: true as const } : {}) },
+            own: { ...(ref === undefined ? {} : { ref }), steered: given.steered },
+          }
+          // Only what he'd heard of the line he spoke over.
+          const { thought, modelMs } = yield* weigh(utterance, { _tag: "Session", update, said: line, own: ref === undefined ? {} : { ref } }, [
+            ...lines,
+            { speaker: "yapd", text: heardOf(line, left) },
+          ])
+          const said = yield* persona.lines
+          const routed = Brain.route(thought.decision, thought.situation, said)
+          const ms = (yield* Clock.currentTimeMillis) - began
+          // Never his words nor the model's.
+          const listed = called(thought.situation, thought.decision.target)
+          const how = {
+            source: thought.source,
+            ms,
+            ...(modelMs === undefined ? {} : { modelMs }),
+            routed: `${routed._tag.toLowerCase()}, ${thought.decision.act}${listed === undefined ? "" : ` → ${listed.called}`}`,
+          }
+          switch (routed._tag) {
+            case "Resume":
+              // What may all be yapd's own words let go, logged in the same words as wherever else they are.
+              return { ...routed, ...how, logged: Brain.mayBeOwn(utterance) && !Brain.saidNothing(utterance) ? notActing(utterance) : Effect.void }
+            case "Dismiss":
+            case "Answer":
+            case "Pass":
+              return { ...routed, ...how }
+            case "Act":
+              return {
+                ...routed,
+                ...how,
+                // Taken, it holds a question asked meanwhile that he's yet to hear, as a follow-up does, and it's acted on in its turn.
+                run: (running: Conversation.Running) =>
+                  Effect.gen(function* () {
+                    const holding = `reply:${utterance.id}`
+                    yield* hold(holding, began)
+                    yield* takeUp(thought, { holding, handoff: { ...running, brain: ms, ran: yield* Clock.currentTimeMillis } })
+                  }),
+              }
+          }
+        }),
+      ask: (waiting) =>
+        Effect.suspend(() => {
+          const { requestId } = waiting.asks
+          // Heard of twice, as on starting and from T3 Code at once, it's asked the once.
+          if (asked.some(({ asking: queued }) => queued.asks.requestId === requestId) || (asking !== undefined && requestOf(asking.open) === requestId)) return Effect.void
+          // Found unheard as yapd was turned on, it may have been heard since, asked once more meanwhile: then it isn't again.
+          if (waiting.kept !== undefined && known.has(requestId)) return Effect.void
+          // Kept already and never heard, it's asked under that entry.
+          asked.push({ asking: waiting, again: false, ...(waiting.kept === undefined ? {} : { kept: Option.some(Option.some(waiting.kept)) }) })
+          return Effect.asVoid(Effect.forkIn(turn.withPermits(1)(offering), scope))
+        }),
+      settled: (requestId) =>
+        Effect.gen(function* () {
+          known.delete(requestId)
+          dequeue(requestId)
+          if (asking === undefined || requestOf(asking.open) !== requestId) return
+          // Being asked, or asked already: a late answer does nothing, and what's next is asked.
+          const { open } = asking
+          gone.add(open.id)
+          yield* close(open, "dropped: dealt with in T3 Code")
+          yield* Effect.forkIn(turn.withPermits(1)(offering), scope)
+        }),
+      returned: (machine) =>
+        Effect.suspend(() =>
+          asked.some(({ asking: waiting }) => waiting.ref.machine === machine) ? Effect.asVoid(Effect.forkIn(turn.withPermits(1)(offering), scope)) : Effect.void,
+        ),
+      digest: (held: ReadonlyArray<Kept>, until?: number) =>
+        Effect.gen(function* () {
+          const power = yield* options.power
+          if (!power.on || held.length === 0) return
+          const now = yield* Clock.currentTimeMillis
+          const on = yield* threads.desk(Option.none(), [], desk.reply)
+          const brief = yield* brain.brief({ kind: "digest", groups: Missed.group(held, on), left: { threads: 0, rows: 0 } }, on, now).pipe(Effect.either)
+          // Left unheard, for catching up.
+          if (Either.isLeft(brief)) return yield* Effect.logWarning("Could not sum up what I held", brief.left)
+          const spoken = brief.right
+          const covered = held.map(({ id }) => id)
+          /** Kept once it starts being said, so words he never heard, as when yapd is turned off first, are never what he was told. */
+          let entry: Option.Option<number> | undefined
+          const subject: Subject = { _tag: "Answer", said: spoken, about: Option.none(), missed: covered }
+          const oldest = Math.min(...held.map(({ at }) => at))
+          /** Focus or quiet began while it was summed up or waited its turn: what it covers is held for when it ends. */
+          const holding = options.modes?.holding ?? Effect.succeedNone
+          yield* options.tell(
+            {
+              id: mint(now, "d"),
+              // Its own, ranked with finished work, never ahead of what needs him.
+              kind: "notice",
+              priority: "done",
+              spoken,
+              at: now,
+              // Heard since, every one of them, like from the menu or what he missed, it has nothing left to tell. Any of it kept quiet since,
+              // like a thread he muted or one whose subagents he no longer has read, it's never said, so none of that is: what else it
+              // covers is still held, for the next.
+              stale: Effect.map(
+                Effect.all([holding, journal.held(oldest), journal.rows(covered)]),
+                ([mode, still, rows]) => Option.isSome(mode) || rows.some(Missed.muted) || !still.some(({ id }) => covered.includes(id)),
+              ),
+              saying: Effect.gen(function* () {
+                // Only now, so what one that's never said would have covered comes up in the next.
+                yield* options.modes?.briefed(until) ?? Effect.void
+                // "It" as it starts being said, like an answer, not as it was summed up: an update read while it waited isn't "it" over it.
+                answered = { subject, at: yield* Clock.currentTimeMillis, turns: power.turns }
+                if (entry === undefined) entry = yield* journal.write({ at: yield* Clock.currentTimeMillis, kind: "brief", said: spoken, detail: { covered } })
+              }),
+              // Cut off, what it covered is still his to catch up on.
+              heard: Effect.flatMap(Clock.currentTimeMillis, (at) => journal.markHeard([...covered, ...Option.toArray(entry ?? Option.none())], at)),
+              telling: Effect.succeed(covered),
+              followUp: followUp(subject, Effect.succeed(spoken)),
+              window: Conversation.linger,
+            },
+            power.turns,
+          )
+        }),
+      rundown: (count, was) =>
+        Effect.suspend(() => {
+          offered = { kind: "rundown", count, was }
+          return Effect.asVoid(Effect.forkIn(turn.withPermits(1)(offering), scope))
+        }),
+      missed: Effect.gen(function* () {
+        const now = yield* Clock.currentTimeMillis
+        return yield* Missed.gather(journal, { now, spoke: yield* lastSpoke(now), coming: yield* beingTold, desk: nowhere })
+      }),
+      clear: Effect.flatMap(Clock.currentTimeMillis, (now) => clearing(now)),
+      cancel: cancelling,
+      offered: (reminder, kept) =>
+        Effect.suspend(() => {
+          proposed.push({ reminder, kept })
+          return Effect.asVoid(Effect.forkIn(turn.withPermits(1)(offering), scope))
+        }),
+      welcome: Effect.gen(function* () {
+        const { on, turns } = yield* options.power
+        if (!on) return
+        const said = yield* persona.lines
+        const outcome = yield* rundown(yield* threads.desk(Option.none(), [], desk.reply), yield* lastSpoke(yield* Clock.currentTimeMillis), said)
+        yield* deliver(outcome, { id: mint(yield* Clock.currentTimeMillis, "u"), turns })
+      }).pipe(
+        turn.withPermits(1),
+        Effect.catchAllCause((cause) => Effect.logWarning("Could not tell you what I held", cause)),
+        Effect.forkIn(scope),
+        Effect.asVoid,
+      ),
+    } satisfies Assistant["Type"]
+  })
