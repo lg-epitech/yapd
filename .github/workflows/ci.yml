@@ -11,6 +11,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
+      # The voice's effect runs through ffmpeg, and its tests check what ffmpeg makes of it.
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
       - run: bun install --frozen-lockfile
       - run: bun run check
       - run: bun test
@@ -22,4 +24,5 @@ jobs:
       - run: xcodebuild -project app/yapd.xcodeproj -configuration Release -quiet build
       # The app's own checks, which only a Mac's swiftc builds.
       - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
       - run: bun test src/App.test.ts
