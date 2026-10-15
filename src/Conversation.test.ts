@@ -3063,6 +3063,36 @@ describe("A line out in parts", () => {
     expect(talkedOver.files).toEqual([part])
   })
 
+  test("a whole that fails once he's talked over the first part leaves the update unheard, after what he said is answered or acted on", async () => {
+    const over = (reply: Responder.Reply, handing?: NonNullable<Parameters<typeof Conversation.make>[0]["over"]>) =>
+      overHelperScoped(
+        Effect.gen(function* () {
+          const heard: Array<number> = []
+          const helper = yield* overHelper([[0.9, "Which tests?"]], {
+            parts,
+            duration: 12,
+            reply: () => reply,
+            ...(handing === undefined ? {} : { handing }),
+            through: Effect.sync(() => void heard.push(1)),
+          })
+          yield* helper.wait(3.5)
+          yield* helper.talk(0.9, 10)
+          yield* helper.quiet
+          yield* helper.unrendered
+          yield* helper.wait(1)
+          yield* helper.finish
+          yield* helper.wait(10)
+          return { rendered: helper.rendered, heard: heard.length, ended: yield* Fiber.join(helper.fiber) }
+        }),
+      )
+    // Answered, the rest of the update he never heard is still his to catch up on.
+    expect(await over({ intent: "answer", spoken: "The loader's, sir.", message: "" })).toEqual({ rendered: ["The loader's, sir."], heard: 0, ended: false })
+    // So it is once yapd's assistant has acted on it.
+    const acting = () => () =>
+      Effect.succeed<Conversation.Handed>({ _tag: "Act", aims: false, doubted: false, run: () => Effect.void, source: "model", ms: 0, routed: "act, show" })
+    expect(await over({ intent: "assistant", spoken: "", message: "" }, acting)).toEqual({ rendered: [], heard: 0, ended: false })
+  })
+
   test.each([
     ["an update", {}],
     ["a question", { ask: true }],
