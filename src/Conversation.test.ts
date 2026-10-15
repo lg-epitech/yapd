@@ -3062,6 +3062,63 @@ describe("A line out in parts", () => {
     expect(Exit.isFailure(talkedOver.ended)).toBe(true)
     expect(talkedOver.files).toEqual([part])
   })
+
+  test("a whole that fails once he's talked over the first part leaves the update unheard, after what he said is answered or acted on", async () => {
+    const over = (reply: Responder.Reply, handing?: NonNullable<Parameters<typeof Conversation.make>[0]["over"]>) =>
+      overHelperScoped(
+        Effect.gen(function* () {
+          const heard: Array<number> = []
+          const helper = yield* overHelper([[0.9, "Which tests?"]], {
+            parts,
+            duration: 12,
+            reply: () => reply,
+            ...(handing === undefined ? {} : { handing }),
+            through: Effect.sync(() => void heard.push(1)),
+          })
+          yield* helper.wait(3.5)
+          yield* helper.talk(0.9, 10)
+          yield* helper.quiet
+          yield* helper.unrendered
+          yield* helper.wait(1)
+          yield* helper.finish
+          yield* helper.wait(10)
+          return { rendered: helper.rendered, heard: heard.length, ended: yield* Fiber.join(helper.fiber) }
+        }),
+      )
+    // Answered, the rest of the update he never heard is still his to catch up on.
+    expect(await over({ intent: "answer", spoken: "The loader's, sir.", message: "" })).toEqual({ rendered: ["The loader's, sir."], heard: 0, ended: false })
+    // So it is once yapd's assistant has acted on it.
+    const acting = () => () =>
+      Effect.succeed<Conversation.Handed>({ _tag: "Act", aims: false, doubted: false, run: () => Effect.void, source: "model", ms: 0, routed: "act, show" })
+    expect(await over({ intent: "assistant", spoken: "", message: "" }, acting)).toEqual({ rendered: [], heard: 0, ended: false })
+  })
+
+  test.each([
+    ["an update", {}],
+    ["a question", { ask: true }],
+    ["an answer", { answer: true }],
+  ] as const)("'Mute.' over the first part of %s turns yapd off once it's made out, never waiting on the rest to render, unless the words it was saying then were about muting", async (_, given) => {
+    const over = (at: number, spoken?: string) =>
+      overHelperScoped(
+        Effect.gen(function* () {
+          const helper = yield* overHelper([[0.95, "Mute."]], { parts, duration: 12, off: true, ...given, ...(spoken === undefined ? {} : { spoken }) })
+          yield* helper.wait(at)
+          yield* helper.talk(0.95, 10)
+          yield* helper.quiet
+          yield* helper.wait(0.1)
+          const before = helper.offs()
+          yield* helper.whole
+          yield* helper.wait(1)
+          return { offs: [before, helper.offs()], transcribed: helper.transcribed, worked: [...helper.responded, ...helper.offered].map(({ heard }) => heard) }
+        }),
+      )
+    // Once its own voice is learnt, and over its first seconds, saying nothing about muting: off at once, once, his words made out once.
+    expect(await over(3.5)).toEqual({ offs: [1, 1], transcribed: ["Mute."], worked: [] })
+    expect(await over(1)).toEqual({ offs: [1, 1], transcribed: ["Mute."], worked: [] })
+    // Over its first seconds, its words then about muting, the "mute" may be its own: it's worked out, never acted on.
+    const muting = "Muted the loader thread, sir, so it stays quiet until you ask for it again or it needs you for something."
+    expect(await over(1, muting)).toEqual({ offs: [0, 0], transcribed: ["Mute."], worked: ["Mute."] })
+  })
 })
 
 describe("A question out in parts", () => {

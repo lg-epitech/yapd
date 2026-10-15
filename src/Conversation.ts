@@ -88,7 +88,13 @@ type Signal =
  */
 interface Playing extends Playback {
   readonly at?: Effect.Effect<number>
-  readonly length?: Effect.Effect<number>
+  readonly length?: Effect.Effect<Length>
+}
+
+/** How long a line's whole is, in seconds: `unrendered` when it never rendered, so that's only reckoned from where its first part's words fall in it. */
+interface Length {
+  readonly seconds: number
+  readonly unrendered?: true
 }
 
 /**
@@ -97,6 +103,8 @@ interface Playing extends Playback {
  */
 interface Ear {
   readonly signals: Queue.Queue<Signal>
+  /** What what he says is heard listening for, when there's anything, like a question's options. */
+  readonly terms?: ReadonlyArray<string>
   deaf: boolean
   /**
    * Whether what he says is to be worked out, so it's transcribed as he
@@ -132,6 +140,12 @@ type Outcome =
       readonly audio: Float32Array
       /** What he said, when it was transcribed as he paused at its end. */
       readonly heard?: Effect.Effect<string>
+      /** What he said, when it was made out already, to tell whether it was "Mute.". */
+      readonly said?: string
+      /** It was "Mute.", his emergency off, which turned yapd off as soon as it was made out: should yapd stay on, it isn't turned off again. */
+      readonly off?: true
+      /** Its whole never rendered, so how long it is was only reckoned from its first part: it was never heard in full. */
+      readonly unrendered?: true
       readonly ear: Ear
       /**
        * What yapd was saying around when he began, when that was while its
@@ -712,7 +726,7 @@ export const make = (options: {
         if (Option.isNone(detect)) return undefined
         const microphone = yield* audio.microphone.pipe(Scope.extend(scope))
         if (Option.isNone(microphone)) return undefined
-        const ear: Ear = { signals: yield* Queue.unbounded<Signal>(), deaf: false, early: false }
+        const ear: Ear = { signals: yield* Queue.unbounded<Signal>(), deaf: false, early: false, ...(terms === undefined ? {} : { terms }) }
         const endpointer = new Endpointer.Endpointer()
         /** What he'd said by his last pause, being transcribed, while he hasn't carried on since. */
         let paused: Fiber.RuntimeFiber<Either.Either<string, TranscribeError>> | undefined
@@ -889,8 +903,8 @@ export const make = (options: {
             }),
           ),
           length: whole.pipe(
-            Effect.map((length) => length ?? paced),
-            Effect.orElseSucceed(() => paced),
+            Effect.map((length): Length => ({ seconds: length ?? paced })),
+            Effect.orElseSucceed((): Length => ({ seconds: paced, unrendered: true })),
           ),
         } satisfies Playing
       })
@@ -1011,7 +1025,7 @@ export const make = (options: {
         const id = fresh()
         const began = yield* Clock.currentTimeMillis
         const position = playback.at ?? Effect.map(Clock.currentTimeMillis, (now) => Math.min(playback.duration, from + (now - began) / 1000))
-        const length = playback.length ?? Effect.succeed(playback.duration)
+        const length = playback.length === undefined ? Effect.succeed(playback.duration) : Effect.map(playback.length, ({ seconds }) => seconds)
         /** How far into the line he began what he's saying, when by the clock, and whether that was while yapd's own voice could still get into the microphone. */
         let onset: number | undefined
         let since = 0
@@ -1384,8 +1398,20 @@ export const make = (options: {
                 }
                 break
               }
+              // When he stopped, as he did: neither making out what he said nor waiting on the rest's render is counted as his talking.
+              const stoppedTalking = (yield* Clock.currentTimeMillis) - Latency.quiet
+              // "Mute." is acted on once it's made out, never once the rest of a line playing from its first part has rendered, which can take
+              // seconds: only a line about muting needs its words around when he began, and so its length, to tell whose "mute" it was. Made
+              // out here, what he said isn't made out again.
+              const said =
+                options.off !== undefined && playback.length !== undefined && !(echoing && /mute/i.test(text))
+                  ? yield* (signal.heard ?? unlogged(signal.audio, ear.terms))
+                  : undefined
+              const off = said !== undefined && halted(said, undefined) && !unfinished(said)
+              // Turning off cuts this off. Should yapd stay on, what comes of it is worked out as ever.
+              if (off) yield* options.off ?? Effect.void
               // All of the line, however it was played, so where he cut in is a place in all it says.
-              const duration = yield* (playback.length ?? Effect.succeed(playback.duration))
+              const { seconds: duration, unrendered } = yield* (playback.length ?? Effect.succeed<Length>({ seconds: playback.duration }))
               const at = stoppedAt ?? duration
               const begun = onset ?? at
               return {
@@ -1394,13 +1420,16 @@ export const make = (options: {
                 duration,
                 audio: signal.audio,
                 ...(signal.heard === undefined ? {} : { heard: signal.heard }),
+                ...(said === undefined ? {} : { said }),
+                ...(off ? { off } : {}),
+                ...(unrendered === undefined ? {} : { unrendered }),
                 ear,
                 // To where it stopped, or where he began, should the helper put that a moment before.
                 onset: Math.min(at, begun),
                 ...(echoing ? { echo: between(text, duration, begun - reach, Math.max(at, begun) + reach) } : {}),
                 ...(finished === undefined ? {} : { finished }),
                 lateBy: finished === undefined || since === undefined ? 0 : Math.max(0, since - finished) / 1000,
-                stopped: (yield* Clock.currentTimeMillis) - Latency.quiet,
+                stopped: stoppedTalking,
                 ...(carried === "echo" ? { carried: true } : {}),
               } satisfies Outcome
             }
@@ -1760,7 +1789,8 @@ export const make = (options: {
      * update itself has been read to the end, even with the microphone still
      * open for a reply, since the user has heard it by then. Returns whether
      * he heard it, which he didn't when it ended partway on what may have
-     * been only its own voice. The microphone stays open longer after one
+     * been only its own voice, nor when its whole never rendered once he'd
+     * talked over its first part. The microphone stays open longer after one
      * that asks him something while he's `present`, and after a `replay` of
      * one he heard, which he asked for. It starts `from` that far in, as
      * when it was put back to be read again from where he cut in. What he
@@ -1784,6 +1814,11 @@ export const make = (options: {
     ) =>
       Effect.suspend(() => {
         const rendered: Array<string> = []
+        /**
+         * The update's whole never rendered once he'd talked over its first part, so he never heard it in full, whatever came of what he
+         * said: only playing it to its end, which `through` tells, has him hear it.
+         */
+        let unrendered = false
         return Effect.gen(function* () {
           const ear = hearing(yield* Effect.scope)
           const lines: Array<Line> = []
@@ -1869,6 +1904,7 @@ export const make = (options: {
               if (pickUp()) continue
               return true
             }
+            if (outcome.unrendered === true && path === update.audio) unrendered = true
             // Replying to something yapd had finished saying: there's nothing to go back to.
             const after = outcome.at >= outcome.duration
             // Always forward, so talk that keeps coming can't hold an update back forever.
@@ -1877,7 +1913,7 @@ export const make = (options: {
               from = Math.max(from, outcome.at - rewind)
             }
 
-            const first = yield* (outcome.heard ?? unlogged(outcome.audio))
+            const first = outcome.said ?? (yield* (outcome.heard ?? unlogged(outcome.audio)))
             const { itself, echo, unsure } = whose(outcome, first, text)
             // Its own last words as it ended leave him the usual moment to reply, once.
             const listenOn = () => {
@@ -1949,7 +1985,7 @@ export const make = (options: {
              * What he handed over that's acted on, run as soon as it's known, so a dictation starting then can't drop it: logged, then
              * registered, and the update put back to be read again from a moment before where he cut in, when it needs him, he cut it off
              * before its end, and it doesn't aim at it, or when all of it may be yapd's own words. Otherwise it ends there, and he's heard
-             * it. Whether it was put back.
+             * it, unless its rest never rendered once he'd talked over its first part. Whether it was put back.
              */
             const handOver = (heard: string, worked: Worked & { readonly ms: number; readonly began: number }, handed: Extract<Handed, { readonly _tag: "Act" }>) =>
               Effect.gen(function* () {
@@ -1963,7 +1999,7 @@ export const make = (options: {
                   yield* given.back?.(at) ?? Effect.void
                   return true
                 }
-                yield* through
+                if (!unrendered) yield* through
                 return false
               })
             /**
@@ -2025,8 +2061,9 @@ export const make = (options: {
                 audio.woke,
               )
             }
-            // "Mute." turns yapd off at once, which cuts this off, with nothing of it noted or sent. Should yapd stay on, it's a stop.
-            if (halt && options.off !== undefined) yield* options.off
+            // "Mute." turns yapd off at once, which cuts this off, with nothing of it noted or sent, unless it did as soon as it was made out.
+            // Should yapd stay on, it's a stop.
+            if (halt && options.off !== undefined && outcome.off !== true) yield* options.off
             // Muting its thread is done, and said, once he's stopped.
             const muted = reply.intent === "mute" ? yield* reply.muting : undefined
             // Said again, it's the line itself, word for word.
@@ -2177,6 +2214,7 @@ export const make = (options: {
           }
         }).pipe(
           Effect.scoped,
+          Effect.map((heard) => heard && !unrendered),
           Effect.ensuring(Effect.promise(() => Promise.all(rendered.map((path) => rm(path, { force: true }))))),
           Effect.annotateLogs({ project: update.project }),
         )
@@ -2240,7 +2278,7 @@ export const make = (options: {
             ended = outcome.ended
             continue
           }
-          const first = yield* (outcome.heard ?? hear(outcome.audio))
+          const first = outcome.said ?? (yield* (outcome.heard ?? hear(outcome.audio)))
           // Nothing heard over its first seconds is its own voice, no answer, nor talk that wasn't meant for yapd.
           const { itself, echo, unsure } = whose(outcome, first, said.spoken)
           // Its own last words alone, run on into the wait after it, are logged, so how often that happens can be counted: never what can't be.
@@ -2281,7 +2319,7 @@ export const make = (options: {
           if (settled !== undefined) yield* Effect.logInfo(heardLine(settled.heard))
           // "Mute." turns yapd off at once, which cuts this off: it's no answer, nor anything to follow up. Should yapd stay on, nothing came of it.
           if (settled?.halt === true && options.off !== undefined) {
-            yield* options.off
+            if (outcome.off !== true) yield* options.off
             return false
           }
           const reply = settled?.reply ?? Option.none()
