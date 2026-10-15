@@ -13,6 +13,8 @@ export interface Ready {
   readonly hook?: Ticket
   /** For an update heard again, how it was asked for. */
   readonly replay?: Replay
+  /** Put back to be read again from where he cut in, how far into it that is, in seconds. */
+  readonly from?: number
 }
 
 /** An update asked for again, by its id among those heard, while yapd was on for the `turns`th time. */
@@ -100,6 +102,13 @@ export interface Notice {
    * notice does, since who's in the room then may not be him.
    */
   readonly unasked?: true
+  /**
+   * For what came of something handed over from an update, when it was last
+   * worked out, a moment after his last word, how long the Responder and the
+   * Brain took, and when it was acted on: logged part by part as it starts
+   * to play.
+   */
+  readonly handoff?: { readonly since: number; readonly responder: number; readonly brain: number; readonly ran: number }
 }
 
 /** A notice that is rendered, and waiting for its turn like updates do. */

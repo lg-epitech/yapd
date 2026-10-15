@@ -7,17 +7,20 @@ import { join } from "node:path"
 import type * as Assistant from "../src/Assistant.ts"
 import * as Brain from "../src/Brain.ts"
 import * as Config from "../src/Config.ts"
-import type * as Conversation from "../src/Conversation.ts"
+import * as Conversation from "../src/Conversation.ts"
 import { together } from "../src/Conversation.ts"
 import { home, settings } from "../src/Home.ts"
 import type { Kept } from "../src/Journal.ts"
+import type * as Ledger from "../src/Ledger.ts"
 import * as Missed from "../src/Missed.ts"
 import { Model, ProviderModel } from "../src/Model.ts"
+import * as Mutes from "../src/Mutes.ts"
 import * as Persona from "../src/Persona.ts"
+import * as Responder from "../src/Responder.ts"
 import * as Store from "../src/Store.ts"
 import * as T3Live from "../src/T3Live.ts"
 import * as Threads from "../src/Threads.ts"
-import { gist, type Line, question } from "../src/Words.ts"
+import { gist, halts, type Line, question } from "../src/Words.ts"
 import * as Baseline from "./eval/baseline-responder.ts"
 
 // How what he says over an update is worked out, replayed on what he said
@@ -39,17 +42,24 @@ import * as Baseline from "./eval/baseline-responder.ts"
 //     meant for yapd since, which the journal never kept. Writes
 //     reply-labels.json if there's none: his verdicts, which only change
 //     what's expected once he's confirmed them.
-//   nice -n 15 bun scripts/reply-eval.ts run [--path baseline,brain] [--era log|journal|synthetic|all] [--only ids] [--limit N] [--out folder]
+//   nice -n 15 bun scripts/reply-eval.ts run [--path baseline,brain,m4] [--era log,journal,synthetic|all] [--only ids] [--limit N] [--repeat N] [--rerun ids] [--out folder]
 //     Works each one out on each path, one model call at a time, never two
 //     at once, each path going first on every other case: "baseline" is the
 //     Responder as it was at M4's batch 1, frozen in scripts/eval;
 //     "brain" is the Brain alone, Brain.fast, then the model, then `check`,
-//     on the situation the reply came in. "m4" comes with batch 3. With
-//     scripts/eval/replies.cases.json's cases too, kept apart. Says how many
-//     agree with what was logged, or his verdict, by era and by intent; the
-//     hard fails; the latencies; and what's only to report, all by id. Each
-//     answer goes to results-reply-<time>.jsonl, and a whole baseline run to
-//     reply-baseline-<sha>.jsonl too, kept for agreement only.
+//     on the situation the reply came in; "m4" is batch 3's handoff, as
+//     Conversation.reading works it out: the mute hook, saying it again, the
+//     live Responder, and what it hands over to the Brain, as the assistant
+//     routes it, with one rest step. With scripts/eval/replies.cases.json's
+//     cases too, kept apart. `--repeat` works each case out that many times,
+//     each judged by the majority; `--rerun` works out only those ids, three
+//     times more. Says how many agree with what was logged, or his verdict,
+//     by era and by intent; the hard fails; the handoffs; the latencies; and
+//     what's only to report, all by id. Each answer goes to
+//     results-reply-<time>.jsonl, and a whole baseline run to
+//     reply-baseline-<sha>.jsonl too, kept for agreement only, against which
+//     batch 1's, reply-baseline-c319ce0.jsonl, the same frozen code, is the
+//     noise floor.
 
 const folder = join(home, "eval")
 const fixtureFile = join(folder, "replies.json")
@@ -79,10 +89,22 @@ const seeded = {
 const Intent = Schema.Literal("dismiss", "answer", "send", "resume")
 type Intent = typeof Intent.Type
 
-const Label = Schema.Struct({ intent: Intent, status: Schema.Literal("confirmed", "unconfirmed"), why: Schema.optional(Schema.String) })
+/** His verdict: the Responder's intent, or what the Brain should have done, as batch 3's path has it, like "tidy" for settling the thread. */
+const Label = Schema.Struct({ intent: Schema.Union(Intent, Brain.Act), status: Schema.Literal("confirmed", "unconfirmed"), why: Schema.optional(Schema.String) })
 const Labels = Schema.Record({ key: Schema.String, value: Label })
 
-/** What's expected of a case written for the eval: the Responder's intent, the Brain's act and thread, and what neither may come to. */
+/** How batch 3's path worked out what he said: said again, by the mute hook, by the Responder alone, or handed over and routed so. */
+const Route = Schema.Literal("Again", "Hook", "Responder", "Resume", "Dismiss", "Answer", "Pass", "Act")
+
+/**
+ * What's expected of a case written for the eval: the Responder's intent, the
+ * Brain's act and thread, and what neither may come to; and for batch 3's
+ * path, what it may come to, how it's routed, how it was worked out, what
+ * a Pass says was left, whether its rest step was left for the update's own
+ * session and which thread it reaches, what of what he said is never
+ * dropped, what's never done, what a question it asks names, what handed it
+ * over, what's never said, what is, and the Brain's "how".
+ */
 const Expect = Schema.Struct({
   intent: Schema.optional(Intent),
   act: Schema.optional(Schema.Array(Brain.Act)),
@@ -90,8 +112,28 @@ const Expect = Schema.Struct({
   target: Schema.optional(Schema.String),
   /** A piece of what's left for after its first step, like the other thread's name. */
   rest: Schema.optional(Schema.String),
+  /** A piece of the title of the thread its rest step must reach, when it has one: a message to it, never another, nor a question. */
+  restTarget: Schema.optional(Schema.String),
   never: Schema.optional(Schema.Array(Brain.Act)),
   neverIntent: Schema.optional(Schema.Array(Intent)),
+  intents: Schema.optional(Schema.Array(Schema.String)),
+  route: Schema.optional(Schema.Array(Route)),
+  neverRoute: Schema.optional(Schema.Array(Route)),
+  /** "again" or "mute" for how it was worked out, or "fast" or "model" for the Brain, handed over. */
+  source: Schema.optional(Schema.String),
+  left: Schema.optional(Schema.String),
+  /** Whether its rest step is left for the update's own session: false when nothing is, with a rest or none. */
+  restLeft: Schema.optional(Schema.Boolean),
+  /** A piece of what he said that's never dropped: in the first step's message, or in its rest, sent, asked about or left. */
+  carries: Schema.optional(Schema.String),
+  neverDone: Schema.optional(Schema.Array(Brain.Act)),
+  asking: Schema.optional(Schema.String),
+  handedBy: Schema.optional(Schema.Literal("hook", "responder")),
+  neverSpoken: Schema.optional(Schema.Array(Schema.String)),
+  /** A piece of what's said back, like the thread a line turning it down names; when it asks instead, `asking` is what it names. */
+  says: Schema.optional(Schema.String),
+  /** Handed over, the Brain's "how", like which tidy it is: "archive", "settle" or "pin". */
+  how: Schema.optional(Schema.String),
 })
 type Expect = typeof Expect.Type
 
@@ -109,6 +151,8 @@ const Synthetic = Schema.Struct({
       needsYou: Schema.Boolean,
       session: Schema.String,
       thread: Schema.String,
+      /** Its thread's title, for one the view doesn't have, as T3 Code titles it: its project's name, unless it says. */
+      title: Schema.optional(Schema.String),
     }),
   }),
   cases: Schema.Array(
@@ -124,6 +168,20 @@ const Synthetic = Schema.Struct({
       echo: Schema.optional(Schema.String),
       afterPause: Schema.optional(Schema.String),
       lateBy: Schema.optional(Schema.Number),
+      /** Seconds of speech in what he said: clearly spoken, a second, unless it says. */
+      voiced: Schema.optional(Schema.Number),
+      /** Whether what's said over it goes to its thread by yapd's own hand: as `how` says, unless it says. */
+      steered: Schema.optional(Schema.Boolean),
+      /** Whether he's at hand, as he is unless it says, like a TV in an empty room. */
+      present: Schema.optional(Schema.Boolean),
+      /** What the line he spoke over says yapd changed, which "scratch that" reaches: nothing, unless it says. */
+      done: Schema.optional(Schema.Struct({ change: Schema.optional(Schema.Struct({ what: Schema.Literal("acted"), utterance: Schema.String })) })),
+      /** What yapd last did for him, seconds before, a message to a thread on the desk, which "scratch that" may reach. */
+      acted: Schema.optional(Schema.Struct({ thread: Schema.String, text: Schema.String, ago: Schema.Number })),
+      /** His routines, by name, with their steps. */
+      routines: Schema.optional(Schema.Array(Schema.Struct({ name: Schema.String, steps: Schema.String }))),
+      /** What he hasn't heard yet, on the case's machine, held for the digest `ago` seconds before: nothing, unless it says. */
+      unheard: Schema.optional(Schema.Array(Schema.Struct({ thread: Schema.String, project: Schema.String, said: Schema.String, ago: Schema.Number }))),
       expect: Expect,
     }),
   ),
@@ -164,8 +222,18 @@ interface Case {
   readonly left?: string
   readonly lateBy?: number
   readonly voiced?: number
+  /** Written: whether what's said over it goes to its thread by yapd's own hand, whether he's at hand, and what its line said yapd changed. */
+  readonly steered?: boolean
+  readonly present?: boolean
+  readonly done?: Brain.Done
+  /** Written: what yapd last did for him, as the ledger has it. */
+  readonly acted?: Ledger.Row
+  /** Written: his routines, by name, with their steps. */
+  readonly routines?: ReadonlyArray<{ readonly name: string; readonly steps: string }>
   /** The journal's last few rows before it, as the Brain is shown them. */
   readonly lately?: ReadonlyArray<Kept>
+  /** Written: what he hasn't heard yet. */
+  readonly unheard?: ReadonlyArray<Kept>
   /** What came of it live: the Responder's intent, or the assistant's act, what was said and what was sent. */
   readonly logged: { readonly intent?: string; readonly act?: string; readonly spoken?: string; readonly message?: string }
   readonly expect?: Expect
@@ -841,11 +909,31 @@ const synthetic = Effect.gen(function* () {
     const machine = written.machine ?? machineName
     const ref = written.how === "untied" ? undefined : { machine, id: update.thread }
     const said = written.said ?? update.spoken
+    const when = at + index * 60_000
+    // What yapd last did for him, as the ledger keeps a message it sent.
+    const acted: Ledger.Row | undefined =
+      written.acted === undefined
+        ? undefined
+        : {
+            commandId: `yapd:u-${written.id}:0`,
+            messageId: `yapd:u-${written.id}:0:m`,
+            utterance: `u-${written.id}`,
+            step: 0,
+            kind: "message",
+            machine: machineName,
+            thread: written.acted.thread,
+            body: {},
+            digest: written.acted.text.toLowerCase(),
+            state: "sent",
+            how: "now",
+            reason: null,
+            at: when - written.acted.ago * 1000,
+          }
     return {
       id: written.id,
       era: "synthetic",
       by: "responder",
-      at: at + index * 60_000,
+      at: when,
       update: {
         project: update.project,
         spoken: update.spoken,
@@ -853,6 +941,7 @@ const synthetic = Effect.gen(function* () {
         needsYou: update.needsYou,
         session: written.how === "untied" ? `${update.session}-untied` : update.session,
         ...(ref === undefined ? {} : { ref }),
+        ...(update.title === undefined ? {} : { title: update.title }),
         ...(written.how === "owner" ? { owner: true } : {}),
         steered: written.how === "tied",
       },
@@ -861,6 +950,19 @@ const synthetic = Effect.gen(function* () {
       ...(written.echo === undefined ? {} : { echo: written.echo, ...(written.afterPause === undefined ? {} : { afterPause: written.afterPause }) }),
       ...(written.left === undefined ? {} : { left: written.left }),
       ...(written.lateBy === undefined ? {} : { lateBy: written.lateBy }),
+      ...(written.voiced === undefined ? {} : { voiced: written.voiced }),
+      ...(written.steered === undefined ? {} : { steered: written.steered }),
+      ...(written.present === undefined ? {} : { present: written.present }),
+      ...(written.done === undefined ? {} : { done: written.done.change === undefined ? {} : { change: written.done.change } }),
+      ...(acted === undefined ? {} : { acted }),
+      ...(written.routines === undefined ? {} : { routines: written.routines }),
+      ...(written.unheard === undefined
+        ? {}
+        : {
+            unheard: written.unheard.map(
+              (row, at): Kept => ({ id: at + 1, at: when - row.ago * 1000, kind: "update", machine, project: row.project, thread: row.thread, said: row.said, detail: { held: "progress" } }),
+            ),
+          }),
       logged: written.expect.intent === undefined ? {} : { intent: written.expect.intent },
       expect: written.expect,
       note: written.note,
@@ -898,8 +1000,12 @@ const asUpdate = (told: Told, at: number): Conversation.Update => ({
   ...(told.ref === undefined ? {} : told.owner === true ? { owner: told.ref } : { about: told.ref }),
 })
 
-/** What the Brain goes by for a reply over an update, or to an answer, as the assistant puts it together, with what's live stubbed. */
-const situation = (case_: Case, base: T3Live.View): Brain.Situation => {
+/**
+ * What the Brain goes by for a reply over an update, or to an answer, as the
+ * assistant puts it together, with what's live stubbed. Handed over, the
+ * desk is about the thread the update is from, a rig update's by `owner` too.
+ */
+const situation = (case_: Case, base: T3Live.View, handoff = false): Brain.Situation => {
   const now = case_.at
   const told = case_.update
   const update = told === undefined ? undefined : asUpdate(told, now)
@@ -921,7 +1027,7 @@ const situation = (case_: Case, base: T3Live.View): Brain.Situation => {
   const threads = Threads.shortlist({
     machine: machineName,
     view: here,
-    focus: Option.fromNullable(update?.about),
+    focus: Option.fromNullable(handoff ? (update?.about ?? update?.owner) : update?.about),
     pending: [],
     heard: case_.heard,
     most: 12,
@@ -931,6 +1037,7 @@ const situation = (case_: Case, base: T3Live.View): Brain.Situation => {
     others,
     now,
   })
+  const desk: Threads.Desk = { threads, away: [] }
   return {
     utterance: {
       id: `eval-${case_.id}`,
@@ -945,15 +1052,17 @@ const situation = (case_: Case, base: T3Live.View): Brain.Situation => {
     subject,
     lines: case_.lines,
     open: Option.none(),
-    desk: { threads, away: [] },
+    desk,
     lately: case_.lately ?? [],
-    missed: { since: now - day, spoke: now - day, groups: [] },
+    missed: { since: now - day, spoke: now - day, groups: Missed.group(case_.unheard ?? [], desk) },
     mutes: [],
     muteChange: Option.none(),
     usage: Option.none(),
     second: Option.none(),
     asked: [],
-    acted: Option.none(),
+    acted: Option.fromNullable(case_.acted),
+    ...(case_.acted === undefined ? {} : { recent: [case_.acted] }),
+    ...(case_.routines === undefined ? {} : { memories: { kept: [], written: case_.routines } }),
     now,
   }
 }
@@ -968,6 +1077,7 @@ const interruption = (case_: Case, told: Told): Baseline.Interruption => ({
   ...(case_.echo === undefined ? {} : { echo: case_.echo, ...(case_.afterPause === undefined ? {} : { afterPause: case_.afterPause }) }),
   ...(case_.left === undefined ? {} : { unsaid: case_.left }),
   ...(told.more === undefined ? {} : { more: told.more }),
+  ...(case_.routines === undefined ? {} : { routines: case_.routines.map(({ name }) => name) }),
 })
 
 interface Result {
@@ -980,6 +1090,8 @@ interface Result {
   /** As the Responder's intents are, with "elsewhere" for a send to another thread than the update's own. */
   readonly intent: string
   readonly act?: string
+  /** Handed over, the Brain's "how" for its act, like which tidy it is. */
+  readonly how?: string
   readonly target?: string
   readonly title?: string
   readonly checked?: string
@@ -988,7 +1100,37 @@ interface Result {
   readonly rest?: string
   readonly failed?: string
   /** The Brain's decision as the model or `fast` gave it, before `check`: only to look into, never scored. */
-  readonly raw?: { readonly act: string; readonly target?: string; readonly spoken?: string; readonly message?: string; readonly rest?: string }
+  readonly raw?: { readonly act: string; readonly how?: string; readonly target?: string; readonly machine?: string; readonly spoken?: string; readonly message?: string; readonly rest?: string }
+  /** Which run of the case this is, from 1, when it's worked out more than once. */
+  readonly run?: number
+  /** Batch 3's: how it was routed, what handed it over, and how the Brain worked it out, with its part of the time and the Responder's. */
+  readonly route?: string
+  readonly handedBy?: "hook" | "responder"
+  /** Handed over by the Responder, what it answered: "assistant", or a "send" of what may all be yapd's own words. */
+  readonly responded?: string
+  readonly brainSource?: string
+  readonly brainMs?: number
+  readonly responderMs?: number
+  /** Whether what's said over it goes to its thread by yapd's own hand, and whether he's at hand. */
+  readonly steered?: boolean
+  readonly present?: boolean
+  /** For a Pass, what's said of the rest left. */
+  readonly left?: string
+  /**
+   * For an Act: whether its first step was left for the update's own session,
+   * or about mutes, what it does, unless that's turned down while he isn't at
+   * hand, and whether all of it may be yapd's own words.
+   */
+  readonly leftFirst?: boolean
+  readonly done?: string
+  readonly doubted?: boolean
+  /** Its rest, worked out as the next step: what it does, to which thread, and whether it's left. */
+  readonly restAct?: string
+  readonly restTitle?: string
+  readonly restLeft?: boolean
+  /** Writes to the update's own thread over an unsteered update that nothing left, which must be none, and how many were left. */
+  readonly ownByHands?: number
+  readonly leftOver?: number
 }
 
 /** The Brain's act, as the Responder's intent it'd be: what it reads is an answer, and a send to another thread than "it" is elsewhere. */
@@ -1015,13 +1157,30 @@ const intentOf = (decision: Brain.Decision, ownHandle: string | undefined) => {
 /** What changes something, which what was only an answer, a dismissal or talk not meant for yapd may never come to. */
 const changing = new Set(["send", "elsewhere", "reply", "decide", "stop", "undo", "tidy", "start", "mute", "mode", "remind", "remember", "forget"])
 
+/** What the Brain decided, as it's logged beside a result, before `check`. */
+const rawOf = (decision: Brain.Decision) => ({
+  act: decision.act,
+  ...(decision.how === "" ? {} : { how: decision.how }),
+  ...(decision.target === "" ? {} : { target: decision.target }),
+  ...(decision.machine === "" ? {} : { machine: decision.machine }),
+  ...(decision.spoken === "" ? {} : { spoken: decision.spoken }),
+  ...(decision.text === "" ? {} : { message: decision.text }),
+  ...(decision.rest === "" ? {} : { rest: decision.rest }),
+})
+
 const run = Effect.gen(function* () {
   const paths = option("path", "baseline").split(",").filter((path) => path !== "")
-  if (paths.includes("m4")) return yield* Effect.dieMessage("The m4 path comes with batch 3: run baseline or brain.")
-  const unknown = paths.filter((path) => path !== "baseline" && path !== "brain")
+  const unknown = paths.filter((path) => path !== "baseline" && path !== "brain" && path !== "m4")
   if (unknown.length > 0 || paths.length === 0) return yield* Effect.dieMessage(`Unknown path: ${unknown.join(", ")}`)
-  const era = option("era", "all")
-  const only = new Set(option("only", "").split(",").filter((id) => id !== ""))
+  // One era or several, as "log,journal" for the gate.
+  const eras = option("era", "all").split(",").filter((era) => era !== "")
+  const unknownEras = eras.filter((era) => era !== "all" && era !== "log" && era !== "journal" && era !== "synthetic")
+  if (unknownEras.length > 0 || eras.length === 0) return yield* Effect.dieMessage(`Unknown era: ${unknownEras.join(", ")}`)
+  const inEra = (era: Case["era"]) => eras.includes("all") || eras.includes(era)
+  // Run again, only those, three times more: a disagreement or a hard fail counts once it holds in two of the three.
+  const rerun = new Set(option("rerun", "").split(",").filter((id) => id !== ""))
+  const only = rerun.size > 0 ? rerun : new Set(option("only", "").split(",").filter((id) => id !== ""))
+  const repeat = rerun.size > 0 ? 3 : Math.max(1, Math.floor(Number(option("repeat", "1"))) || 1)
   const limit = Number(option("limit", "0"))
   machineName = Option.getOrElse(yield* Config.name, () => machineName)
 
@@ -1039,10 +1198,10 @@ const run = Effect.gen(function* () {
 
   const every = [...saved.cases, ...written.cases]
   const chosen = every
-    .filter((case_) => era === "all" || case_.era === era)
+    .filter((case_) => inEra(case_.era))
     .filter((case_) => only.size === 0 || only.has(case_.id))
     .slice(0, limit > 0 ? limit : undefined)
-  const whole = only.size === 0 && limit === 0 && era === "all"
+  const whole = only.size === 0 && limit === 0 && (["log", "journal", "synthetic"] as const).every(inEra)
 
   const out = option("out", folder)
   yield* Effect.promise(() => mkdir(out, { recursive: true }))
@@ -1052,9 +1211,11 @@ const run = Effect.gen(function* () {
   const baselineFile = join(out, `reply-baseline-${sha}.jsonl`)
   const baselineWriter = whole && paths.includes("baseline") ? Bun.file(baselineFile).writer() : undefined
 
-  const context = yield* Layer.build(Layer.provideMerge(Brain.ProviderBrain, ProviderModel))
+  // The live Responder over the same model, with the plain persona, beside the Brain.
+  const context = yield* Layer.build(Layer.provideMerge(Layer.mergeAll(Brain.ProviderBrain, Responder.ProviderResponder), Layer.merge(ProviderModel, Persona.Plain)))
   const model = Context.get(context, Model)
   const brain = Context.get(context, Brain.Brain)
+  const responder = Context.get(context, Responder.Responder)
   const style = yield* Config.style
   const lines = Persona.plain
   yield* Console.log(`${chosen.length} cases, on ${paths.join(" and ")}, one model call at a time.`)
@@ -1131,21 +1292,257 @@ const run = Effect.gen(function* () {
       } satisfies Result
     })
 
+  /**
+   * Batch 3's handoff, as Conversation.reading works out what he said over an
+   * update, plainly his or not: "Mute." and the mute hook's commands in so
+   * many words, with nothing done; saying it again; the live Responder, told
+   * how long he spoke and how late, a second and none unless the case says;
+   * and what it hands over, its message of what may all be yapd's own words
+   * included, or the hook does, worked out by the Brain on the
+   * update as "it", with its own thread, as said back to a "done" line, and
+   * routed as the assistant routes it. An Act's first step is checked and
+   * guarded, and turned down as what only his word does while he isn't at
+   * hand, as the assistant turns it down, and its rest worked out as the
+   * next step is, with the update still "this one", and "it" too unless the
+   * step before went to another thread, and checked and guarded too,
+   * nothing of either done.
+   */
+  const handoff = (case_: Case) =>
+    Effect.gen(function* () {
+      const told = case_.update
+      if (case_.by !== "responder" || told === undefined) return undefined
+      const situated = situation(case_, case_.era === "synthetic" ? written.view : base, true)
+      if (situated.subject._tag !== "Session") return undefined
+      const session = situated.subject
+      const { update } = session
+      // Unsteered where how a send went isn't known, as hooks carried 47 of the 52 deliveries logged.
+      const steered = case_.steered ?? told.steered ?? false
+      const present = case_.present ?? true
+      const ref = update.subagent === undefined ? (update.about ?? update.owner) : undefined
+      const own: Brain.Own = { ...(ref === undefined ? {} : { ref }), steered }
+      const ownHandle = ref === undefined ? undefined : situated.desk.threads.find((listed) => Threads.same(listed.ref, ref))?.handle
+      const voiced = case_.voiced ?? 1
+      const echo = case_.echo
+      const afterPause = case_.afterPause ?? ""
+      // The hook's, plainly his only, as Daemon has it: a change in so many words, done, or what's about mutes in other words, handed over.
+      const plain = echo === undefined && voiced >= Brain.faintest
+      const hooked: Option.Option<Conversation.Hooked> = !plain
+        ? Option.none()
+        : Option.isSome(Brain.modeCommand(case_.heard, told.needsYou))
+          ? Option.some({ _tag: "Done", made: "mode", doing: Effect.succeed("") })
+          : Option.isSome(Mutes.command(case_.heard))
+            ? Option.some({ _tag: "Done", made: "mute", doing: Effect.succeed("") })
+            : Mutes.aboutSubagents(case_.heard) || Mutes.aboutMuting(case_.heard)
+              ? Option.some({ _tag: "Over", line: Effect.succeed("") })
+              : Option.none()
+      /** What came of what was handed over, beside what the reading gives back. */
+      let handed: Partial<Result> & { readonly brainMs?: number } = {}
+      /** What's said of a first step left, as the assistant says it: tidying a session with no thread, or a subagent, plainly, or anything else, in his words. */
+      const leftSaid = (decision: Brain.Decision, by: Brain.Handed | undefined, heard: string, desk: Threads.Desk) => {
+        const said = Brain.handoffLines(lines)
+        if (decision.act === "tidy" && by?.muting !== true) return said.untidied(decision.how, Brain.headCalled(update, desk))
+        return said.left(decision.rest.trim() === "" ? heard : decision.text.trim() || heard, desk)
+      }
+      let failed: string | undefined
+      let responderMs: number | undefined
+      let responded: string | undefined
+      const over =
+        (muting: boolean) =>
+        (heard: string): Effect.Effect<Conversation.Handed> =>
+          Effect.gen(function* () {
+            const began = performance.now()
+            const utterance: Assistant.Utterance = {
+              ...situated.utterance,
+              heard,
+              voiced,
+              afterDone: case_.done ?? {},
+              ...(case_.left === undefined ? {} : { unsaid: case_.left }),
+              handed: { present, ...(muting || Mutes.mentionsMuting(heard) ? { muting: true as const } : {}) },
+              own,
+            }
+            const subject = { ...session, own: ref === undefined ? {} : { ref } }
+            const handedOver: Brain.Situation = { ...situated, utterance, subject }
+            const quick = Brain.fast(handedOver, lines)
+            const taken = quick !== undefined && Brain.atOnce(quick, utterance, handedOver.subject) ? quick : undefined
+            const decided = taken === undefined ? yield* Effect.either(brain.decide(handedOver)) : Either.right(taken)
+            const brainMs = performance.now() - began
+            if (Either.isLeft(decided)) failed = String(decided.left.cause)
+            const decision = Either.isLeft(decided) ? Brain.decision({ act: "answer", spoken: "I couldn't work that out just now." }) : decided.right
+            const source = Either.isLeft(decided) ? "failed" : taken === undefined ? "model" : "fast"
+            const routed = Brain.route(decision, handedOver, lines)
+            const checked = Brain.check(decision, handedOver, lines)
+            const leftFirst = Brain.leftOver(decision, own, utterance.handed, handedOver)
+            // While he isn't at hand, a first step only his word does, with more after it, is acted on only to be turned down.
+            const turnedDown = routed._tag === "Act" && routed.unattended === true
+            /**
+             * Whether a checked write reaches the turn of the update's own thread, as `Brain.turnOf` has it, over an unsteered update: by
+             * thread, or one with none, by none. Never tidying it, nor taking back what tidying did, which change nothing of its turn.
+             */
+            const ownWrite = (plan: Brain.Plan) => {
+              const turn = Brain.turnOf(plan.decision, handedOver)
+              if (steered || turn === undefined) return false
+              if (turn !== "named") return ref !== undefined && Threads.same(turn, ref)
+              return ref === undefined
+                ? plan.decision.target.trim() === "" && plan.decision.act !== "undo"
+                : Option.exists(plan.target, (listed) => Threads.same(listed.ref, ref))
+            }
+            let ownByHands = routed._tag === "Act" && !leftFirst && checked._tag === "Do" && ownWrite(checked.plan) ? 1 : 0
+            let leftOver = routed._tag === "Act" && leftFirst ? 1 : 0
+            const plan = checked._tag === "Do" ? checked.plan : undefined
+            // Its rest, as the next step works it out, from what he said, never what may be yapd's own voice: the update still "this one",
+            // and "it" too, unless the step before went to another thread, which "it" is then.
+            const on = leftFirst || turnedDown || plan === undefined ? Option.none<Threads.Ref>() : Option.map(plan.target, ({ ref }) => ref)
+            let rest: Partial<Result> = {}
+            if (routed._tag === "Act" && decision.rest.trim() !== "") {
+              const { echo: _, afterPause: __, echoRoutines: ___, carried: ____, afterDone: _____, ...before } = utterance
+              const next: Assistant.Utterance = {
+                ...before,
+                heard: decision.rest,
+                whole: utterance.whole ?? (utterance.echo === undefined ? utterance.heard : ""),
+                ...(Brain.mayBeOwn(utterance) ? { echoedBack: true as const } : {}),
+              }
+              const then: Brain.Situation = {
+                ...handedOver,
+                subject: Brain.itAfter(subject, on),
+                utterance: next,
+                lines: [{ speaker: "user", text: heard, ...Brain.overheard(utterance) }],
+              }
+              const restQuick = Brain.fast(then, lines)
+              const restTaken = restQuick !== undefined && Brain.atOnce(restQuick, next, then.subject) ? restQuick : undefined
+              const restDecided = restTaken === undefined ? yield* Effect.either(brain.decide(then)) : Either.right(restTaken)
+              if (Either.isRight(restDecided)) {
+                const restChecked = Brain.check(restDecided.right, then, lines)
+                const restLeft = Brain.leftOver(restDecided.right, own, next.handed, then)
+                if (restLeft) leftOver++
+                else if (restChecked._tag === "Do" && ownWrite(restChecked.plan)) ownByHands++
+                const listed = restChecked._tag === "Do" ? Option.getOrUndefined(restChecked.plan.target) : undefined
+                rest = { restAct: restChecked._tag === "Do" ? restChecked.plan.decision.act : restChecked._tag === "Ask" ? "clarify" : "answer", ...(listed === undefined ? {} : { restTitle: listed.thread.title }), restLeft }
+              }
+            }
+            const listed = plan === undefined ? undefined : (Option.getOrUndefined(plan.target) ?? handedOver.desk.threads.find(({ handle }) => handle === plan.decision.target))
+            handed = {
+              handedBy: muting ? "hook" : "responder",
+              brainSource: source,
+              brainMs,
+              route: routed._tag,
+              act: plan?.decision.act ?? decision.act,
+              ...((plan?.decision.how ?? decision.how) === "" ? {} : { how: plan?.decision.how ?? decision.how }),
+              ...(decision.target === "" ? {} : { target: decision.target }),
+              ...(listed === undefined ? {} : { title: listed.thread.title }),
+              checked: checked._tag,
+              ...(leftFirst
+                ? { spoken: leftSaid(decision, utterance.handed, heard, handedOver.desk) }
+                : turnedDown
+                ? { spoken: Brain.handoffLines(lines).shortcut }
+                : checked._tag === "Ask"
+                  ? { spoken: checked.open.asked }
+                  : checked._tag === "Say"
+                    ? { spoken: checked.spoken }
+                    : plan?.decision.spoken === "" || plan === undefined
+                      ? {}
+                      : { spoken: plan.decision.spoken }),
+              ...(decision.text === "" ? {} : { message: decision.text }),
+              ...(decision.rest === "" ? {} : { rest: decision.rest }),
+              ...(routed._tag === "Pass" && routed.left !== undefined ? { left: routed.left } : {}),
+              ...(routed._tag === "Act" ? { leftFirst, ...(plan === undefined || turnedDown ? {} : { done: plan.decision.act }), doubted: routed.doubted } : {}),
+              ...rest,
+              ownByHands,
+              leftOver,
+              raw: rawOf(decision),
+              intent:
+                routed._tag === "Resume"
+                  ? "resume"
+                  : routed._tag === "Dismiss"
+                    ? "dismiss"
+                    : routed._tag === "Answer"
+                      ? "answer"
+                      : routed._tag === "Pass"
+                        ? "send"
+                        : leftFirst || turnedDown
+                          ? "answer"
+                          : checked._tag === "Ask"
+                            ? "clarify"
+                            : checked._tag === "Say"
+                              ? "answer"
+                              : intentOf(checked.plan.decision, ownHandle),
+            }
+            const how = { source, ms: brainMs, ...(source === "model" ? { modelMs: brainMs } : {}), routed: routed._tag.toLowerCase() } as const
+            return routed._tag === "Act" ? { ...routed, ...how, run: () => Effect.void } : { ...routed, ...how }
+          })
+      const began = performance.now()
+      const worked = yield* Conversation.reading({
+        heard: case_.heard,
+        voiced,
+        afterPause,
+        halt: halts(case_.heard) && !/mute/i.test(echo ?? ""),
+        echo,
+        needsYou: told.needsYou,
+        hooked,
+        may: true,
+        respond: (heard) =>
+          Effect.gen(function* () {
+            const asked = performance.now()
+            const answered = yield* Effect.either(responder.respond({ ...interruption(case_, told), heard, voiced, lateBy: case_.lateBy ?? 0 }))
+            responderMs = performance.now() - asked
+            if (Either.isLeft(answered)) {
+              failed = String(answered.left.cause)
+              return { reply: { intent: "answer", spoken: lines.misheard, message: "" }, source: "failed" } satisfies Conversation.Worked
+            }
+            responded = answered.right.reply.intent
+            return { reply: answered.right.reply, source: answered.right.source, ...(answered.right.modelMs === undefined ? {} : { modelMs: answered.right.modelMs }) } satisfies Conversation.Worked
+          }),
+        over: (muting) => over(muting),
+        shortcut: Effect.succeed(Brain.handoffLines(lines).shortcut),
+      })
+      const ms = performance.now() - began
+      const { reply, source, modelMs } = worked
+      const route = source === "again" ? "Again" : source === "mute" ? "Hook" : worked.handed === undefined ? "Responder" : worked.handed._tag
+      return {
+        id: case_.id,
+        era: case_.era,
+        path: "m4",
+        source,
+        ms,
+        ...(modelMs === undefined ? {} : { modelMs }),
+        ...(responderMs === undefined ? {} : { responderMs }),
+        steered,
+        present,
+        intent: source === "mute" ? "mute" : reply.intent === "assistant" ? "answer" : reply.intent,
+        ...(reply.spoken === "" ? {} : { spoken: reply.spoken }),
+        ...(reply.message === "" ? {} : { message: reply.message }),
+        ...(worked.handed === undefined ? {} : handed),
+        ...(worked.handed === undefined || handed.handedBy !== "responder" || responded === undefined ? {} : { responded }),
+        route,
+        ...(failed === undefined ? {} : { failed }),
+      } satisfies Result
+    })
+
   const done: Array<Result> = []
   for (const [index, case_] of chosen.entries()) {
     // Each path goes first on every other case, so the model's speed drifting over the run falls on both alike.
     const order = index % 2 === 0 ? paths : paths.toReversed()
-    for (const path of order) {
-      const result = path === "baseline" ? yield* baseline(case_) : yield* thinking(case_)
-      if (result === undefined) continue
-      done.push(result)
-      writer.write(`${JSON.stringify({ ...result, expected: expected(case_, labels), logged: case_.logged, flags: case_.flags })}\n`)
-      if (path === "baseline") baselineWriter?.write(`${JSON.stringify(result)}\n`)
+    for (let time = 1; time <= repeat; time++) {
+      for (const path of order) {
+        const worked = path === "baseline" ? yield* baseline(case_) : path === "m4" ? yield* handoff(case_) : yield* thinking(case_)
+        if (worked === undefined) continue
+        const result = repeat === 1 ? worked : { ...worked, run: time }
+        done.push(result)
+        writer.write(`${JSON.stringify({ ...result, expected: expected(case_, labels), logged: case_.logged, flags: case_.flags })}\n`)
+        if (path === "baseline" && time === 1) baselineWriter?.write(`${JSON.stringify(worked)}\n`)
+      }
     }
   }
   yield* Effect.promise(() => Promise.resolve(writer.end()))
   if (baselineWriter !== undefined) yield* Effect.promise(() => Promise.resolve(baselineWriter.end()))
-  yield* Console.log(report(chosen, done, paths, labels))
+  // Batch 1's baseline, the same frozen code, whose agreement with today's is the noise floor.
+  const batch1 = yield* Effect.promise(() =>
+    Bun.file(join(folder, "reply-baseline-c319ce0.jsonl"))
+      .text()
+      .then((text) => text.split("\n").filter((line) => line.trim() !== "").map((line) => JSON.parse(line) as Result))
+      .catch(() => [] as Array<Result>),
+  )
+  if (rerun.size > 0) yield* Console.log(reruns(chosen, done, paths, labels))
+  yield* Console.log(report(chosen, done, paths, labels, batch1))
   yield* Console.log(`Every answer is in ${results}.${baselineWriter === undefined ? "" : ` The baseline's are kept in ${baselineFile} too.`}`)
 }).pipe(Effect.scoped)
 
@@ -1166,6 +1563,7 @@ const agrees = (case_: Case, result: Result, labels: typeof Labels.Type) => {
 const meets = (case_: Case, result: Result): boolean | undefined => {
   const expect = case_.expect
   if (expect === undefined) return undefined
+  if (result.path === "m4") return meetsHandoff(case_, expect, result)
   const checks: Array<boolean> = []
   if (expect.intent !== undefined && (result.path === "baseline" || expect.act === undefined)) checks.push(result.intent === expect.intent)
   if (expect.neverIntent !== undefined && result.path === "baseline") checks.push(!expect.neverIntent.includes(result.intent as Intent))
@@ -1179,7 +1577,53 @@ const meets = (case_: Case, result: Result): boolean | undefined => {
   return checks.length === 0 ? undefined : checks.every(Boolean)
 }
 
+/**
+ * Whether batch 3's path meets a written case: the Responder's intent when it
+ * kept it, the Brain's act, thread and rest when it was handed over, what
+ * it may come to, how it's routed and worked out, what a Pass left, whether
+ * the rest was left and which thread it reached, what of what he said is
+ * never dropped, what's never done, what a question names, what handed it
+ * over, what's never said and what is, and the Brain's "how" for it; and
+ * always, nothing written by yapd's own hand to an unsteered update's own
+ * thread, nor a Pass that loses a negation he said or puts in words nothing
+ * said.
+ */
+const meetsHandoff = (case_: Case, expect: Expect, result: Result): boolean => {
+  const handed = result.route !== undefined && !["Again", "Hook", "Responder"].includes(result.route)
+  const lower = (text: string | undefined) => (text ?? "").toLowerCase()
+  const checks: Array<boolean> = [(result.ownByHands ?? 0) === 0]
+  if (expect.intent !== undefined && (!handed || expect.act === undefined)) checks.push(result.intent === expect.intent)
+  if (expect.intents !== undefined) checks.push(expect.intents.includes(result.intent))
+  if (expect.neverIntent !== undefined) checks.push(!expect.neverIntent.includes(result.intent as Intent))
+  if (expect.act !== undefined && (handed || expect.intent === undefined)) checks.push(result.act !== undefined && expect.act.includes(result.act as Brain.Act))
+  if (expect.never !== undefined) checks.push(result.act === undefined || !expect.never.includes(result.act as Brain.Act))
+  if (expect.target !== undefined) checks.push(expect.target === "own" ? result.intent === "send" : lower(result.title).includes(lower(expect.target)))
+  if (expect.rest !== undefined) checks.push(lower(result.rest).includes(lower(expect.rest)) || lower(result.left).includes(lower(expect.rest)))
+  if (expect.route !== undefined) checks.push(expect.route.includes(result.route as typeof Route.Type))
+  if (expect.neverRoute !== undefined) checks.push(!expect.neverRoute.includes(result.route as typeof Route.Type))
+  if (expect.source !== undefined) checks.push(result.source === expect.source || result.brainSource === expect.source)
+  if (expect.left !== undefined) checks.push(lower(result.left).includes(lower(expect.left)))
+  if (expect.restLeft !== undefined) checks.push((result.restLeft === true) === expect.restLeft)
+  if (expect.restTarget !== undefined) checks.push(result.restAct === undefined || (["send", "reply"].includes(result.restAct) && lower(result.restTitle).includes(lower(expect.restTarget))))
+  if (expect.carries !== undefined) {
+    const piece = lower(expect.carries)
+    const restKept = result.restLeft === true || ["send", "reply", "clarify"].includes(result.restAct ?? "")
+    checks.push(lower(result.message).includes(piece) || lower(result.left).includes(piece) || (restKept && lower(result.rest).includes(piece)))
+  }
+  if (expect.neverDone !== undefined) checks.push(result.done === undefined || result.leftFirst === true || !expect.neverDone.includes(result.done as Brain.Act))
+  if (expect.asking !== undefined) checks.push(result.checked !== "Ask" || lower(result.spoken).includes(lower(expect.asking)))
+  if (expect.handedBy !== undefined) checks.push(result.handedBy === expect.handedBy)
+  if (expect.neverSpoken !== undefined) checks.push(!expect.neverSpoken.some((words) => lower(result.spoken).includes(lower(words))))
+  if (expect.says !== undefined) checks.push((expect.asking !== undefined && result.checked === "Ask") || lower(result.spoken).includes(lower(expect.says)))
+  if (expect.how !== undefined) checks.push(handed && result.how === expect.how)
+  if (result.route === "Pass") checks.push(!lostNegation(case_, result) && unfounded(case_, result.message ?? "") <= 2)
+  return checks.every(Boolean)
+}
+
 const negations = /\b(don't|do not|not|never|no|leave|keep)\b/i
+
+/** Whether a message for the agent leaves out a negation he said. */
+const lostNegation = (case_: Case, result: Result) => negations.test(case_.heard) && result.message !== undefined && !negations.test(result.message)
 
 /** The words of a message for the agent that are in neither what he said, the agent's message nor the conversation. */
 const unfounded = (case_: Case, message: string) => {
@@ -1187,14 +1631,88 @@ const unfounded = (case_: Case, message: string) => {
   return [...words(message)].filter((word) => word.length > 4 && !known.has(word)).length
 }
 
-const report = (cases: ReadonlyArray<Case>, done: ReadonlyArray<Result>, paths: ReadonlyArray<string>, labels: typeof Labels.Type) => {
+/** A case's results on a path, every run of it. */
+const runsOf = (done: ReadonlyArray<Result>, path: string, id: string) => done.filter((result) => result.path === path && result.id === id)
+
+/** Of several runs of a case, the one whose intent most of them came to: the first such, so a case run once is that run. */
+const modal = (runs: ReadonlyArray<Result>): Result | undefined => {
+  const counts = new Map<string, number>()
+  for (const { intent } of runs) counts.set(intent, (counts.get(intent) ?? 0) + 1)
+  const most = Math.max(0, ...counts.values())
+  return runs.find(({ intent }) => counts.get(intent) === most)
+}
+
+/** Whether most of a case's runs meet it, or none of its expectations apply to the path. */
+const meetsMost = (case_: Case, runs: ReadonlyArray<Result>): boolean | undefined => {
+  const judged = runs.map((result) => meets(case_, result)).filter((met): met is boolean => met !== undefined)
+  return judged.length === 0 ? undefined : judged.filter(Boolean).length * 2 > judged.length
+}
+
+/**
+ * Whether a result is a hard fail: what was only an answer, a dismissal or
+ * talk not meant for yapd that came to a change, a confirmed acknowledgement
+ * that became a write, a logged send to another thread than the update's
+ * own; and for batch 3, a write by yapd's own hand to an unsteered update's
+ * own thread, a Pass that's faint, about mutes, over what may be yapd's own
+ * words or a routine's name, a send of the Responder's own over what may be
+ * yapd's own words, and on a written case, a Pass that loses a negation he
+ * said. A logged "ask me that with the shortcut" that came to the mode,
+ * mute, catch-up or tidying it named is listed for his verdict instead.
+ */
+const hardFail = (case_: Case, result: Result, labels: typeof Labels.Type) => {
+  if (case_.by !== "responder") return false
+  const wanted = expected(case_, labels)
+  const label = labels[case_.id]
+  if (result.path === "m4" && verdictOnly(case_, result)) return false
+  const passed = result.route === "Pass"
+  // Sent to the update's own agent, as a Pass or by the Responder itself.
+  const sent = passed || (result.route === "Responder" && result.intent === "send")
+  return (
+    (["dismiss", "answer", "resume"].includes(String(wanted)) && changing.has(result.intent)) ||
+    (label?.status === "confirmed" && label.intent === "dismiss" && changing.has(result.intent)) ||
+    (wanted === "send" && result.intent === "elsewhere") ||
+    (wanted === "send" && result.path === "m4" && ["start", "stop", "undo", "tidy", "mute", "mode", "remind", "remember", "forget"].includes(result.intent)) ||
+    (result.ownByHands ?? 0) > 0 ||
+    (passed && ((case_.voiced ?? 1) < Brain.faintest || Mutes.mentionsMuting(case_.heard))) ||
+    (sent && case_.echo !== undefined && (case_.afterPause ?? "").trim() === "") ||
+    (passed && (case_.routines ?? []).some(({ name }) => Brain.nameSaid(name, { heard: case_.heard }))) ||
+    (passed && case_.era === "synthetic" && lostNegation(case_, result))
+  )
+}
+
+/** A logged "ask me that with the shortcut" that batch 3 turned into the mode, mute, catch-up or tidying it named, for his verdict. */
+const verdictOnly = (case_: Case, result: Result) =>
+  case_.logged.intent === "answer" && /shortcut/i.test(case_.logged.spoken ?? "") && (["mode", "mute", "tidy"].includes(result.intent) || result.act === "catchup")
+
+/** Each case run again, by path: what each run came to, and how many of them disagree with what's expected or are hard fails. */
+const reruns = (cases: ReadonlyArray<Case>, done: ReadonlyArray<Result>, paths: ReadonlyArray<string>, labels: typeof Labels.Type) =>
+  cases
+    .map((case_) =>
+      [
+        `${case_.id}:`,
+        ...paths.map((path) => {
+          const runs = runsOf(done, path, case_.id)
+          if (runs.length === 0) return `${path} -`
+          const against = case_.era === "synthetic" ? runs.filter((result) => meets(case_, result) === false).length : runs.filter((result) => !agrees(case_, result, labels)).length
+          const failing = runs.filter((result) => hardFail(case_, result, labels)).length
+          return `${path} ${runs.map(({ intent }) => intent).join(" ")} (${case_.era === "synthetic" ? "not met" : "disagrees"} ${against}/${runs.length}, hard fails ${failing}/${runs.length})`
+        }),
+      ].join(" "),
+    )
+    .join("\n")
+
+const report = (cases: ReadonlyArray<Case>, done: ReadonlyArray<Result>, paths: ReadonlyArray<string>, labels: typeof Labels.Type, batch1: ReadonlyArray<Result> = []) => {
   const byId = new Map(cases.map((case_) => [case_.id, case_]))
   const lines: Array<string> = []
   const ids = (those: ReadonlyArray<Result>) => (those.length === 0 ? "none" : those.map(({ id }) => id).join(" "))
+  /** Each case's result on a path, by the majority of its runs. */
+  const modals = (path: string) =>
+    cases.flatMap((case_) => Option.toArray(Option.fromNullable(modal(runsOf(done, path, case_.id)))))
   for (const path of paths) {
-    const mine = done.filter((result) => result.path === path)
+    const all = done.filter((result) => result.path === path)
+    const mine = modals(path)
     const logged = mine.filter((result) => byId.get(result.id)?.era !== "synthetic")
-    lines.push(`${path}: ${mine.length} run, ${mine.filter(({ failed }) => failed !== undefined).length} failed.`)
+    lines.push(`${path}: ${all.length} run, ${all.filter(({ failed }) => failed !== undefined).length} failed${all.length === mine.length ? "" : `, ${mine.length} cases by the majority of their runs`}.`)
     for (const era of ["log", "journal"] as const) {
       const those = logged.filter((result) => result.era === era)
       if (those.length === 0) continue
@@ -1207,55 +1725,74 @@ const report = (cases: ReadonlyArray<Case>, done: ReadonlyArray<Result>, paths: 
         lines.push(`    ${intent}: ${group.length - missed.length}/${group.length}${missed.length === 0 ? "" : `, missed ${ids(missed)}`}`)
       }
     }
-    // Hard fails: what was only an answer, a dismissal or talk not meant for yapd that came to a change, a confirmed acknowledgement
-    // that became a write, a logged send to another thread than the update's own.
-    const hard = logged.filter((result) => {
-      const case_ = byId.get(result.id)!
-      if (case_.by !== "responder") return false
-      const wanted = expected(case_, labels)
-      const label = labels[case_.id]
-      return (
-        (["dismiss", "answer", "resume"].includes(String(wanted)) && changing.has(result.intent)) ||
-        (label?.status === "confirmed" && label.intent === "dismiss" && changing.has(result.intent)) ||
-        (wanted === "send" && result.intent === "elsewhere")
-      )
-    })
+    const hard = logged.filter((result) => hardFail(byId.get(result.id)!, result, labels))
     // Those over a line kept whole as where he cut it off isn't known, which may be the replay's doing, like a question he hadn't heard.
     const uncut = hard.filter((result) => byId.get(result.id)!.flags.includes("cut-unknown"))
     lines.push(`  Hard fails: ${hard.length}${hard.length === 0 ? "" : `: ${ids(hard)}`}${uncut.length === 0 ? "" : `; where he cut in isn't known for ${ids(uncut)}`}.`)
     const ms = logged.filter(({ failed }) => failed === undefined).map(({ ms }) => ms)
-    const model = logged.filter(({ source }) => source === "model")
+    const model = logged.filter(({ source, modelMs }) => source === "model" || modelMs !== undefined)
     lines.push(
       `  Latency: p50 ${seconds(percentile(ms, 0.5))}, p90 ${seconds(percentile(ms, 0.9))}; with the model p50 ${seconds(percentile(model.map(({ ms }) => ms), 0.5))}, p90 ${seconds(percentile(model.map(({ ms }) => ms), 0.9))}; worked out without it ${logged.length === 0 ? "-" : `${((100 * (logged.length - model.length)) / logged.length).toFixed(0)}%`}.`,
     )
+    if (path === "m4") {
+      // What was handed over, by era, by id, and how; how steered was taken; and the guard at work.
+      for (const era of ["log", "journal", "synthetic"] as const) {
+        const handed = mine.filter((result) => result.era === era && result.handedBy !== undefined)
+        const of = mine.filter((result) => result.era === era).length
+        if (of > 0) lines.push(`  Handed over, ${era}: ${handed.length}/${of}${handed.length === 0 ? "" : `: ${handed.map(({ id, route, act, responded }) => `${id} (${route}, ${act}${responded === "send" ? ", from the Responder's send" : ""})`).join(" ")}`}.`)
+      }
+      lines.push(`  Taken as steered: ${mine.filter(({ steered }) => steered === true).length}, unsteered: ${mine.filter(({ steered }) => steered === false).length}.`)
+      lines.push(`  Written by yapd's own hand to an unsteered update's own thread: ${all.reduce((sum, { ownByHands }) => sum + (ownByHands ?? 0), 0)}; left for it: ${all.reduce((sum, { leftOver }) => sum + (leftOver ?? 0), 0)}.`)
+      lines.push(`  A logged "ask me that with the shortcut" that came to what it named, for his verdict: ${ids(logged.filter((result) => verdictOnly(byId.get(result.id)!, result)))}.`)
+      const handoffs = all.filter((result) => result.era === "synthetic" && result.handedBy !== undefined && result.failed === undefined)
+      const asked = handoffs.filter(({ brainSource }) => brainSource === "model")
+      const unasked = handoffs.filter(({ brainSource }) => brainSource === "fast")
+      lines.push(`  A handoff's p50, Responder and Brain together, on the written cases: with the Brain's model ${seconds(percentile(asked.map(({ ms }) => ms), 0.5))} (${asked.length}), without ${seconds(percentile(unasked.map(({ ms }) => ms), 0.5))} (${unasked.length}).`)
+    }
     const synthetic = mine.filter((result) => result.era === "synthetic")
     if (synthetic.length > 0) {
-      const judged = synthetic.map((result) => ({ result, met: meets(byId.get(result.id)!, result) }))
+      const judged = synthetic.map((result) => ({ result, met: meetsMost(byId.get(result.id)!, runsOf(done, path, result.id)) }))
       const failing = judged.filter(({ met }) => met === false).map(({ result }) => result)
       lines.push(`  Written cases: ${judged.filter(({ met }) => met === true).length} met, ${failing.length} not${failing.length === 0 ? "" : ` (${ids(failing)})`}, ${judged.filter(({ met }) => met === undefined).length} not for this path.`)
+      const passes = synthetic.filter((result) => (result.route === "Pass" || (result.route === "Responder" && result.intent === "send")) && hardFail(byId.get(result.id)!, result, labels))
+      if (path === "m4" && passes.length > 0) lines.push(`  A Pass, or a send of the Responder's own, that's a hard fail on a written case: ${ids(passes)}.`)
     }
     // Only to report.
     const sends = logged.filter((result) => byId.get(result.id)?.logged.intent === "send")
     lines.push(`  A question where a send was logged: ${ids(sends.filter(({ intent }) => intent === "clarify"))}.`)
-    const lost = sends.filter((result) => negations.test(byId.get(result.id)!.heard) && result.message !== undefined && !negations.test(result.message))
+    const lost = sends.filter((result) => lostNegation(byId.get(result.id)!, result))
     lines.push(`  A negation he said lost from the message: ${ids(lost)}.`)
     lines.push(`  A message with words in nothing said: ${ids(sends.filter((result) => result.message !== undefined && unfounded(byId.get(result.id)!, result.message) >= 3))}.`)
   }
   // His verdicts, and what each path made of each.
   for (const [id, label] of Object.entries(labels)) {
-    const made = done.filter((result) => result.id === id).map((result) => `${result.path} ${result.intent}`)
+    const made = paths.flatMap((path) => Option.toArray(Option.fromNullable(modal(runsOf(done, path, id))))).map((result) => `${result.path} ${result.intent}`)
     if (made.length > 0) lines.push(`${id} (${label.status}, ${label.intent}): ${made.join(", ")}.`)
   }
-  if (paths.length === 2) {
-    const both = done.filter(({ path }) => path === "baseline").flatMap((one) => {
-      const other = done.find((result) => result.path === "brain" && result.id === one.id)
-      return other === undefined ? [] : [[one, other] as const]
+  // The baseline against every other path, and against batch 1's, the same frozen code, which is the noise floor.
+  const baselines = new Map(modals("baseline").map((result) => [result.id, result]))
+  const pairwise = (name: string, others: ReadonlyArray<Result>) => {
+    const both = others.flatMap((other) => {
+      const one = baselines.get(other.id)
+      return one === undefined || byId.get(other.id)?.era === "synthetic" ? [] : [[one, other] as const]
     })
     const same = both.filter(([one, other]) => one.intent === other.intent)
-    const modelled = both.filter(([one, other]) => one.source === "model" && other.source === "model")
+    const modelled = both.filter(([one, other]) => one.source === "model" && (other.source === "model" || other.modelMs !== undefined))
+    const differ = both.filter(([one, other]) => one.intent !== other.intent)
+    // By era too, since the gate counts the log era's on its own.
+    const byEra = (["log", "journal"] as const).flatMap((era) => {
+      const those = same.filter(([one]) => one.era === era).length
+      const of = both.filter(([one]) => one.era === era).length
+      return of === 0 ? [] : [`${era} ${those}/${of}`]
+    })
     lines.push(
-      `baseline and brain: the same on ${same.length}/${both.length}; p50 ${seconds(percentile(both.map(([one]) => one.ms), 0.5))} against ${seconds(percentile(both.map(([, other]) => other.ms), 0.5))}, both with the model ${seconds(percentile(modelled.map(([one]) => one.ms), 0.5))} against ${seconds(percentile(modelled.map(([, other]) => other.ms), 0.5))} (${modelled.length}).`,
+      `baseline and ${name}: the same on ${same.length}/${both.length}${byEra.length === 0 ? "" : ` (${byEra.join(", ")})`}; p50 ${seconds(percentile(both.map(([one]) => one.ms), 0.5))} against ${seconds(percentile(both.map(([, other]) => other.ms), 0.5))}, both with the model ${seconds(percentile(modelled.map(([one]) => one.ms), 0.5))} against ${seconds(percentile(modelled.map(([, other]) => other.ms), 0.5))} (${modelled.length}).`,
     )
+    if (name !== "batch 1's baseline" && differ.length > 0) lines.push(`  Not the same: ${differ.map(([one, other]) => `${other.id} (${one.intent}, ${other.intent})`).join(" ")}.`)
+  }
+  if (baselines.size > 0) {
+    for (const path of paths.filter((path) => path !== "baseline")) pairwise(path, modals(path))
+    if (batch1.length > 0) pairwise("batch 1's baseline", batch1)
   }
   return lines.join("\n")
 }
@@ -1263,7 +1800,7 @@ const report = (cases: ReadonlyArray<Case>, done: ReadonlyArray<Result>, paths: 
 const command = process.argv[2]
 const chosen: Effect.Effect<void, unknown> | undefined = command === "fixture" ? fixture : command === "run" ? run : undefined
 if (chosen === undefined) {
-  console.error("usage: bun scripts/reply-eval.ts fixture | run [--path baseline,brain] [--era log|journal|synthetic|all] [--only ids] [--limit N] [--out folder]")
+  console.error("usage: bun scripts/reply-eval.ts fixture | run [--path baseline,brain,m4] [--era log,journal,synthetic|all] [--only ids] [--limit N] [--repeat N] [--rerun ids] [--out folder]")
   process.exit(1)
 }
 // yapd's logs, like the translation of a line the model said that wasn't in English, are his: kept with the rest, never printed.

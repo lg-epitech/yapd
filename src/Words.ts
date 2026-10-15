@@ -77,6 +77,12 @@ export const again: ReadonlySet<string> = new Set([
   "sorry what", "what was that", "can you repeat that", "could you repeat that",
 ])
 
+/**
+ * Of `again`, what can only ask to hear it again, never answer a question,
+ * like "Shall I repeat the migration?", which "repeat it" may.
+ */
+export const pardon: ReadonlySet<string> = new Set(["say that again", "say it again", "say again", "come again", "pardon", "what was that", "sorry what"])
+
 /** Whether a line ends asking something, whatever quotes or brackets close it. */
 export const question = /\?\s*["')\]]*\s*$/
 

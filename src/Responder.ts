@@ -6,7 +6,7 @@ import { Model } from "./Model.ts"
 import { afterOnIt, Persona, withOnIt } from "./Persona.ts"
 import { agreed, callingOff, enough, gist, type Line, morePlease, noted, question } from "./Words.ts"
 
-export const Intent = Schema.Literal("dismiss", "answer", "send", "resume")
+export const Intent = Schema.Literal("dismiss", "answer", "send", "resume", "assistant")
 export type Intent = typeof Intent.Type
 
 /** A flat object rather than a union, since some CLIs only take an object schema. */
@@ -65,22 +65,21 @@ const instructions = `You're yapd, the voice that tells a developer how the work
 Reply with only a JSON object with the keys "intent", "spoken" and "message".
 
 "intent":
-- "dismiss" if they've heard enough or want you to be quiet, however they put it. That includes acknowledging, like "sounds good", "okay" or "thanks", unless the agent is waiting on them and those words answer what it asked.
-- "answer" if they asked something the agent's message or the conversation answers, including asking you to repeat.
-- "send" if it's meant for the agent and would change what it does: an instruction, a correction, a decision it asked for, or a question its message doesn't answer. Agreeing with what the agent already said it would do changes nothing, so that's "dismiss". So is telling it to do nothing, leave something as it is, or not go ahead, like "keep the ticket as it is" or "no, leave it", even when the agent asked: it has already stopped, and sending that only wakes it to say it understood.
+- "dismiss" if they've heard enough of this update or want you to be quiet for now, however they put it. That includes acknowledging, like "sounds good", "okay" or "thanks", unless the agent is waiting on them and those words answer what it asked.
+- "answer" if they asked you something about this update that the agent's message, or what you've told them of it, already says, like whether the tests passed, including asking you to repeat. Not asking the agent what it meant by something, like "do you mean the other ticket?": only the agent can say that, so it's "send", even when its message seems to answer it.
+- "send" if it's meant for the agent and would change what it does: an instruction, a correction, a decision it asked for, a question its message doesn't answer, or what it meant by something. Agreeing with what the agent already said it would do changes nothing, so that's "dismiss". So is telling it to do nothing, leave something as it is, or not go ahead, like "keep the ticket as it is" or "no, leave it", even when the agent asked: it has already stopped, and sending that only wakes it to say it understood.
 - "resume" if it wasn't meant for you, like talking to someone else or background noise.
-- Muting or unmuting this thread or any other, like "mute this", "silence it for now" or "unmute the Tezos one", or asking what's muted, is for you, never the agent: never "send". It's "answer", telling them in a few words to ask you that with their shortcut. Taking back a mute or unmute you just told them of, like "scratch that" or "undo that" right after you said you muted it, is never "send" either: it's "answer", asking them in a few words to say it again.
+- Muting or unmuting this thread or any other, like "mute this", "silence it for now" or "unmute the Tezos one", or asking what's muted, is for you, never the agent: never "send". It's "answer", telling them in a few words to ask you that with their shortcut. Anything else that speaks of muting, even a message for the agent, like "tell it I'll mute it if it keeps logging", is never "send" either: it's "assistant". Taking back a mute or unmute you just told them of, like "scratch that" or "undo that" right after you said you muted it, is never "send" either: it's "answer", asking them in a few words to say it again.
 - Which threads you read aloud to them, a thread's subagents included, like "read me its subagents", "start reading the subagents" or "keep its subagents to yourself", is for you, never the agent: never "send". It's "answer", telling them in a few words to ask you that with their shortcut. Asking the agent to use subagents, like "have a subagent review it", is the agent's as usual.
-- How you talk to them is for you, never the agent: focus, quiet, goodnight, being back, shorter updates or everything in full, like "let me focus till three", "I'm off to bed" or "stop giving me the short version". Never "send". It's "answer", telling them in a few words to ask you that with their shortcut. So is taking back such a change you just told them of, like "scratch that" right after you said focus is on.
-- Catching up is for you, never the agent: hearing what they missed or haven't heard, or what came in while they were away or had you off, however they put it, like "what did I miss?", "catch me up" or "anything else from rig?". Never "send". It's "answer", telling them in a few words to ask you that with their shortcut.
+- "assistant" if it's for you to do, not this agent. This update is one of many, and only you know their other threads and how you talk to them, so what reaches beyond this update is yours, even when this update seems to answer part of it: anything about another thread or agent, like "tell the Mina one to wait" or "what's the Tezos one doing?", except muting, subagents, keeping in mind and routine names, which stay "answer" as their own lines here say; who needs them or what's waiting on them; catching up, like "what did I miss?" or "catch me up on the rest"; their usage or limits; putting something on their screen, like "show me the PR"; starting new work in a thread of its own, like "start a thread on the flaky test" or "kick off a review of the docs"; reminding them of something later, even about this agent's work, like "remind me to check on this at five"; how you talk to them from now on, like focus, quiet, going to bed, being back, shorter updates or everything in full, and taking back such a change you just told them of. Anything else about what this agent is working on, or what it just told them, is the agent's, never yours, however they put it: even a new task for it, like "delete that repo" after it told them of one, or asking you to do it, calling you by name or speaking of it as "the agent", like "the agent wrote me a draft, can you get it back?". That's "send", and so is naming another thread for the agent to use, like "use the Mina fee table". When part of it is for this agent and part is yours, like "tell it to rebase and tell the Mina one to wait", it's "assistant". "spoken" and "message" are empty.
 - What they want you to keep in mind, or forget, is for you, never the agent: a fact, like "remember that rig's T3 Code runs the nightly", or steps for when they say a name, like "when I say review it, have Sol review it until it's clean". Never "send". It's "answer", telling them in a few words to ask you that with their shortcut. A bare "forget it" or "never mind" isn't that: it's "dismiss".
-- Tidying a thread in T3 Code is for you, never the agent: archiving, unarchiving, renaming, snoozing, settling or pinning it, or undoing that, like "archive this thread" or "snooze it till tomorrow". Never "send". It's "answer", telling them in a few words to ask you that with their shortcut.
+- Tidying a thread in T3 Code, this one or another, is for you, never the agent: archiving, unarchiving, renaming, snoozing, settling or pinning it, or undoing that, like "settle it", "archive this thread" or "snooze it till tomorrow". It's "assistant". Answering what the agent asked about such a thing in its own work isn't that, like "archive it" when it asked whether to archive the old logs: that's "send".
 
 "spoken": what you say back. They're listening, not reading.
 ${aloud}
 - For "answer", the answer in at most 50 words.
 - For "send", empty: you say your usual line that it's in hand. Only when there's more they must know than that, say just that, in a few words, like "I took that to mean the staging branch." Don't repeat back what they asked for: they've just said it.
-- Empty for "dismiss" and "resume".
+- Empty for "dismiss", "resume" and "assistant".
 
 "message": for "send", the message for the agent, written as the user would type it: first person, keeping their intent and wording, with anything they referred to spelled out so it stands on its own. Keep every request they made, in their order, including what to do once something's done, like "when that's merged, update the deployment". Empty otherwise.
 
@@ -124,7 +123,7 @@ export const prompt = ({ project, turn, needsYou, lines, heard, echo, afterPause
     ...(echo === undefined
       ? []
       : [
-          `They began while your own voice could still get into their microphone, so what was heard may start with your own words, from around "${echo}", misheard or not, and their first word may be lost under yours. Words that sound like yours there are yours, however they came out, like "Code up." for "Claude on": take them all out, and never put them in the message or turn them into words of theirs. If nothing surely theirs is left, it's "resume", never "dismiss". If a message for the agent sounds cut off, or hangs on a word that may be yours, don't send it: make it "answer", asking them in a few words to say it again. A question or a dismissal goes as usual.${
+          `They began while your own voice could still get into their microphone, so what was heard may start with your own words, from around "${echo}", misheard or not, and their first word may be lost under yours. Words that sound like yours there are yours, however they came out, like "Code up." for "Claude on": take them all out, and never put them in the message or turn them into words of theirs. A request or a question made of your words with a word or two around them, like "Stop the tests." over your "the tests are" or "Who's done?" over your "is done", may be all yours, misheard: it isn't surely theirs. If nothing surely theirs is left, it's "resume", never "dismiss", "answer" or "send". If a message for the agent sounds cut off, or hangs on a word that may be yours, don't send it: make it "answer", asking them in a few words to say it again. Once something surely theirs is left, a question or a dismissal goes as usual.${
             afterPause === undefined || afterPause.trim() === ""
               ? ""
               : ` What they said after a pause, "${afterPause}", is surely theirs, even where it repeats your words, like naming one of your options; only what came before it may be yours.`
@@ -207,6 +206,8 @@ export const ProviderResponder = Layer.effect(
           const modelMs = (yield* Clock.currentTimeMillis) - began
           // Going ahead, an "On it" the model wrote anyway gives way to a line of yapd's own: picked as it's passed on
           // when that was all of it, or put in its place now, with the rest after it.
+          // Handed to yapd's assistant, it's said nothing of here, so there's no line to put right.
+          if (reply.intent === "assistant") return { reply: { ...reply, spoken: "", message: "" }, source: "model", modelMs } satisfies Responded
           const said = reply.spoken.trim()
           const rest = reply.intent === "send" ? afterOnIt(said, yield* persona.lines) : said
           const spoken = yield* inEnglish(model, rest)

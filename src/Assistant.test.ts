@@ -15249,3 +15249,89 @@ describe("Assistant tidying", () => {
     expect(result.sent).toEqual([])
   })
 })
+
+describe("handed over from an update", () => {
+  /** The Tezos migration's update, tied to its thread, as it's read at `at`. */
+  const finished = (at: number): Conversation.Update => ({ ...update("integration", "The Tezos migration finished, sir.", at), about: { machine: "Rosie", id: tezos.id } })
+  /** Asked which thread he meant, which he hears. */
+  const asking = (situation: Brain.Situation) => Brain.decision({ act: "clarify", target: handle(situation, mina), others: handle(situation, tezos), sure: "low" })
+
+  test("a handoff is worked out once, even with yapd's heard question open as it's handed over, which closes as replaced", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant((situation) => (situation.utterance.via === "shortcut" ? asking(situation) : minaStatus(situation)))
+        yield* made.dictate("What's the migration one doing?")
+        const at = yield* TestClock.currentTimeMillis
+        const update = finished(at)
+        const handed = yield* made.over(update, [], update.spoken, { steered: true, present: true, done: {} })("What's the Mina one doing?", 2)
+        if (handed._tag !== "Act") return yield* Effect.dieMessage(`Not acted on: ${handed._tag}`)
+        yield* handed.run({ cutOff: false, reply: { ms: 2000 }, since: at })
+        yield* made.until(() => made.spoken().length >= 2)
+        const closed = (yield* made.journal.since(0, { kinds: ["action"] })).flatMap(({ detail }) => {
+          const open = (detail as { readonly open?: string } | undefined)?.open
+          return open === undefined ? [] : [open]
+        })
+        return { asked: made.seen.map(({ utterance }) => utterance.heard), spoken: made.spoken(), open: yield* made.open, closed }
+      }),
+    )
+    // Once by the model, never again as it's acted on, whatever closing the question changed.
+    expect(result.asked).toEqual(["What's the migration one doing?", "What's the Mina one doing?"])
+    expect(result.closed).toEqual(["replaced"])
+    expect(Option.isNone(result.open)).toBe(true)
+    expect(result.spoken.at(-1)).toBe("The Mina SSV2 tickets are filed, sir: four bugs, and fee rounding is the worst.")
+  })
+
+  test("a request heard three times over, handed over, is asked of the model, never dropped as nothing, on the first think, a re-think and a rest step alike", async () => {
+    const thrice = "Tell the Mina one to wait. Tell the Mina one to wait. Tell the Mina one to wait."
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant((situation) =>
+          situation.utterance.via === "shortcut"
+            ? asking(situation)
+            : situation.utterance.whole !== undefined
+              ? Brain.decision({ act: "answer", spoken: "It's waiting now, sir." })
+              : Brain.decision({ act: "answer", spoken: "The Mina tickets are filed, sir.", rest: thrice }),
+        )
+        // A question he's heard, closed once it's handed over, so what's acted on is worked out again.
+        yield* made.dictate("What's the migration one doing?")
+        const at = yield* TestClock.currentTimeMillis
+        const update = finished(at)
+        const handed = yield* made.over(update, [], update.spoken, { steered: true, present: true, done: {} })(thrice, 4)
+        yield* made.replied
+        if (handed._tag !== "Act") return yield* Effect.dieMessage(`Not acted on: ${handed._tag}`)
+        yield* handed.run({ cutOff: false, reply: { ms: 2000 }, since: at })
+        yield* made.until(() => made.spoken().some((said) => said.includes("waiting")))
+        return { asked: made.seen.map(({ utterance }) => ({ heard: utterance.heard, rest: utterance.whole !== undefined })), spoken: made.spoken() }
+      }),
+    )
+    expect(result.asked).toEqual([
+      { heard: "What's the migration one doing?", rest: false },
+      // Handed over, worked out again as it's acted on, and its rest: each by the model.
+      { heard: thrice, rest: false },
+      { heard: thrice, rest: false },
+      { heard: thrice, rest: true },
+    ])
+    expect(result.spoken.at(-1)).toContain("It's waiting now")
+  })
+
+  test("'settle it' over a subagent's update tidies nothing, the thread it's part of included, and says a subagent isn't settled on its own, naming that thread", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        // "It", as the model is shown it over a subagent's update: that subagent, by none.
+        const made = yield* assistant((situation) => (situation.utterance.heard === "Settle it." ? Brain.decision({ act: "tidy", how: "settle", target: "" }) : undefined))
+        const at = yield* TestClock.currentTimeMillis
+        const review: Conversation.Update = {
+          ...update("integration", "The Sol review found one release blocker, sir.", at),
+          subagent: { child: { machine: "Rosie", id: "t-review" }, called: "Sol review", head: { ref: { machine: "Rosie", id: tezos.id } } },
+        }
+        const handed = yield* made.over(review, [], review.spoken, { steered: false, present: true, done: {} })("Settle it.", 1)
+        if (handed._tag !== "Act") return yield* Effect.dieMessage(`Not acted on: ${handed._tag}`)
+        yield* handed.run({ cutOff: false, reply: { ms: 2000 }, since: at })
+        yield* made.until(() => made.spoken().length >= 1)
+        return { spoken: made.spoken(), tidied: made.dispatched.filter(({ type }) => String(type).startsWith("thread.")) }
+      }),
+    )
+    expect(result.tidied).toEqual([])
+    expect(result.spoken.at(-1)).toBe("I can't settle a subagent on its own, sir, only Migrate Tezos Integration.")
+  })
+})

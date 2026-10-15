@@ -207,6 +207,16 @@ export const aboutSubagents = (heard: string) => {
   )
 }
 
+/** Words that speak of muting or silencing. */
+const muteWords: ReadonlySet<string> = new Set(["mute", "unmute", "muting", "silence"])
+
+/**
+ * Whether what he said speaks of muting or silencing at all, anywhere in it,
+ * like "tell it I'll mute it if it keeps logging": handed to yapd, nothing
+ * of it is written to any thread.
+ */
+export const mentionsMuting = (heard: string) => gist(heard).split(" ").some((word) => muteWords.has(word))
+
 /** Words that ask what was said, how much or since when, rather than name a thread, like "everything" or "from this morning". */
 const catchingUp: ReadonlySet<string> = new Set([
   "what", "everything", "all", "anything", "something", "every", "each", "latest", "last", "newest", "recent", "recently", "new", "again", "since",

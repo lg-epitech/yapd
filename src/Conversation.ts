@@ -2,19 +2,19 @@ import { Clock, Deferred, Duration, Effect, Exit, Fiber, Option, Queue, Scope, S
 import { rm } from "node:fs/promises"
 import { join } from "node:path"
 import { Audio, AudioError, type Playback } from "./Audio.ts"
-import { worded } from "./Brain.ts"
+import { handoffLines, surelyHis, worded } from "./Brain.ts"
 import type { Turn } from "./Condenser.ts"
 import * as Endpointer from "./Endpointer.ts"
 import { plain, RelayError, type Thread } from "./Relay.ts"
 import { Journal, routinesIn, routinesNamed } from "./Journal.ts"
-import { Persona } from "./Persona.ts"
+import { addressed, type Lines, Persona } from "./Persona.ts"
 import { type Reply, type Responded, Responder } from "./Responder.ts"
 import * as T3Actions from "./T3Actions.ts"
 import type * as Threads from "./Threads.ts"
 import { Transcriber } from "./Transcriber.ts"
 import { Vad } from "./Vad.ts"
 import { extension, Voice } from "./Voice.ts"
-import { agreed, gist, halts, type Line, noted, question } from "./Words.ts"
+import { again as sayAgain, agreed, gist, halts, type Line, noted, pardon, question } from "./Words.ts"
 
 /** An update, rendered and ready to be read out. */
 export interface Update {
@@ -250,6 +250,26 @@ export const movedOn = "You've moved on from that since, so I held it back."
 /** Seconds, as they're kept: to a hundredth. */
 const hundredths = (seconds: number) => Math.round(seconds * 100) / 100
 
+/** Milliseconds as they're logged, in seconds. */
+const seconds = (ms: number) => `${(ms / 1000).toFixed(1)} s`
+
+/**
+ * Logs, as the answer to what he handed over from an update starts to play,
+ * how long that took from when it was last worked out, a moment after his
+ * last word, and each part of it, so where the time goes can be counted.
+ */
+export const answeredIn = (since: number, parts: { readonly responder?: number; readonly brain: number; readonly acting?: number; readonly rendering?: number }) =>
+  Effect.flatMap(Clock.currentTimeMillis, (now) =>
+    Effect.logInfo(
+      `Handoff answered: ${seconds(now - since)} from his last word (${[
+        ...(parts.responder === undefined ? [] : [`Responder ${seconds(parts.responder)}`]),
+        `Brain ${seconds(parts.brain)}`,
+        ...(parts.acting === undefined ? [] : [`acting ${seconds(parts.acting)}`]),
+        ...(parts.rendering === undefined ? [] : [`rendering ${seconds(parts.rendering)}`]),
+      ].join(", ")})`,
+    ),
+  )
+
 /** Seconds of speech in what the user said, less the quiet the endpointer keeps either side of it. */
 export const voiced = (audio: Float32Array) =>
   Math.max(0, (audio.length - (Endpointer.defaults.lead + Endpointer.defaults.tail) * frame) / rate)
@@ -313,23 +333,150 @@ export const between = (text: string, duration: number, start: number, end: numb
   return words.slice(Math.max(0, Math.floor((words.length * start) / duration)), Math.max(0, Math.ceil((words.length * end) / duration))).join(" ")
 }
 
-/** Muting the thread of an update he spoke over, in so many words: done once he's stopped, giving back what's said of it. */
+/**
+ * Muting the thread of an update he spoke over, or changing how yapd talks,
+ * in so many words: done once he's stopped, giving back what's said of it,
+ * with what it changed, if that's known. Without yapd's assistant, what the
+ * mute hook hands over is this too, giving back only what's said of it.
+ */
 interface Muting {
   readonly intent: "mute"
   readonly spoken: ""
   readonly message: ""
   readonly muting: Effect.Effect<string>
+  readonly made?: "mute" | "mode"
 }
 
 /**
- * What he said over an update comes to, and how that was worked out: as his
- * emergency off, by the mute hook, by the Responder at once or by its model,
- * with how long its call took, in milliseconds; or the model failed.
+ * What the mute hook makes of what he said over an update, plainly his: a
+ * change in so many words, done once he's stopped, giving back what's said of
+ * it; or what's about mutes or subagents in other words, which yapd's
+ * assistant works out, with what's said of it without one.
  */
-interface Worked {
-  readonly reply: Reply | Muting
-  readonly source: "halt" | "mute" | Responded["source"] | "failed"
+export type Hooked =
+  | { readonly _tag: "Done"; readonly made: "mute" | "mode"; readonly doing: Effect.Effect<string> }
+  | { readonly _tag: "Over"; readonly line: Effect.Effect<string> }
+
+/** What an Act is run with: whether its update was put back, how long the Responder took, with its model, and when it was last worked out. */
+export interface Running {
+  readonly cutOff: boolean
+  readonly reply: { readonly ms: number; readonly modelMs?: number }
+  /** When what he said was worked out for the last time, a moment after his last word. */
+  readonly since: number
+}
+
+/**
+ * What something he said over an update, handed to yapd's assistant, comes
+ * to: let go, as talk not meant for yapd or what may all be its own words;
+ * dismissed; answered, `unattended` when that turns down what only his word
+ * does while he isn't at hand; passed to the update's own session as the
+ * Responder's messages are, with a line for a rest left; or acted on, as a
+ * follow-up to an answer is, once he's stopped, `aims` when at the update
+ * itself, `doubted` when all of it may be yapd's own words, and `unattended`
+ * when its first step is turned down so. With how it
+ * was worked out, without the model or by it, how long that took and the
+ * model's part, and what it came to, as it's logged, never his words nor the
+ * model's.
+ */
+export type Handed = (
+  | { readonly _tag: "Resume"; readonly logged?: Effect.Effect<void> }
+  | { readonly _tag: "Dismiss" }
+  | { readonly _tag: "Answer"; readonly spoken: string; readonly unattended?: true }
+  | { readonly _tag: "Pass"; readonly message: string; readonly left?: string }
+  | { readonly _tag: "Act"; readonly aims: boolean; readonly doubted: boolean; readonly unattended?: true; readonly run: (running: Running) => Effect.Effect<void> }
+) & {
+  readonly source: "fast" | "model" | "failed"
+  readonly ms: number
   readonly modelMs?: number
+  readonly routed: string
+}
+
+/** Works out what he said over an update, handed to yapd's assistant, as a follow-up's `followUp` does. */
+export type Handing = (heard: string, voiced: number, echo?: string, afterPause?: string, unsaid?: string) => Effect.Effect<Handed>
+
+/** What the line being said over an update is, which tells what "scratch that" said over it or right after can take back. */
+export type Made = "update" | "sent" | "mute" | "mode" | "answer" | "again"
+
+/**
+ * What he said over an update comes to, and how that was worked out: as his
+ * emergency off, by the mute hook, said again, by the Responder at once or by
+ * its model, or handed to yapd's assistant, with how long the model took, in
+ * milliseconds, both calls for what's handed over; or the model failed.
+ * Handed over, what it came to, and how long the Responder took first.
+ */
+export interface Worked {
+  readonly reply: Reply | Muting
+  readonly source: "halt" | "mute" | "again" | "assistant" | Responded["source"] | "failed"
+  readonly modelMs?: number
+  readonly handed?: Handed
+  readonly replied?: { readonly ms: number; readonly modelMs?: number }
+}
+
+/**
+ * Works out what he said over an update, plainly or not, in order: his
+ * emergency off, "Mute."; the mute hook's change in so many words, or what
+ * it hands to yapd's assistant without asking the Responder; hearing the
+ * line again, with no model, only in words that can't answer it when the
+ * update needs him, and only while it `may` be said again; then the
+ * Responder, whose "assistant" goes to yapd's assistant, or, with none,
+ * is told to ask with the shortcut. Its message of what may all be yapd's
+ * own words, with nothing surely his after a pause, goes to yapd's
+ * assistant too, never sent as it is: there it's let go, or at most asked
+ * about in code's own question, as what's said back to a "done" line is.
+ * With no assistant, it's sent as ever.
+ */
+export const reading = (parts: {
+  readonly heard: string
+  readonly voiced: number
+  readonly afterPause: string
+  readonly halt: boolean
+  readonly echo: string | undefined
+  readonly needsYou: boolean
+  readonly hooked: Option.Option<Hooked>
+  /** Whether the line may be said again, which it is at most twice. */
+  readonly may: boolean
+  readonly respond: (heard: string, voiced: number, afterPause: string) => Effect.Effect<Worked>
+  /** Hands it to yapd's assistant, `muting` when the mute hook did. */
+  readonly over?: (muting: boolean) => (heard: string, voiced: number, afterPause: string) => Effect.Effect<Handed>
+  /** What's said for what's yapd's to do without its assistant. */
+  readonly shortcut: Effect.Effect<string>
+}): Effect.Effect<Worked> =>
+  Effect.gen(function* () {
+    const { heard, voiced, afterPause, over } = parts
+    if (parts.halt) return { reply: { intent: "dismiss", spoken: "", message: "" }, source: "halt" }
+    if (Option.isSome(parts.hooked)) {
+      const hooked = parts.hooked.value
+      if (hooked._tag === "Done") return { reply: { intent: "mute", spoken: "", message: "", muting: hooked.doing, made: hooked.made }, source: "mute" }
+      if (over === undefined) return { reply: { intent: "mute", spoken: "", message: "", muting: hooked.line }, source: "mute" }
+      return handedOver(yield* over(true)(heard, voiced, afterPause))
+    }
+    const asking = parts.needsYou ? pardon : sayAgain
+    if (parts.echo === undefined && parts.may && asking.has(gist(heard))) return { reply: { intent: "answer", spoken: "", message: "" }, source: "again" }
+    const [took, worked] = yield* Effect.timed(parts.respond(heard, voiced, afterPause))
+    // A message the Responder made of what may all be yapd's own words is never sent as it is: yapd's assistant lets it go, or asks first.
+    const echoed = !surelyHis({ ...(parts.echo === undefined ? {} : { echo: parts.echo }), afterPause })
+    const handing = worked.reply.intent === "assistant" || (worked.reply.intent === "send" && echoed && over !== undefined)
+    if (!handing) return worked
+    if (over === undefined) return { ...worked, reply: { intent: "answer", spoken: yield* parts.shortcut, message: "" } }
+    const replied = { ms: Duration.toMillis(took), ...(worked.modelMs === undefined ? {} : { modelMs: worked.modelMs }) }
+    return handedOver(yield* over(false)(heard, voiced, afterPause), replied)
+  })
+
+/** What's handed over comes to, as the Responder's replies are told: with both calls' model time, when there was any. */
+const handedOver = (handed: Handed, replied?: Worked["replied"]): Worked => {
+  const modelMs = handed.modelMs === undefined && replied?.modelMs === undefined ? undefined : (handed.modelMs ?? 0) + (replied?.modelMs ?? 0)
+  return {
+    reply:
+      handed._tag === "Pass"
+        ? { intent: "send", spoken: "", message: handed.message }
+        : handed._tag === "Answer"
+          ? { intent: "answer", spoken: handed.spoken, message: "" }
+          : { intent: handed._tag === "Act" ? "assistant" : handed._tag === "Dismiss" ? "dismiss" : "resume", spoken: "", message: "" },
+    source: "assistant",
+    ...(modelMs === undefined ? {} : { modelMs }),
+    handed,
+    ...(replied === undefined ? {} : { replied }),
+  }
 }
 
 /** Something yapd asks the user for itself, like which project new work is for, rendered and ready to be asked. */
@@ -411,12 +558,20 @@ export const make = (options: {
   /** Whether what the user said to send over an update would be held back as it could give a secret away, so their words are kept and logged nowhere. */
   readonly withholds: (update: Update, message: string) => Effect.Effect<boolean>
   /**
-   * When all he said over an update is to mute or unmute its thread, in so
-   * many words and plainly his, how that's done, giving back what's said of
-   * it: never anything sent to the agent. None for anything else, which is
-   * worked out as ever.
+   * When all he said over an update is to mute or unmute its thread, or to
+   * change how yapd talks, in so many words and plainly his, how that's done,
+   * giving back what's said of it; or, about mutes or subagents in other
+   * words, plainly his, what's handed to yapd's assistant: never anything
+   * sent to the agent. None for anything else, which is worked out as ever.
    */
-  readonly mute?: (update: Update, heard: string, voiced: number, echo: string | undefined) => Option.Option<Effect.Effect<string>>
+  readonly mute?: (update: Update, heard: string, voiced: number, echo: string | undefined) => Option.Option<Hooked>
+  /**
+   * What hands what he said over an update, `line`, after the exchange so
+   * far, `lines`, to yapd's assistant, as the Responder took it for yapd's
+   * to do, or the mute hook did, `muting`: `made` is what the line is.
+   * Without it, that's said to be asked with the shortcut.
+   */
+  readonly over?: (update: Update, lines: ReadonlyArray<Line>, line: string, made: Made, muting: boolean) => Handing
   /**
    * The names of his routines, as they are now, whose steps only the
    * shortcut sends: one said over an update is never sent to its agent as
@@ -1253,6 +1408,24 @@ export const make = (options: {
     /** All he said, as it's logged: never what could give a secret away, however he split it between pauses, like a code said two digits at a time. */
     const heardLine = (heard: string) => (T3Actions.revealing(heard) ? "Heard something that could give a secret away, so it isn't logged" : `Heard: ${heard}`)
 
+    /** How long working out what he said over an update took, and the model's part, both calls' when it was handed over. */
+    const timing = (ms: number, modelMs: number | undefined, worked: Pick<Worked, "handed" | "replied">) => {
+      const { handed, replied } = worked
+      const model =
+        handed === undefined
+          ? modelMs === undefined
+            ? "without the model"
+            : `${seconds(modelMs)} of it the model's`
+          : `${replied?.modelMs === undefined ? "the Responder without its model" : `${seconds(replied.modelMs)} of it the Responder's model`} and ${handed.modelMs === undefined ? "the Brain without its own" : `${seconds(handed.modelMs)} the Brain's`}`
+      return Effect.logInfo(`Timing: ${seconds(ms)} to work out a reply, ${model}`)
+    }
+
+    /** Two lines as one, addressing him once. */
+    const joined = (first: string, then: string, lines: Pick<Lines, "address">) => {
+      const sir = addressed(lines)
+      return `${first} ${sir !== "" && first.includes(sir) ? then.replace(sir, "") : then}`.trim()
+    }
+
     /**
      * What's known of yapd's own voice in what he said over a line, heard as
      * `first`: whether it was only that, which code takes it for only when
@@ -1297,9 +1470,18 @@ export const make = (options: {
      * he heard it, which he didn't when it ended partway on what may have
      * been only its own voice. The microphone stays open longer after one
      * that asks him something while he's `present`, and after a `replay` of
-     * one he heard, which he asked for.
+     * one he heard, which he asked for. It starts `from` that far in, as
+     * when it was put back to be read again from where he cut in. What he
+     * hands to yapd's assistant over an update that needs him, cut off before
+     * its end, that doesn't aim at it, or that may all be yapd's own words,
+     * puts it back that way through `back`, run as soon as that's known, so
+     * nothing can come between them, and then he hasn't heard it.
      */
-    const converse = (update: Update, through: Effect.Effect<void> = Effect.void, given: { readonly replay?: boolean; readonly present?: boolean } = {}) =>
+    const converse = (
+      update: Update,
+      through: Effect.Effect<void> = Effect.void,
+      given: { readonly replay?: boolean; readonly present?: boolean; readonly from?: number; readonly back?: (from: number) => Effect.Effect<void> } = {},
+    ) =>
       Effect.suspend(() => {
         const rendered: Array<string> = []
         return Effect.gen(function* () {
@@ -1307,8 +1489,12 @@ export const make = (options: {
           const lines: Array<Line> = []
           let text = update.spoken
           let path = update.audio
-          let from = 0
+          let from = given.from ?? 0
           let missed = 0
+          /** What the line being said is, which tells what "scratch that" said over it or right after can take back. */
+          let made: Made = "update"
+          /** How many times the line being said was said again, which it is at most twice. */
+          let replays = 0
           /** Said to the end, the line's length and when it ended, when only its own voice, or what may have been, stopped it as it ended: it listens on once for his reply. */
           let ended: { readonly duration: number; readonly finished?: number } | undefined
           let lingered = false
@@ -1333,6 +1519,8 @@ export const make = (options: {
             resume = undefined
             path = update.audio
             text = update.spoken
+            made = "update"
+            replays = 0
             unkept = false
             missed = 0
             lingered = false
@@ -1434,38 +1622,97 @@ export const make = (options: {
                   ),
                 ),
               )
-            const settled = yield* settle(outcome.ear, first, outcome.audio, unlogged, !unsure, echo, (heard, voiced, afterPause, halt) => {
-              // Asked as each attempt is made, never once it runs, so what it does at once is done even for one cut short: only the work is timed.
-              const hooked = halt ? Option.none() : (options.mute?.(update, heard, voiced, echo) ?? Option.none())
-              return Effect.gen(function* () {
-                const began = yield* Clock.currentTimeMillis
-                const worked = yield* halt
-                  ? Effect.succeed<Worked>({ reply: { intent: "dismiss", spoken: "", message: "" }, source: "halt" })
-                  : Option.match(hooked, {
-                      onSome: (muting) => Effect.succeed<Worked>({ reply: { intent: "mute", spoken: "", message: "", muting }, source: "mute" }),
-                      onNone: () => responding(heard, voiced, afterPause),
-                    })
-                return { ...worked, ms: (yield* Clock.currentTimeMillis) - began, voiced }
+            /** Hands it to yapd's assistant, with what he'd heard of the line, the exchange before it, and what it is. */
+            const handing =
+              options.over === undefined
+                ? undefined
+                : (muting: boolean) => (heard: string, voiced: number, afterPause: string) =>
+                    options.over!(update, [...lines], text, made, muting)(
+                      heard,
+                      voiced,
+                      echo,
+                      echo === undefined || afterPause === "" ? undefined : afterPause,
+                      left === "" ? undefined : left,
+                    )
+            /**
+             * What he handed over that's acted on, run as soon as it's known, so a dictation starting then can't drop it: logged, then
+             * registered, and the update put back to be read again from a moment before where he cut in, when it needs him, he cut it off
+             * before its end, and it doesn't aim at it, or when all of it may be yapd's own words. Otherwise it ends there, and he's heard
+             * it. Whether it was put back.
+             */
+            const handOver = (heard: string, worked: Worked & { readonly ms: number; readonly began: number }, handed: Extract<Handed, { readonly _tag: "Act" }>) =>
+              Effect.gen(function* () {
+                yield* Effect.logInfo(T3Actions.revealing(heard) ? "Heard something that could give a secret away, so it's held back" : `Heard: ${heard}`)
+                yield* Effect.logInfo(`Handed over: ${handed.routed}`)
+                yield* timing(worked.ms, worked.modelMs, worked)
+                const at = !after && path === update.audio ? Math.max(from, outcome.at - rewind) : resume
+                const cutOff = at !== undefined && ((!handed.aims && update.needsYou) || handed.doubted)
+                yield* handed.run({ cutOff, reply: worked.replied ?? { ms: 0 }, since: worked.began })
+                if (at !== undefined && cutOff) {
+                  yield* given.back?.(at) ?? Effect.void
+                  return true
+                }
+                yield* through
+                return false
               })
-            })
+            /** Whether what he handed over was acted on, and put its update back. */
+            let acted: boolean | undefined
+            const settled = yield* Effect.uninterruptibleMask((restore) =>
+              Effect.tap(
+                restore(
+                  settle(outcome.ear, first, outcome.audio, unlogged, !unsure, echo, (heard, voiced, afterPause, halt) => {
+                    // Asked as each attempt is made, never once it runs, so what it does at once is done even for one cut short: only the work is timed.
+                    const hooked = halt ? Option.none<Hooked>() : (options.mute?.(update, heard, voiced, echo) ?? Option.none<Hooked>())
+                    return Effect.gen(function* () {
+                      const began = yield* Clock.currentTimeMillis
+                      const worked = yield* reading({
+                        heard,
+                        voiced,
+                        afterPause,
+                        halt,
+                        echo,
+                        needsYou: update.needsYou,
+                        hooked,
+                        may: replays < 2,
+                        respond: responding,
+                        ...(handing === undefined ? {} : { over: handing }),
+                        shortcut: Effect.map(persona.lines, (lines) => handoffLines(lines).shortcut),
+                      })
+                      return { ...worked, ms: (yield* Clock.currentTimeMillis) - began, voiced, began }
+                    })
+                  }),
+                ),
+                // From settle's return until it's registered, it's never cut short: whatever comes then, like a dictation, waits for it.
+                (settled) => {
+                  const { handed } = settled.reply
+                  return handed?._tag === "Act" && !settled.halt
+                    ? Effect.map(handOver(settled.heard, settled.reply, handed), (back) => {
+                        acted = back
+                      })
+                    : Effect.void
+                },
+              ),
+            )
+            if (acted !== undefined) return !acted
             const { heard, afterPause, halt } = settled
-            const { reply, source, modelMs, ms, voiced } = settled.reply
+            const { reply, source, modelMs, ms, voiced, handed } = settled.reply
             // "Mute." turns yapd off at once, which cuts this off, with nothing of it noted or sent. Should yapd stay on, it's a stop.
             if (halt && options.off !== undefined) yield* options.off
             // Muting its thread is done, and said, once he's stopped.
             const muted = reply.intent === "mute" ? yield* reply.muting : undefined
-            const answer = muted ?? reply.spoken
+            // Said again, it's the line itself, word for word.
+            const repeated = source === "again"
+            const answer = repeated ? text : (muted ?? reply.spoken)
             // Held back as it could give a secret away, it's kept and logged nowhere: whether it is, is known before either. Whatever the
             // model made of it, since his words may be one however it's answered, like a "remember …" he's told to ask with the shortcut.
             const holds = reply.intent === "send" && (yield* options.withholds(update, plain(reply.message)))
             const withheld = T3Actions.revealing(heard) || holds
             yield* Effect.logInfo(withheld ? "Heard something that could give a secret away, so it's held back" : `Heard: ${heard}`)
+            if (handed !== undefined) yield* Effect.logInfo(`Handed over: ${handed.routed}`)
             // The model's answer may say it back, like "I won't keep sk-…, sir": then only what it made of it is logged, and the answer is
             // said but kept nowhere when it could give one away.
-            yield* Effect.logInfo(`Reply: ${reply.intent}${answer === "" || withheld ? "" : `, saying: ${answer}`}`)
-            yield* Effect.logInfo(
-              `Timing: ${(ms / 1000).toFixed(1)} s to work out a reply, ${modelMs === undefined ? "without the model" : `${(modelMs / 1000).toFixed(1)} s of it the model's`}`,
-            )
+            yield* Effect.logInfo(`Reply: ${reply.intent}${answer === "" || withheld || repeated ? "" : `, saying: ${answer}`}${repeated ? ", saying it again" : ""}`)
+            yield* timing(ms, modelMs, settled.reply)
             // Ended partway on no more than what may all have been its own voice, like its "Over—" heard as "Okay.", it's left
             // unheard, so "what did I miss?" brings it back, and nothing of it is noted as his.
             const doubted = reply.intent === "dismiss" && unsure && !after && heard === first
@@ -1479,8 +1726,9 @@ export const make = (options: {
                 // With the thread T3 Code knows it by, when it's tied to one, like the update itself.
                 ...(update.about === undefined ? { thread: update.session } : { machine: update.about.machine, thread: update.about.id }),
                 directory: update.thread.cwd,
-                // What the model answered to what was held back as a secret may give it away in words nothing recognises as one.
-                ...(withheld || T3Actions.revealing(answer) ? {} : { said: answer }),
+                // What the model answered to what was held back as a secret may give it away in words nothing recognises as one, as may a
+                // line said again that's kept nowhere.
+                ...(withheld || T3Actions.revealing(answer) || (repeated && unkept) ? {} : { said: answer }),
                 ...(withheld ? {} : { text: heard }),
                 detail: {
                   intent: reply.intent,
@@ -1500,7 +1748,9 @@ export const make = (options: {
                   voiced: hundredths(voiced),
                 },
               })
-              yield* options.replied
+              // Turned down as what only his word does while he isn't at hand, as a TV's talk may be, nothing of his is taken up: he
+              // isn't noted at hand, which would have the next such talk acted on, nor does it take the place of what yapd asked.
+              if (handed?._tag !== "Answer" || handed.unattended !== true) yield* options.replied
             }
 
             if (reply.intent === "dismiss") {
@@ -1509,6 +1759,8 @@ export const make = (options: {
               return true
             }
             if (reply.intent === "resume") {
+              // What may all be yapd's own words, let go by yapd's assistant, is logged as it is wherever else it's let go.
+              if (handed?._tag === "Resume") yield* handed.logged ?? Effect.void
               if (after) {
                 if ((echo !== undefined && listenOn()) || pickUp()) continue
                 return true
@@ -1526,9 +1778,25 @@ export const make = (options: {
               { speaker: "yapd", text: said },
               { speaker: "user", text: heard, ...(echo === undefined ? {} : { echo, ...(afterPause === "" ? {} : { afterPause }) }) },
             )
-            // Over an update that needs him, before all of it was said, what he changed is said, then it carries on from where it stopped.
-            if (reply.intent === "mute" && update.needsYou && !after && path === update.audio) resume = Math.max(from, outcome.at - rewind)
+            // Said again from its start, as it was, with no model, its window and what was missed over it as they were, so talk that keeps
+            // coming still makes it play through.
+            if (repeated) {
+              replays++
+              made = "again"
+              from = 0
+              lingered = false
+              continue
+            }
+            // Over an update that needs him, before all of it was said, what he changed is said, then it carries on from where it stopped. So
+            // is yapd's own answer to what he handed it, like "Ask me that with the shortcut.", which answers nothing the update asked.
+            if ((reply.intent === "mute" || handed?._tag === "Answer") && update.needsYou && !after && path === update.audio) resume = Math.max(from, outcome.at - rewind)
+            const passing = yield* Clock.currentTimeMillis
             text = reply.intent === "send" ? yield* pass(update, reply) : answer
+            const passed = yield* Clock.currentTimeMillis
+            // A rest of what he handed over that was left, as it was for the update's own session, is said with it.
+            if (handed?._tag === "Pass" && handed.left !== undefined && text !== "") text = joined(text, handed.left, yield* persona.lines)
+            made = reply.intent === "send" ? "sent" : reply.intent === "mute" ? (reply.made ?? "answer") : "answer"
+            replays = 0
             // Kept only as the reply's `said`, which it isn't when it could give a secret away, or when what he said is held back.
             unkept = withheld || T3Actions.revealing(text)
             if (text === "") {
@@ -1548,6 +1816,15 @@ export const make = (options: {
               path = join(options.dir, `${crypto.randomUUID()}${extension}`)
               rendered.push(path)
               yield* voice.render(text, path)
+            }
+            // How long what he handed over took to answer, part by part: passing it on, then rendering.
+            if (handed !== undefined) {
+              yield* answeredIn(settled.reply.began, {
+                ...(settled.reply.replied === undefined ? {} : { responder: settled.reply.replied.ms }),
+                brain: handed.ms,
+                ...(reply.intent === "send" ? { acting: passed - passing } : {}),
+                rendering: (yield* Clock.currentTimeMillis) - passed,
+              })
             }
             yield* options.saying(update, text)
             // An answer to what he said over it is listened after as any answer is, cut short once one he asked for waits; anything else,
