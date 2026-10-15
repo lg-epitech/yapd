@@ -733,7 +733,11 @@ export const make = (options: {
                   if (paused !== undefined) pauses++
                   return undefined
                 case "Resumed":
-                  if (paused !== undefined) resumed++
+                  // Carried on, what he'd said by then is no use: a run still waiting its turn never holds up the one that counts.
+                  if (paused !== undefined) {
+                    resumed++
+                    yield* Fiber.interruptFork(paused)
+                  }
                   paused = undefined
                   return undefined
                 case "Utterance": {
@@ -1146,7 +1150,8 @@ export const make = (options: {
               ended = yield* Clock.currentTimeMillis
               const at = yield* position
               const begun = onset ?? at
-              const echo = echoing ? between(text, yield* length, begun - reach, Math.max(at, begun) + reach) : undefined
+              const echoed = echoing
+              const echoOver = (whole: number) => between(text, whole, begun - reach, Math.max(at, begun) + reach)
               onset = undefined
               echoing = false
               // Longer than "Mute." could be, it isn't, so Whisper isn't asked, and nothing waits on it; nor while Whisper can't hear yet,
@@ -1157,14 +1162,17 @@ export const make = (options: {
                   Effect.timeout(over === undefined ? outburst : Math.max(0, over + outburst - ended)),
                   Effect.orElseSucceed(() => ""),
                 )
-                // With yapd's own voice maybe in it, "Mute." said after the line's last words is too.
-                if (halted(heard, echo, echo === undefined ? undefined : text)) {
+                // With yapd's own voice maybe in it, "Mute." said after the line's last words is too. Only a line about muting waits on its
+                // whole length to tell whose "mute" it was, as while it plays from its first part, that waits on the rest's render.
+                const aboutMuting = echoed && /mute/i.test(text)
+                if ((!aboutMuting && halted(heard, undefined)) || (echoed && halted(heard, echoOver(yield* length), text))) {
                   // Its voice ends at once, never waiting on all turning off does first. Should yapd stay on, it's a stop.
                   yield* playback.stop
                   yield* options.off
                   return { _tag: "Finished" } satisfies Outcome
                 }
               }
+              const echo = echoed ? echoOver(yield* length) : undefined
               // Replying, with yapd's own voice maybe in it, and still going as the line ended, it's his reply that its own voice ran
               // into, worked out as what he said over it, with the line's words as what may be its own: never dropped.
               if (replying && over !== undefined && echo !== undefined) {
