@@ -26,6 +26,7 @@ import * as Config from "./Config.ts"
 import * as Helper from "./Helper.ts"
 import { run } from "./Process.ts"
 import * as Shortcut from "./Shortcut.ts"
+import * as Wav from "./Wav.ts"
 
 export class AudioError extends Data.TaggedError("AudioError")<{ readonly message: string; readonly cause?: unknown }> {}
 
@@ -117,22 +118,45 @@ const reporter = Effect.gen(function* () {
   }
 })
 
-/** Plays with afplay, counting each one as it starts and ends. */
-const afplay = (playing: (count: 1 | -1) => void) => (path: string) =>
+/**
+ * Plays with afplay, counting each one as it starts and ends. afplay plays a
+ * file from its start, so from `from` it plays a copy of it from there,
+ * removed once it's played.
+ */
+const afplay = (playing: (count: 1 | -1) => void) => (path: string, from = 0) =>
   Effect.gen(function* () {
+    // Not one it can read, it's played all the same, of a length it can't tell.
+    const duration = yield* Wav.duration(path).pipe(Effect.orElseSucceed(() => 0))
+    const file = from > 0 ? join(tmpdir(), `yapd-from-${crypto.randomUUID()}.wav`) : path
+    const removed = Effect.promise(() => rm(file, { force: true }))
+    if (from > 0) {
+      yield* Effect.acquireRelease(
+        Wav.slice(path, from, file).pipe(Effect.mapError((cause) => new AudioError({ message: "Could not play it from where it's asked", cause }))),
+        () => removed,
+      )
+    }
     const start = yield* Clock.currentTimeMillis
     playing(1)
-    const fiber = yield* Effect.forkScoped(run(["afplay", path]).pipe(Effect.ensuring(Effect.sync(() => playing(-1)))))
+    const fiber = yield* Effect.forkScoped(
+      run(["afplay", file]).pipe(
+        Effect.ensuring(Effect.sync(() => playing(-1))),
+        Effect.ensuring(from > 0 ? removed : Effect.void),
+      ),
+    )
     return {
-      duration: 0,
+      duration,
       confirmed: false,
       finished: Fiber.join(fiber).pipe(
         Effect.asVoid,
         Effect.mapError((cause) => new AudioError({ message: "Could not play", cause })),
       ),
+      // How far into the file it got, as the helper counts it.
       stop: Fiber.interrupt(fiber).pipe(
         Effect.zipRight(Clock.currentTimeMillis),
-        Effect.map((now) => (now - start) / 1000),
+        Effect.map((now) => {
+          const at = from + (now - start) / 1000
+          return duration > 0 ? Math.min(duration, at) : at
+        }),
       ),
       volume: () => Effect.void,
     } satisfies Playback
