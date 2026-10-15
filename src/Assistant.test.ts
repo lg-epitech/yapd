@@ -515,7 +515,7 @@ const assistant = (
         ),
       power: Effect.sync(() => power),
       lastHeard: Effect.sync(() => listening),
-      coming: given.coming ?? Effect.void,
+      coming: Effect.as(given.coming ?? Effect.void, Effect.void),
       awaiting: given.awaiting ?? Effect.succeed(Effect.void),
       queued: (spoken) => Effect.succeed(given.queued?.has(spoken) === true),
       skip: () => Effect.void,
