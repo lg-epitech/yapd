@@ -44,7 +44,7 @@ import * as Threads from "./Threads.ts"
 import { Vocabulary, WhisperTranscriber } from "./Transcriber.ts"
 import * as Tunnel from "./Tunnel.ts"
 import { SileroVad } from "./Vad.ts"
-import { KokoroVoice } from "./Voice.ts"
+import { KokoroVoice, Voice } from "./Voice.ts"
 import { ProviderWriter } from "./Writer.ts"
 
 // `yapd serve`, apart from the other commands, since only the daemon needs the
@@ -247,11 +247,11 @@ export const serve = Effect.gen(function* () {
       inMind({ memories: { kept, written } }).flatMap(({ name }) => (name === undefined ? [] : [name])),
     ),
     // A late "On it" can be followed up as what was said over its update, which only the assistant works out.
-    following: (update, line, done, own) => (heard, voiced, echo, afterPause, unsaid, carried) =>
-      Effect.flatMap(Deferred.await(following), (follow) => follow(update, line, done, own)(heard, voiced, echo, afterPause, unsaid, carried)),
+    following: (update, line, done, own) => (heard, voiced, echo, afterPause, unsaid, carried, stopped) =>
+      Effect.flatMap(Deferred.await(following), (follow) => follow(update, line, done, own)(heard, voiced, echo, afterPause, unsaid, carried, stopped)),
     // What he says over an update that's yapd's to do, like another thread, who needs him or new work, which only the assistant works out.
-    over: (update, lines, line, given) => (heard, voiced, echo, afterPause, unsaid) =>
-      Effect.flatMap(Deferred.await(handing), (over) => over(update, lines, line, given)(heard, voiced, echo, afterPause, unsaid)),
+    over: (update, lines, line, given) => (heard, voiced, echo, afterPause, unsaid, stopped) =>
+      Effect.flatMap(Deferred.await(handing), (over) => over(update, lines, line, given)(heard, voiced, echo, afterPause, unsaid, stopped)),
     // What he changed of how yapd talks over an update, which "scratch that" said next takes back.
     modeChange: modes.last,
   })
@@ -281,6 +281,8 @@ export const serve = Effect.gen(function* () {
     Option.getOrElse(daemon.controls, () => Mutes.controls({ mutes, silence: daemon.silence, unread: daemon.unread, journal })),
     latest.under,
   )
+  // What's said once work starts is rendered while it starts, as it's likely to be.
+  const { guess } = yield* Voice
   const drafts = yield* Drafts.make({
     machines: everywhere,
     rules: Preferences.load(preferences),
@@ -289,6 +291,7 @@ export const serve = Effect.gen(function* () {
     expect: (yield* Vocabulary).expect,
     ledger,
     find: (machine, id) => threads.find({ machine, id }),
+    ...(guess === undefined ? {} : { guess }),
   })
   yield* Effect.logInfo(`Your rules for new work go in ${preferences}`)
   const show = yield* Show.make(threads.detail)
@@ -319,6 +322,7 @@ export const serve = Effect.gen(function* () {
     reminders,
     memories,
     routines,
+    ...(guess === undefined ? {} : { guess }),
   })
   yield* Deferred.succeed(welcome, assistant.welcome)
   yield* Deferred.succeed(following, assistant.following)

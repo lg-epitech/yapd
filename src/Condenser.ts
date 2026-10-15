@@ -230,6 +230,7 @@ export const inEnglish = (model: Model["Type"], spoken: string) =>
   english(spoken)
     ? Effect.succeed(spoken)
     : model.ask(Translation, translating(spoken)).pipe(
+        Effect.annotateLogs({ role: "translate" }),
         Effect.map((translation) => translation.spoken.trim() || spoken),
         Effect.tap(() => Effect.logInfo(`Translated what wasn't in English: ${spoken}`)),
         Effect.catchAll((error) => Effect.logWarning("Could not translate", error).pipe(Effect.as(spoken))),
@@ -247,6 +248,7 @@ export const ProviderCondenser = Layer.effect(
     return {
       condense: (project, turn) =>
         model.ask(Condensed, prompt(project, turn, style)).pipe(
+          Effect.annotateLogs({ role: "condense" }),
           Effect.mapError((cause) => new CondenseError({ cause })),
           Effect.flatMap((condensed) =>
             Effect.map(
@@ -257,6 +259,7 @@ export const ProviderCondenser = Layer.effect(
         ),
       ask: (request, called) =>
         model.ask(Asked, asked(request, called, style)).pipe(
+          Effect.annotateLogs({ role: "question" }),
           Effect.mapError((cause) => new CondenseError({ cause })),
           // Said as news, whatever slipped through: never a question he'd answer to nobody.
           Effect.flatMap((what) =>
@@ -265,6 +268,7 @@ export const ProviderCondenser = Layer.effect(
         ),
       question: (part, called) =>
         model.ask(Reworded, questioned(part, called, style)).pipe(
+          Effect.annotateLogs({ role: "question" }),
           Effect.mapError((cause) => new CondenseError({ cause })),
           Effect.flatMap(({ spoken }) => Effect.map(inEnglish(model, spoken), (spoken) => ({ spoken: spoken.trim() }))),
         ),

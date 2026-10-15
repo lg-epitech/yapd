@@ -298,6 +298,7 @@ export const layer = Layer.scoped(
       onSome: ({ lines }) => Effect.succeed(lines),
       onNone: () =>
         model.ask(Lines, prompt(style.value)).pipe(
+          Effect.annotateLogs({ role: "persona" }),
           Effect.map(told),
           Effect.tap((lines) =>
             settings.write("persona", JSON.stringify({ style: style.value, lines })).pipe(Effect.ignore),

@@ -24,6 +24,9 @@ export class WriterModel extends Context.Tag("yapd/WriterModel")<
   }
 >() {}
 
+/** Works out what the user says to yapd, which can be left to a faster model than the one that talks, on the same CLI. */
+export class BrainModel extends Context.Tag("yapd/BrainModel")<BrainModel, Model["Type"]>() {}
+
 interface Chosen {
   readonly name: Name
   readonly model: string | undefined
@@ -93,6 +96,28 @@ export const writing = Effect.gen(function* () {
   )
 })
 
+/**
+ * What works out what the user says: the same, unless it's set apart, on the
+ * same CLI. Its own model keeps the effort and tier set for summaries, unless
+ * it has its own, but never the provider's defaults, tuned for its default
+ * model.
+ */
+export const thinking = Effect.gen(function* () {
+  const usual = yield* talking
+  const own = { model: yield* Config.brainModel, effort: yield* Config.brainEffort, tier: yield* Config.brainTier }
+  const shared = Option.isNone(own.model)
+  const set = { effort: yield* Config.effort, tier: yield* Config.tier }
+  return yield* choose(
+    usual.name,
+    {
+      model: shared ? Option.fromNullable(usual.model) : own.model,
+      effort: Option.orElse(own.effort, () => (shared ? Option.fromNullable(usual.effort) : set.effort)),
+      tier: Option.orElse(own.tier, () => (shared ? Option.fromNullable(usual.tier) : set.tier)),
+    },
+    { effort: "YAPD_BRAIN_EFFORT", tier: "YAPD_BRAIN_TIER" },
+  )
+})
+
 const described = ({ name, model, effort, tier }: Chosen) => [name, model, effort, tier && `${tier} tier`].filter(Boolean).join(" ")
 
 /** Runs the CLI once for a call. */
@@ -148,14 +173,25 @@ const make = (chosen: Chosen) =>
     }
   })
 
-/** One model for both when they're set the same, so they share what Codex keeps ready. */
+/** One model for those set the same, so they share what Codex keeps ready: another has a server and threads of its own. */
 export const ProviderModel = Layer.scopedContext(
   Effect.gen(function* () {
-    const [usual, writer] = [yield* talking, yield* writing]
+    const [usual, writer, brain] = [yield* talking, yield* writing, yield* thinking]
     yield* Effect.logInfo(`Writing with ${described(usual)}`)
     const model = yield* make(usual)
-    if (described(usual) === described(writer)) return Context.make(Model, model).pipe(Context.add(WriterModel, model))
-    yield* Effect.logInfo(`Writing prompts with ${described(writer)}`)
-    return Context.make(Model, model).pipe(Context.add(WriterModel, yield* make(writer)))
+    const writes =
+      described(usual) === described(writer) ? model : yield* Effect.zipRight(Effect.logInfo(`Writing prompts with ${described(writer)}`), make(writer))
+    const thinks =
+      described(brain) === described(usual)
+        ? model
+        : described(brain) === described(writer)
+          ? writes
+          : yield* Effect.zipRight(Effect.logInfo(`Working out what you say with ${described(brain)}`), make(brain))
+    // A press gets the brain's own server ready too, as it does when the brain shares the writer's.
+    const pressed =
+      thinks === model || thinks === writes
+        ? writes
+        : { ...writes, prepare: Effect.all([writes.prepare, thinks.prepare], { concurrency: "unbounded", discard: true }) }
+    return Context.make(Model, model).pipe(Context.add(WriterModel, pressed), Context.add(BrainModel, thinks))
   }),
 )

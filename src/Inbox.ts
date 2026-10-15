@@ -2,6 +2,7 @@ import type { Duration, Effect } from "effect"
 import type { Ticket } from "./ClaudeCode.ts"
 import type { Priority } from "./Condenser.ts"
 import type { Answer, Question, Update } from "./Conversation.ts"
+import type { Timing } from "./Latency.ts"
 
 /** An update that is condensed, rendered, and waiting for its turn to be spoken. */
 export interface Ready {
@@ -15,6 +16,8 @@ export interface Ready {
   readonly replay?: Replay
   /** Put back to be read again from where he cut in, how far into it that is, in seconds. */
   readonly from?: number
+  /** From its Stop to when it was ready, logged as it starts to play: not for one put back, which is timed already. */
+  readonly timing?: Timing
 }
 
 /** An update asked for again, by its id among those heard, while yapd was on for the `turns`th time. */
@@ -109,6 +112,8 @@ export interface Notice {
    * to play.
    */
   readonly handoff?: { readonly since: number; readonly responder: number; readonly brain: number; readonly ran: number }
+  /** For what came of what he said, from when he stopped talking or pressed to send it, and how long each step took, logged as it starts to play. */
+  readonly timing?: Timing
 }
 
 /** A notice that is rendered, and waiting for its turn like updates do. */
@@ -119,6 +124,8 @@ export interface Said {
   readonly arrivedAt: number
   readonly notice: Notice
   readonly audio: string
+  /** As the notice's, or from when it was told, with its render too, logged as it starts to play. */
+  readonly timing?: Timing
 }
 
 export type Entry = Ready | Said

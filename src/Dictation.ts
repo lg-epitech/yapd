@@ -5,6 +5,7 @@ import { join } from "node:path"
 import { Audio, tone, wav } from "./Audio.ts"
 import { defaults } from "./Endpointer.ts"
 import * as Floor from "./Floor.ts"
+import { dated } from "./Latency.ts"
 import { Shortcut } from "./Shortcut.ts"
 import { DictationTranscriber } from "./Transcriber.ts"
 import { Vad } from "./Vad.ts"
@@ -170,6 +171,8 @@ export const WhisperDictation = Layer.scoped(
     const dictations = yield* FiberSet.make()
     let drops = 0
     let pressed = 0
+    /** Whether a dictation was heard since yapd started, which loaded the model for it. */
+    let heardOnce = false
 
     const dir = yield* Effect.acquireRelease(
       Effect.promise(() => mkdtemp(join(tmpdir(), "yapd-dictation-"))),
@@ -207,6 +210,25 @@ export const WhisperDictation = Layer.scoped(
         const heard: Array<string> = []
         for (const spans of windows(voiced)) heard.push(yield* transcriber.transcribe(gather(frames, spans)))
         return heard.filter((text) => text !== "").join(" ")
+      })
+
+    /**
+     * Logs how long a dictation sent at `at` took to hear, with none of its
+     * words: in how many windows, how much of it was speech, how long after his
+     * last word he pressed, and whether it was the first since the model loaded.
+     */
+    const timed = (voiced: ReadonlyArray<boolean>, at: number) =>
+      Effect.gen(function* () {
+        const now = yield* Clock.currentTimeMillis
+        const count = voiced.filter(Boolean).length < defaults.confirm ? 0 : windows(voiced).length
+        const last = voiced.lastIndexOf(true)
+        const first = !heardOnce
+        heardOnce = true
+        yield* Effect.logInfo(
+          `Dictation: ${count} ${count === 1 ? "window" : "windows"}, ${(voiced.filter(Boolean).length * perFrame).toFixed(1)} s of speech, ${
+            last === -1 ? "no word" : `${((voiced.length - 1 - last) * perFrame).toFixed(1)} s from the last word to the press`
+          }, heard in ${((now - at) / 1000).toFixed(1)} s${first ? ", first since load" : ""} ${dated(now)}`,
+        )
       })
 
     /**
@@ -282,6 +304,7 @@ export const WhisperDictation = Layer.scoped(
         // Transcribing starts as the cue plays rather than after it, which only says it was sent.
         const heard = yield* Fiber.join(classified).pipe(
           Effect.flatMap(() => Effect.map(transcribe(frames, voiced), (text) => ({ text, voiced: voiced.filter(Boolean).length * perFrame }))),
+          Effect.tap(() => timed(voiced, at)),
           Effect.forkIn(scope),
         )
         yield* cue("sent")

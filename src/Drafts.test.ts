@@ -79,10 +79,15 @@ const drafts = (
     /** Whether what's started is written down first, in a ledger of its own, and whether writing it down takes a second. */
     readonly ledger?: boolean | "slow"
     readonly lines?: Persona.Lines
+    /** What starts instead of what was asked, as T3 Code may have it. */
+    readonly startedAs?: Partial<Started>
+    /** Whether lines are rendered ahead on a guess, which are then kept in `guessed`. */
+    readonly guessing?: boolean
   } = {},
 ) =>
   Effect.gen(function* () {
     const started: Array<{ readonly machine: string; readonly request: Request }> = []
+    const guessed: Array<string> = []
     const said: Array<{ readonly spoken: string; readonly came: Drafts.Outcome["_tag"] | "Failed" }> = []
     const asked: Array<Material> = []
     const catalogs: Array<string> = []
@@ -104,6 +109,7 @@ const drafts = (
             branch: null,
             model: request.model ?? "claude-fable-5-1",
             worktree: request.worktree === true,
+            ...options.startedAs,
           } satisfies Started
         }),
     })
@@ -132,6 +138,7 @@ const drafts = (
       rules: Effect.succeed(Option.some("Fable on high for hard bugs.")),
       recent: Effect.succeed([]),
       ...(options.ledger === undefined || options.ledger === false ? {} : { ledger }),
+      ...(options.guessing === true ? { guess: (line: string) => Effect.sync(() => (guessed.push(line), true)) } : {}),
     }).pipe(
       Effect.provideService(Writer, {
         decide: (material) =>
@@ -192,6 +199,7 @@ const drafts = (
       wait: (seconds: number) => TestClock.adjust(`${seconds} seconds`).pipe(Effect.zipRight(flush)),
       started,
       said,
+      guessed,
       ledger,
       spoken: () => said.map(({ spoken }) => spoken),
       picks: () => picks,
@@ -312,6 +320,34 @@ describe("Drafts", () => {
     expect((await asked({ evidence: "in scratch", machine: "", spoken: "Looking into it, on Sol." })).started.map(({ request }) => request.project)).toEqual(["/t3/scratch"])
     // A machine that couldn't say what it can start says why, as there's nothing for him to answer.
     expect(await asked({ machine: "rig" }, true)).toEqual({ started: [], spoken: ["About the glucose question: I can't reach rig."] })
+  })
+
+  test("a confirmation rendered ahead is never said when it doesn't match what started", async () => {
+    const lines = { ...Persona.plain, onIt: "Right away, sir.", address: "sir" }
+    const starting = (decided: Partial<Decision>, startedAs: Partial<Started> = {}) =>
+      run(
+        Effect.gen(function* () {
+          const { dictate, flush, guessed, spoken } = yield* drafts(() => decision({ evidence: "yapd", ...decided }), { lines, startedAs, guessing: true })
+          yield* dictate("In yapd, fix the loader.")
+          yield* flush
+          return { guessed: [...guessed], said: spoken() }
+        }),
+      )
+    // Started as asked, what was rendered ahead is word for word what's said, so it's what plays.
+    expect(await starting({ worktree: false, spoken: "In yapd, on Fable, without a worktree." })).toEqual({
+      guessed: ["Right away, sir. In yapd, on Fable, without a worktree."],
+      said: ["Right away, sir. In yapd, on Fable, without a worktree."],
+    })
+    // Guessed without a worktree and started in one, it's the worktree that's said.
+    expect(await starting({ worktree: false, spoken: "In yapd, on Fable, without a worktree." }, { worktree: true })).toEqual({
+      guessed: ["Right away, sir. In yapd, on Fable, without a worktree."],
+      said: ["Started in yapd, on Claude Fable 5.1, in a worktree."],
+    })
+    // The writer's words naming Sol for work that starts on Opus: the plain facts, naming Opus, as they're guessed to be.
+    expect(await starting({ model: "claude-opus-5-5", spoken: "In yapd, on Sol, in a worktree." })).toEqual({
+      guessed: ["Started in yapd, on Claude Opus 5.5, in a worktree."],
+      said: ["Started in yapd, on Claude Opus 5.5, in a worktree."],
+    })
   })
 
   test("says what really started when that's not what was asked", () => {

@@ -283,6 +283,8 @@ Leave out the model or the effort to get that CLI's default. Both are passed thr
 | `cursor` | [Cursor](https://cursor.com/cli) | in the model name |
 | `gemini` | [Gemini CLI](https://github.com/google-gemini/gemini-cli) | a model alias from its settings |
 
+What you say to yapd, by the shortcut or back to something it said, is worked out by the same model. To have a faster one decide what you meant, set any of `YAPD_BRAIN_MODEL`, `YAPD_BRAIN_EFFORT` and `YAPD_BRAIN_TIER`, which go to the same CLI. A model of its own keeps the effort and tier you set for summaries unless you give it its own, so with `YAPD_MODEL=gpt-6-sol`, `YAPD_EFFORT=low` and `YAPD_TIER=priority`, `YAPD_BRAIN_MODEL=gpt-6.1-sol` alone runs on low and the fast tier. It then gets a Codex of its own, with its own threads kept ready. Summaries, digests and catch-ups stay with the summaries' model.
+
 ## Style
 
 yapd talks plainly unless you tell it otherwise. Describe how it should talk in `~/.yapd/.env` and run `yapd install` again:

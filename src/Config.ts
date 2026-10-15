@@ -42,6 +42,11 @@ export const writerModel = optional("YAPD_WRITER_MODEL")
 export const writerEffort = optional("YAPD_WRITER_EFFORT")
 export const writerTier = optional("YAPD_WRITER_TIER")
 
+/** The model that works out what the user says to yapd, on the CLI that writes summaries, with its effort and tier. Each defaults to theirs. */
+export const brainModel = optional("YAPD_BRAIN_MODEL")
+export const brainEffort = optional("YAPD_BRAIN_EFFORT")
+export const brainTier = optional("YAPD_BRAIN_TIER")
+
 /** What the user calls this machine, like "rosie", since a Mac's hostname is rarely it. Defaults to the hostname, without its domain. */
 export const name = optional("YAPD_NAME")
 

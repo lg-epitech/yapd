@@ -5,6 +5,7 @@ import * as Conversation from "./Conversation.ts"
 import type * as Drafts from "./Drafts.ts"
 import * as Hands from "./Hands.ts"
 import type { Notice } from "./Inbox.ts"
+import * as Latency from "./Latency.ts"
 import { type Entry, type Journal, type Kept, routinesIn, routinesNamed, unroutined } from "./Journal.ts"
 import * as Ledger from "./Ledger.ts"
 import * as Memory from "./Memory.ts"
@@ -100,6 +101,12 @@ export interface Utterance {
    * nothing written to it by yapd's own hand unless it is.
    */
   readonly own?: Brain.Own
+  /**
+   * Said back to something yapd said, when he stopped talking, by the clock,
+   * which what comes of it is timed from: a dictation's is its `at`, when he
+   * pressed to send it.
+   */
+  readonly stopped?: number
 }
 
 /**
@@ -438,6 +445,8 @@ export interface Outcome {
    * nothing said after it is listened for.
    */
   readonly unsent?: true
+  /** What it is, for how long it took in the log, when it's more than what was decided, like where work started: "start on rig, in a worktree". */
+  readonly timed?: string
 }
 
 /** What the user says to yapd itself, worked out and acted on. */
@@ -990,8 +999,12 @@ export const make = (options: {
   readonly lastHeard: Effect.Effect<
     Option.Option<{ readonly update: Conversation.Update; readonly said: string; readonly at: number; readonly playing: boolean; readonly turns: number }>
   >
-  /** Something is about to be said, so the speaker can get ready while it's worked out. */
-  readonly coming: Effect.Effect<void>
+  /**
+   * Something is about to be said, so the speaker can get ready while it's
+   * worked out, and stay so until what this gives back lets go, once it's
+   * said or comes to nothing.
+   */
+  readonly coming: Effect.Effect<Effect.Effect<void>>
   /**
    * An answer is on its way, so nothing but answers is said until what this
    * gives back is run, once it's queued or won't come, or for a while after
@@ -1031,6 +1044,8 @@ export const make = (options: {
   readonly memories?: Memory.Memories
   /** The routines he wrote in his preferences, read as they are now. */
   readonly routines?: Effect.Effect<ReadonlyArray<Preferences.Routine>>
+  /** Renders a line ahead on a guess, so it plays at once if it's what's said next: how a thread's question is answered, as it's asked. */
+  readonly guess?: (line: string) => Effect.Effect<boolean>
 }) =>
   Effect.gen(function* () {
     const brain = yield* Brain.Brain
@@ -1109,6 +1124,8 @@ export const make = (options: {
     const over = new Map<number, string | undefined>()
     /** Prompts being written for what was said before it's known whether it's new work, by utterance. */
     const writing = new Map<string, Fiber.RuntimeFiber<Either.Either<Drafts.Written, string>>>()
+    /** When working out what he said began and was decided, by what he said, which what's said of it is timed by as it plays. */
+    const workedOut = new WeakMap<Utterance, { readonly began: number; readonly decided: number }>()
     /** What's under way for a request, being worked out or in the background, stopped when yapd is turned off. */
     const jobs = yield* FiberSet.make()
     /** How many times yapd had been turned on or off when it was last turned off, so what's begun after for a request heard by then is stopped too. */
@@ -1161,6 +1178,29 @@ export const make = (options: {
       )
 
     const mint = (at: number, prefix: string) => `${prefix}${at.toString(36)}${crypto.randomUUID().slice(0, 4)}`
+
+    /**
+     * How long what's said of what he said took by `at`, as it's told, from
+     * the press that sent it or his last word: to hear it, to work it out and
+     * to do it, to log as it plays, under how it came and was worked out and
+     * what was decided, like "dictation, model, look", or what the outcome
+     * says it was, like where work started. None for what wasn't worked out
+     * from his words.
+     */
+    const timed = (thought: Thought, at: number, outcome?: Pick<Outcome, "timed">): Latency.Timing | undefined => {
+      const { utterance } = thought
+      const worked = workedOut.get(utterance)
+      if (worked === undefined) return undefined
+      const anchor = utterance.stopped ?? utterance.at
+      const what = `${utterance.via === "shortcut" ? "dictation" : utterance.via}, ${thought.source}, ${outcome?.timed ?? thought.decision.act}`
+      const since = utterance.via === "shortcut" ? "the press" : utterance.via === "typed" ? "when it was typed" : "his last word"
+      const steps: ReadonlyArray<readonly [string, number]> = [
+        ["heard", worked.began - anchor],
+        ["worked out", worked.decided - worked.began],
+        ["done", at - worked.decided],
+      ]
+      return steps.reduce((timing, [name, ms]) => Latency.stage(timing, name, ms), Latency.from(what, anchor, since))
+    }
 
     /**
      * Whether yapd was turned off or on since it had been turned on or off
@@ -1794,13 +1834,14 @@ export const make = (options: {
       })
 
     /** Says something now, ahead of the rest of the answer, like that it's looking. */
-    const meanwhile = (spoken: string, utterance: Utterance) =>
-      Effect.flatMap(Clock.currentTimeMillis, (at) =>
-        options.tell(
-          { id: mint(at, "a"), kind: "answer", priority: "needs-you", spoken, at, stale: Effect.succeed(false) },
-          utterance.turns,
-        ),
-      )
+    const meanwhile = (spoken: string, thought: Thought) =>
+      Effect.flatMap(Clock.currentTimeMillis, (at) => {
+        const timing = timed(thought, at, { timed: `${thought.decision.act}, meanwhile` })
+        return options.tell(
+          { id: mint(at, "a"), kind: "answer", priority: "needs-you", spoken, at, stale: Effect.succeed(false), ...(timing === undefined ? {} : { timing }) },
+          thought.utterance.turns,
+        )
+      })
 
     /**
      * An answer, which what he said next can be about, decided at once or on a
@@ -1834,7 +1875,7 @@ export const make = (options: {
     /** Reads what a thread is doing now, and answers from it with a second look. */
     const look = (target: Threads.Listed, thought: Thought, said: Lines, step: number) =>
       Effect.gen(function* () {
-        yield* meanwhile(said.checking, thought.utterance)
+        yield* meanwhile(said.checking, thought)
         const detail = yield* threads.detail(target.ref, target.thread.pendingRuntimeRequest?.id).pipe(Effect.either)
         if (Either.isLeft(detail)) {
           yield* Effect.logWarning(`Could not read ${target.called}`, detail.left)
@@ -1975,6 +2016,7 @@ export const make = (options: {
               say: spoken,
               subject: { _tag: "Answer", said: spoken, about: Option.some({ machine: machine.name, id: started.thread }) },
               kind: "done",
+              timed: `start on ${machine.name}, ${started.worktree ? "in a worktree" : "without a worktree"}`,
               changed: { what: "acted", utterance: utterance.id },
               // Only once it's known to play, so a line for going ahead that's dropped as yapd is turned off, or can't be played, never counts as the last one he heard.
               confirmed: persona.said(spoken),
@@ -2007,7 +2049,9 @@ export const make = (options: {
           }
           case "Launching": {
             // T3 Code can take minutes to get a worktree ready, so what comes of it is said when it's ready, and nothing else waits for it meanwhile.
+            // The speaker stays ready only for a start without one: a worktree takes longer than it would wait for anything on its way.
             const arrived = yield* options.awaiting
+            const letGo = outcome.worktree ? Effect.void : yield* options.coming
             const settled = yield* underWay(utterance, outcome, `Starting ${outcome.about || "it"}, which T3 Code is still getting ready.`)
             // Under way until the launch itself settles, not only until what's said of it stops: turning yapd off stops that, but not the launch.
             yield* outcome.then.pipe(Effect.ensuring(settled), Effect.forkIn(scope))
@@ -2016,6 +2060,7 @@ export const make = (options: {
                 Effect.flatMap((after) => begun(after, thought, said, asked)),
                 Effect.flatMap((told) => deliver(told, thought)),
                 Effect.ensuring(arrived),
+                Effect.ensuring(letGo),
                 Effect.annotateLogs({ utterance: utterance.id }),
               ),
               utterance.turns,
@@ -2087,6 +2132,24 @@ export const make = (options: {
       Option.exists(Brain.focused(situation), ({ ref: focus }) => Threads.same(focus, ref))
         ? Option.none<string>()
         : Option.fromNullable(situation.desk.threads.find((listed) => Threads.same(listed.ref, ref))?.called)
+
+    /**
+     * How the part of a thread's question being asked would be answered by
+     * picking each of its options, as what's done says it of the thread he's
+     * on: only its last part, or its only one, since a pick on a part before
+     * that is followed by the next part instead.
+     */
+    const picks = (open: Open, said: Lines): ReadonlyArray<string> => {
+      const { asks } = open
+      const to = open.candidates[0]
+      if (asks?._tag !== "Question" || to === undefined || asks.part !== asks.questions.length - 1) return []
+      const question = asks.questions[asks.part]
+      if (question === undefined) return []
+      const part = Questions.said(question, Option.none())
+      return part.options.map((_, index) =>
+        Hands.done({ _tag: "Reply", to, requestId: asks.requestId, answers: {}, said: Option.some(Questions.spoken(part, [index])) }, "now", said, Option.none()),
+      )
+    }
 
     /** Two steps' lines as one, "sir" said once. */
     const joined = (first: string, then: string, said: Lines) => {
@@ -4567,7 +4630,15 @@ export const make = (options: {
      */
     const listen =
       (open: Open) =>
-      (heard: string, voiced: number, echo?: string, afterPause?: string, unsaid?: string): Effect.Effect<Option.Option<Effect.Effect<void>>> =>
+      (
+        heard: string,
+        voiced: number,
+        echo?: string,
+        afterPause?: string,
+        unsaid?: string,
+        _carried?: boolean,
+        stopped?: number,
+      ): Effect.Effect<Option.Option<Effect.Effect<void>>> =>
       Effect.gen(function* () {
         const at = yield* Clock.currentTimeMillis
         const { turns } = yield* options.power
@@ -4581,6 +4652,7 @@ export const make = (options: {
           at,
           voiced,
           turns,
+          ...(stopped === undefined ? {} : { stopped }),
           ...over,
           ...(unsaid === undefined || unsaid === "" ? {} : { unsaid }),
           // Asked of what was said over an update, anything said back to it, an answer or something new, is held to that update's own
@@ -4642,7 +4714,15 @@ export const make = (options: {
      */
     const followUp =
       (about: Subject, line: Effect.Effect<string>, done?: Brain.Done, own?: Brain.Own) =>
-      (heard: string, voiced: number, echo?: string, afterPause?: string, unsaid?: string, carried?: boolean): Effect.Effect<Option.Option<Effect.Effect<void>>> =>
+      (
+        heard: string,
+        voiced: number,
+        echo?: string,
+        afterPause?: string,
+        unsaid?: string,
+        carried?: boolean,
+        stopped?: number,
+      ): Effect.Effect<Option.Option<Effect.Effect<void>>> =>
         Effect.gen(function* () {
           const at = yield* Clock.currentTimeMillis
           const { turns } = yield* options.power
@@ -4658,6 +4738,7 @@ export const make = (options: {
             at,
             voiced,
             turns,
+            ...(stopped === undefined ? {} : { stopped }),
             ...overItself({ echo, afterPause, echoRoutines: routinesOf(about).routines }),
             ...(echo === undefined || carried !== true ? {} : { carried }),
             ...(done === undefined ? {} : { afterDone: done }),
@@ -4698,15 +4779,24 @@ export const make = (options: {
       // Put back, the update it was handed over from waits behind its answer, however long a dictation's request holds it up.
       Effect.flatMap(given.handoff?.cutOff === true ? (options.awaitingFor?.(putBackFor) ?? options.awaiting) : options.awaiting, (arrived) =>
         background(
-          turn.withPermits(1)(
-            Effect.gen(function* () {
-              if (given.instead !== undefined && (yield* given.instead.moot)) return yield* given.instead.late
-              if (given.handoff === undefined) yield* Effect.logInfo(`Heard: ${logged(thought.utterance.heard)}`)
-              const outcome = yield* acting(thought)
-              yield* note(thought, outcome, thought.utterance.at, given.handoff)
-              yield* deliver(outcome, thought, given.handoff)
-              yield* offering
-            }),
+          // What comes of it says something, but for a dismissal or what's let go, so the speaker gets ready, or stays so, until it's said or
+          // comes to nothing.
+          Effect.acquireUseRelease(
+            thought.decision.act === "dismiss" || thought.decision.act === "resume" ? Effect.succeed(Effect.void) : options.coming,
+            () =>
+              turn.withPermits(1)(
+                Effect.gen(function* () {
+                  if (given.instead !== undefined && (yield* given.instead.moot)) return yield* given.instead.late
+                  // Worked out as he talked, and taken once he'd stopped.
+                  workedOut.set(thought.utterance, { began: thought.utterance.at, decided: yield* Clock.currentTimeMillis })
+                  if (given.handoff === undefined) yield* Effect.logInfo(`Heard: ${logged(thought.utterance.heard)}`)
+                  const outcome = yield* acting(thought)
+                  yield* note(thought, outcome, thought.utterance.at, given.handoff)
+                  yield* deliver(outcome, thought, given.handoff)
+                  yield* offering
+                }),
+              ),
+            (letGo) => letGo,
           ).pipe(
             Effect.ensuring(arrived),
             Effect.ensuring(given.holding === undefined ? Effect.void : release(given.holding, Brain.mayBeOwn(thought.utterance))),
@@ -4794,12 +4884,18 @@ export const make = (options: {
         // Of what was said over an update, a follow-up to what came of it is held to that update's own thread as that was: never written
         // to by yapd's own hand unless it's steered, while its hook may still wait.
         const { own } = utterance
+        const timing = "utterance" in of ? timed(of, at, outcome) : undefined
+        // A thread's question, answered by picking one of its options, is answered as he hears it, so each such answer is rendered then, one
+        // after another, on a guess: the one he picks plays at once.
+        const { guess } = options
+        const guessing = open === undefined || guess === undefined ? Effect.void : Effect.forkIn(Effect.forEach(picks(open, yield* persona.lines), guess, { discard: true }), scope)
         yield* options.tell(
           {
             id: mint(at, "a"),
             kind,
             priority: "needs-you",
             spoken: outcome.say,
+            ...(timing === undefined ? {} : { timing }),
             ...(instead === undefined ? {} : { instead: { spoken: instead, when: off, used } }),
             ...(withheld ? { withheld } : {}),
             at,
@@ -4830,6 +4926,7 @@ export const make = (options: {
               Effect.zipRight(Effect.suspend(() => (reworded && instead !== undefined && Option.isSome(entry) && !withheld ? journal.reword(entry.value, instead) : Effect.void))),
               // Why a machine can't be reached, once he's heard it, isn't said again until it's been back and gone down again.
               Effect.zipRight(threads.heard(outcome.say)),
+              Effect.zipRight(guessing),
             ),
             // What he missed that it tells him of isn't missed while it waits to be said or is said, nor told again by another catch-up.
             ...(missed === undefined ? {} : { telling: Effect.succeed(missed) }),
@@ -5360,8 +5457,8 @@ export const make = (options: {
           return Option.none<string>()
         }
         yield* Effect.logInfo(`Heard: ${logged(utterance.heard)}`)
-        // Whatever comes of it is said, so the speaker gets ready while it's worked out.
-        yield* options.coming
+        // Whatever comes of it is said, so the speaker gets ready while it's worked out, until it's said or comes to nothing.
+        yield* Effect.acquireRelease(options.coming, (letGo) => letGo)
         const began = yield* Clock.currentTimeMillis
         const about = pressed ?? (yield* subject)
         const glanced = yield* glance(utterance, about, [])
@@ -5395,13 +5492,15 @@ export const make = (options: {
           const answering = Option.isSome(asked) && pending === "answers"
           if (!(answering || (act === "start" && Option.isNone(asked)))) yield* letGo
         }
-        yield* Effect.logInfo(`Routed: ${routed(thought, (yield* Clock.currentTimeMillis) - began)}`)
+        const decided = yield* Clock.currentTimeMillis
+        workedOut.set(utterance, { began, decided })
+        yield* Effect.logInfo(`Routed: ${routed(thought, decided - began)}`)
         const outcome = yield* acting(thought).pipe(Effect.ensuring(letGo))
         yield* note(thought, outcome, began)
         yield* deliver(outcome, thought)
         yield* offering
         return Option.some(utterance.id)
-      }).pipe(Effect.ensuring(letGo), turn.withPermits(1), Effect.annotateLogs({ utterance: utterance.id }))
+      }).pipe(Effect.scoped, Effect.ensuring(letGo), turn.withPermits(1), Effect.annotateLogs({ utterance: utterance.id }))
     }
 
     /** The dictation a press began has ended, however long it took: what was kept for it, let go of. `cut` is the question it may have cut off. */
@@ -5555,7 +5654,7 @@ export const make = (options: {
           done,
           own,
         ),
-      over: (update: Conversation.Update, lines: ReadonlyArray<Line>, line: string, given: Over) => (heard: string, voiced: number, echo?: string, afterPause?: string, unsaid?: string) =>
+      over: (update: Conversation.Update, lines: ReadonlyArray<Line>, line: string, given: Over) => (heard: string, voiced: number, echo?: string, afterPause?: string, unsaid?: string, stopped?: number) =>
         Effect.gen(function* () {
           const began = yield* Clock.currentTimeMillis
           const { turns } = yield* options.power
@@ -5569,6 +5668,7 @@ export const make = (options: {
             at: began,
             voiced,
             turns,
+            ...(stopped === undefined ? {} : { stopped }),
             ...overItself({ echo, afterPause }),
             // As said back to a "done" line, so what may all be yapd's own words is let go, or at most asked about in code's own question.
             afterDone: given.done,

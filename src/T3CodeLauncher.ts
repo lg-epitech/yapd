@@ -2,6 +2,7 @@ import { Clock, Duration, Effect, Either, Option, type Redacted, Schema } from "
 import { realpath } from "node:fs/promises"
 import { homedir } from "node:os"
 import { basename, join } from "node:path"
+import { dated } from "./Latency.ts"
 import { type Catalog, type Launcher, LaunchError, type Request, type Started } from "./Launcher.ts"
 import { run } from "./Process.ts"
 import * as Server from "./T3CodeServer.ts"
@@ -308,6 +309,14 @@ const first = ({ projection }: Launched) => projection.runs.at(-1)?.status
 const handing = "1 minute"
 
 /**
+ * How long to wait before looking again at new work being got ready, asked
+ * for at `asked`, in ms: a quarter of a second for its first ten seconds, by
+ * when work without a worktree usually is, then a second, so a worktree that
+ * takes minutes isn't asked about four times a second.
+ */
+const pace = (asked: number, now: number): Duration.DurationInput => (now - asked < 10_000 ? "250 millis" : "1 second")
+
+/**
  * How new work is getting on, as T3 Code shows its thread, by the checks a
  * launch waits on: with no run, which T3 Code shows as idle, so the work isn't
  * in it yet; its workspace still being got ready; ended before its turn
@@ -325,8 +334,8 @@ export const progress = (thread: Pick<T3Live.Thread, "status" | "latestRunStarte
 
 /**
  * New work's thread as `look` shows it once it's no longer being got ready,
- * or as it last did when a launch would have given up, looked at every second
- * meanwhile, as a launch looks: none if there's no thread for it. With no run,
+ * or as it last did when a launch would have given up, looked at as often as
+ * a launch looks meanwhile: none if there's no thread for it. With no run,
  * it's waited for only as long after it was asked for, at `asked`, in ms, as
  * T3 Code can take to put the work in; still without it then, it's as good as
  * none, since the work may yet go in, so there's no saying it didn't start.
@@ -340,7 +349,7 @@ export const readied = (look: Effect.Effect<Option.Option<T3Live.Thread>>, asked
       Option.match(Option.map(thread, progress), { onNone: () => 0, onSome: (now) => (now === "preparing" ? until : now === "empty" ? filled : 0) })
     let now = yield* look
     while ((yield* Clock.currentTimeMillis) < waited(now)) {
-      yield* Effect.sleep("1 second")
+      yield* Effect.sleep(pace(asked, yield* Clock.currentTimeMillis))
       const next = yield* look
       if (Option.isSome(next)) now = next
     }
@@ -502,6 +511,7 @@ export const launcher = (
 ): Launcher => ({
   start: (request) =>
     Effect.gen(function* () {
+      const began = yield* Clock.currentTimeMillis
       const refuse = (reason: string) => new LaunchError({ reason })
       const { api, call } = yield* reach
 
@@ -547,12 +557,16 @@ export const launcher = (
       const started = request.ids === undefined ? ids() : { ...ids(), ...request.ids }
       /** Whether T3 Code took the launch, after which whatever goes wrong may have left it started. */
       let asked = false
+      /** How many times it was looked at while T3 Code got it ready. */
+      let polls = 0
       const prepared = yield* Effect.gen(function* () {
         let launched = yield* call("orchestration.launchThread", launch(decided, started), Launched, "30 seconds")
         asked = true
+        const answered = yield* Clock.currentTimeMillis
         // T3 Code gets the workspace ready after answering. Fetching and checking out can take minutes.
         while (preparing(first(launched))) {
-          yield* Effect.sleep("1 second")
+          yield* Effect.sleep(pace(answered, yield* Clock.currentTimeMillis))
+          polls++
           launched = yield* api(`/api/orchestration/threads/${encodeURIComponent(started.thread)}/bounded`, Launched)
         }
         return launched
@@ -572,6 +586,8 @@ export const launcher = (
       if (short(first(prepared))) return yield* new LaunchError({ reason: unready(decided.worktree, scratch ? undefined : project.title) })
       const { thread } = prepared.projection
       const level = effort(thread.modelSelection)
+      const ended = yield* Clock.currentTimeMillis
+      yield* Effect.logInfo(`Launched in ${((ended - began) / 1000).toFixed(2)} s after ${polls} ${polls === 1 ? "poll" : "polls"} ${dated(ended)}`)
       return {
         thread: started.thread,
         project: scratch ? "scratch" : project.title,
