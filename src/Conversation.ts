@@ -833,6 +833,8 @@ export const make = (options: {
             yield* part.finished
             ended = true
           }
+          // Not knowing where its first part ends, it can't carry on from there without saying some of it twice.
+          if (part.duration <= 0) return yield* new AudioError({ message: "Could not tell where the line's first part ends" })
           yield* whole
           const from = inside ? part.duration - handover : part.duration
           const started = yield* lock.withPermits(1)(
