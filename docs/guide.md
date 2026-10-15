@@ -21,6 +21,8 @@ Then it runs yapd in the background with launchd, starts it at login and restart
 
 Last, it runs `yapd doctor`, which checks all of that and says how to fix what's missing. Run it whenever yapd seems off.
 
+`YAPD_HOME` moves `~/.yapd` somewhere else. Set it in your shell before `yapd setup`, since the settings file lives inside it.
+
 Doctor also checks whether Codex trusts yapd's hooks. If they're untrusted or have changed, run `codex` and review them in `/hooks` on the machine running the agent. Trust survives logins and restarts, but changing a hook definition, including its command, requires approval again.
 
 Your settings go in `~/.yapd/.env`, where yapd also keeps what it downloads and remembers. `YAPD_PORT` moves the port its hooks and its [API](api.md) use, 4747 by default.
@@ -249,7 +251,7 @@ The first is Claude Code's `--permission-mode` and the second Codex's sandbox. L
 
 You reply to a headless session like to any other. It has no terminal to type into, so yapd picks the session up again for one more turn.
 
-## On other machines
+## New work on other machines
 
 Work starts on the machine the project is on. yapd asks every machine in `YAPD_REMOTES` what it can start as you press the shortcut, so that it knows by the time you've finished talking, and starts the session there over SSH, as with follow-ups.
 
@@ -386,7 +388,7 @@ YAPD_REMOTES=server=me@server.example.com
 
 A bare `YAPD_REMOTES=server` uses `ssh server`, so an alias from `~/.ssh/config` works. Separate several with commas. yapd SSHes in with `BatchMode`, so it needs a key that works without a password prompt, and `yapd` has to be on the `PATH` that non-interactive SSH commands get: `ssh server yapd` should print yapd's usage, not "command not found". Adding `~/.bun/bin` to `PATH` in `~/.zshenv`, or at the top of `~/.bashrc`, is usually enough. `yapd doctor` on the Mac tries each server this way.
 
-Claude Code sessions in a terminal on the server get replies through their waiting hook, as they do on the Mac. T3 Code threads and Codex sessions there get them through `yapd relay`, so a T3 Code token for the server's own T3 Code goes in `~/.yapd/.env` on the server. [New work](#on-other-machines) starts there the same way, with the server's own settings.
+Claude Code sessions in a terminal on the server get replies through their waiting hook, as they do on the Mac. T3 Code threads and Codex sessions there get them through `yapd relay`, so a T3 Code token for the server's own T3 Code goes in `~/.yapd/.env` on the server. [New work](#new-work-on-other-machines) starts there the same way, with the server's own settings.
 
 While it runs, yapd also keeps one SSH connection to each server open, asks `yapd t3` there where its T3 Code listens and for that token, which it keeps in memory only, and forwards a port on the Mac's `127.0.0.1` to it. The server's threads then show up beside the Mac's, by machine. Their questions are read out, and they take messages and stops by voice the same way, each only on its own machine. Follow-ups and new work go through that connection rather than a fresh login. A server that can't be reached is tried again in the background, and said to be out of reach once you ask for something there, while the Mac's threads carry on. The server's yapd needs to be one with `yapd t3`.
 

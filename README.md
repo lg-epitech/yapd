@@ -37,7 +37,7 @@ The menu bar app, in the [latest release](https://github.com/lg-epitech/yapd/rel
 
 ## Talking back
 
-Talk while yapd is talking and it stops. "Got it" ends the update, "which PR was that?" gets an answer, and "merge it" goes to the agent as your next message. "Mute." on its own turns yapd off. If you were talking to someone else, it picks up where it left off.
+Talk while yapd is talking and it stops. "Got it" ends the update, "which PR was that?" gets an answer, and "merge it" goes to the agent as your next message. "Mute." on its own turns yapd off, and pressing the shortcut and saying "turn on" brings it back. If you were talking to someone else, it picks up where it left off.
 
 Replies reach Claude Code wherever it runs, Codex in a terminal and T3 Code threads. It cancels its own echo, so speakers are fine. yapd only speaks English, but `YAPD_LANGUAGE=french` lets you answer in French.
 

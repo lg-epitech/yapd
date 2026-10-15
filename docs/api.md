@@ -31,13 +31,13 @@ There's no authentication: anything that can reach the port can use it, as hooks
       "key": "t3:Rosie:850299f8-3b2a-4c1d-8e7f-6a5b4c3d2e1f",
       "machine": "Rosie",
       "thread": "850299f8-3b2a-4c1d-8e7f-6a5b4c3d2e1f",
-      "title": "Migrate the Tezos integration",
+      "title": "Migrate the billing service",
       "project": {
-        "name": "integration",
+        "name": "billing",
         "id": "5c1e9a40-2d7b-4e3f-8a61-9b0c7d2e4f13",
         "icon": { "kind": "image", "url": "/projects/Rosie/5c1e9a40-2d7b-4e3f-8a61-9b0c7d2e4f13/icon", "revision": "9f2c4e1a7b3d", "text": "IN", "color": "indigo" }
       },
-      "text": "integration. The migration is done and the tests pass.",
+      "text": "billing. The migration is done and the tests pass.",
       "at": "2026-10-02T14:01:40.000Z",
       "muted": false,
       "waiting": false,
@@ -47,12 +47,12 @@ There's no authentication: anything that can reach the port can use it, as hooks
   ],
   "reminders": [
     { "id": "42", "text": "Call the bank", "when": "Tomorrow at 9:00 AM" },
-    { "id": "41", "text": "", "when": "When the Tezos migration finishes" }
+    { "id": "41", "text": "", "when": "When the billing migration finishes" }
   ],
   "showing": {
     "id": "cmgi3k2xa4f1",
     "kind": "pr",
-    "title": "Migrate the Tezos integration",
+    "title": "Migrate the billing service",
     "at": "2026-10-02T14:05:40.000Z",
     "revision": 6
   },
@@ -120,9 +120,9 @@ What was held is kept like any update, unheard, so a [catch-up](#catching-up) an
 
 ## Catching up
 
-yapd keeps everything it summed up, and knows which of it you heard through. Ask it to catch you up, however you put it ("catch me up", "what did I miss on Distribox?", "anything from rig since lunch?", "what did the muted ones say?"), by the shortcut or through [`/utterances`](#asking-yapd-something), and it tells you what you haven't heard: first what needs you, like a run that failed while it was off or a question in an agent's last words, then the answer to what you asked a thread and any turn it couldn't sum up, read as it was kept, options and all, four at most; then a brief of the rest, a thread at a time, in about ninety words and eight threads at most. "More" then gives you the threads it left out, or the detail of those it covered. No phrase is built into yapd for this: the model decides from what you said, as it does for anything else.
+yapd keeps everything it summed up, and knows which of it you heard through. Ask it to catch you up, however you put it ("catch me up", "what did I miss on the web app?", "anything from the server since lunch?", "what did the muted ones say?"), by the shortcut or through [`/utterances`](#asking-yapd-something), and it tells you what you haven't heard: first what needs you, like a run that failed while it was off or a question in an agent's last words, then the answer to what you asked a thread and any turn it couldn't sum up, read as it was kept, options and all, four at most; then a brief of the rest, a thread at a time, in about ninety words and eight threads at most. "More" then gives you the threads it left out, or the detail of those it covered. No phrase is built into yapd for this: the model decides from what you said, as it does for anything else.
 
-What a catch-up told you counts as heard only once you've heard it to the end; cut off, it's all still unheard. It covers the last day, or since you last turned yapd off if that's longer, up to a week; what came in while yapd was off, at any time that week, and what needs you, count for the whole week, so a short off and on since, or another night off, never drops them. Updates it cut off count only since you last spoke to it; everything it never read out counts whenever it came. Agents' questions still waiting aren't part of it: they're asked, and "who needs me?" lists them. A muted thread is left out unless you ask about it. Catching up only ever reads: nothing reaches an agent, and "tell the Distribox one to…" after it is a request like any other.
+What a catch-up told you counts as heard only once you've heard it to the end; cut off, it's all still unheard. It covers the last day, or since you last turned yapd off if that's longer, up to a week; what came in while yapd was off, at any time that week, and what needs you, count for the whole week, so a short off and on since, or another night off, never drops them. Updates it cut off count only since you last spoke to it; everything it never read out counts whenever it came. Agents' questions still waiting aren't part of it: they're asked, and "who needs me?" lists them. A muted thread is left out unless you ask about it. Catching up only ever reads: nothing reaches an agent, and "tell the web app one to…" after it is a request like any other.
 
 ## Clearing the catch-up
 
@@ -149,8 +149,8 @@ By voice it's the model's to tell, however you put it: "clear the catch-up", "sk
 Each of `reminders` in the [state](#state) is something you asked yapd to tell you later, at a time or when a thread finishes or asks you something, or an offer to send a thread a message then, which only your yes sends. Those at a time come first, soonest first, then those waiting on a thread, newest first. You set them by voice; here you can only see them and cancel them.
 
 - `id`: what to cancel it by. Treat it as a name.
-- `text`: what yapd is to tell you then, or offer to send, in its words, like "Call the bank" or "Offer to tell the std fix: ship it". An offer whose message can't be read aloud, like one with a path or a link in it, is "Offer to send the std fix what you said". It's empty when yapd is only to tell you the thread did what you asked to hear of.
-- `when`: when, as yapd says it by its clock, like "At 3:00 PM", "Tomorrow at 9:00 AM" or "On Friday at 9:00 AM", or the thread and what it's to do, like "When the Tezos migration finishes", with "on rig" after a thread on another machine.
+- `text`: what yapd is to tell you then, or offer to send, in its words, like "Call the bank" or "Offer to tell the search fix: ship it". An offer whose message can't be read aloud, like one with a path or a link in it, is "Offer to send the search fix what you said". It's empty when yapd is only to tell you the thread did what you asked to hear of.
+- `when`: when, as yapd says it by its clock, like "At 3:00 PM", "Tomorrow at 9:00 AM" or "On Friday at 9:00 AM", or the thread and what it's to do, like "When the billing migration finishes", with "on server" after a thread on another machine.
 
 A reminder leaves the list once it goes off (said, or kept for you while yapd is off), once it's cancelled, and when its thread is archived or deleted, which drops it.
 
@@ -192,7 +192,7 @@ curl -X POST -H 'Content-Type: application/json' -d '{"text": "what is going on?
 
 It works while yapd is off too, as the shortcut does: what came of it is said, and then yapd is quiet again, with no wait for a reply after it.
 
-It can tell you what your threads are doing, who needs you, how much of your usage is left, catch you up on what you haven't heard, and say again what it just said, it can [show you things](#cards), and it can start new work, send a thread a message, now or once its current task is done, stop a thread, let it carry on, and take back a message still waiting in the queue. The same words to a thread that hasn't answered since are asked about rather than sent again. Anything else that would change a thread, like approving what it asks or archiving it, it answers with "I can't do that yet" for now. A question it asks you, like which of two threads you meant or whether to send something again, is answered by speaking over it or right after, or by asking again here. Once it's closed, however that was, asking to hear or see it again gets what it asked told rather than asked, like "I asked whether you meant the Tezos migration or the Mina tickets".
+It can tell you what your threads are doing, who needs you, how much of your usage is left, catch you up on what you haven't heard, and say again what it just said, it can [show you things](#cards), and it can start new work, send a thread a message, now or once its current task is done, stop a thread, let it carry on, and take back a message still waiting in the queue. The same words to a thread that hasn't answered since are asked about rather than sent again. Anything else that would change a thread, like approving what it asks or archiving it, it answers with "I can't do that yet" for now. A question it asks you, like which of two threads you meant or whether to send something again, is answered by speaking over it or right after, or by asking again here. Once it's closed, however that was, asking to hear or see it again gets what it asked told rather than asked, like "I asked whether you meant the billing migration or the onboarding tickets".
 
 ## Cards
 
@@ -206,9 +206,9 @@ When you ask about a thread that waits on something that can't be read aloud, li
 {
   "id": "cmgi3k2xa4f1",
   "kind": "pr",
-  "title": "Migrate the Tezos integration",
-  "markdown": "**#412** in lg-epitech/integration, open\n\n- Checks: passing\n- Review: waiting for a review\n- Mergeable: yes\n- Thread: Migrate the Tezos integration\n\n[Open the pull request](<https://github.com/lg-epitech/integration/pull/412>)",
-  "url": "https://github.com/lg-epitech/integration/pull/412",
+  "title": "Migrate the billing service",
+  "markdown": "**#412** in example/app, open\n\n- Checks: passing\n- Review: waiting for a review\n- Mergeable: yes\n- Thread: Migrate the billing service\n\n[Open the pull request](<https://github.com/example/app/pull/412>)",
+  "url": "https://github.com/example/app/pull/412",
   "caption": "Checks pass and it's waiting for a review, sir.",
   "at": "2026-10-02T14:05:40.000Z"
 }
@@ -255,17 +255,17 @@ curl -X PUT -H 'Content-Type: application/json' -d '{"id": "cmgi3k2xa4f1", "revi
       {
         "id": "850299f8-3b2a-4c1d-8e7f-6a5b4c3d2e1f",
         "key": "t3:Rosie:850299f8-3b2a-4c1d-8e7f-6a5b4c3d2e1f",
-        "project": "integration",
-        "title": "Migrate the Tezos integration",
+        "project": "billing",
+        "title": "Migrate the billing service",
         "state": "running",
         "since": "2026-10-02T13:40:00.000Z",
         "muted": false,
         "subagents": false,
-        "pr": { "number": 412, "url": "https://github.com/lg-epitech/integration/pull/412", "state": "open", "checks": "passing" }
+        "pr": { "number": 412, "url": "https://github.com/example/app/pull/412", "state": "open", "checks": "passing" }
       }
     ]
   },
-  { "machine": "rig", "reason": "I can't see rig's threads yet.", "threads": [] }
+  { "machine": "server", "reason": "I can't see server's threads yet.", "threads": [] }
 ]
 ```
 
@@ -283,7 +283,7 @@ Each row of `recent` in the [state](#state) is a thread, by its newest update or
 
 - `key`: the thread's key, the same as in [`/threads`](#threads), to [see more of it](#thread-details), [mute](#muting-a-thread) it or [hear it again](#hearing-a-thread-again) by. Treat it as a name, not something to take apart. A session yapd can't tie to a T3 Code thread, like one run in a terminal, has a key of its own.
 - `machine`: where it runs. `thread`: its id in T3 Code, as [`/threads`](#threads) has it, or `null` for a session yapd can't tie to one.
-- `title`: the thread's title in T3 Code, or for a session, "Claude session" or "Codex session", with "on rig" after it when it's not this machine. While yapd can't see a thread in T3 Code, as for a few seconds after it starts or while another machine can't be reached, it's what yapd calls the thread when it's muted, else "A thread", and the thread has no `project` `id` or `icon` until it's seen again.
+- `title`: the thread's title in T3 Code, or for a session, "Claude session" or "Codex session", with "on server" after it when it's not this machine. While yapd can't see a thread in T3 Code, as for a few seconds after it starts or while another machine can't be reached, it's what yapd calls the thread when it's muted, else "A thread", and the thread has no `project` `id` or `icon` until it's seen again.
 - `project`: there when yapd knows the project. `name` is how it's called, and `id` and `icon` are there only for a project T3 Code has.
 - `text`: what yapd said of its latest update, or would have, had it not been muted. `at`: when the agent's turn ended.
 - `muted`: whether it's muted, and `until`, when the mute ends on its own, only then.
@@ -316,14 +316,14 @@ Every icon carries `text` and `color` too, the monogram to draw for a kind you d
   "thread": "850299f8-3b2a-4c1d-8e7f-6a5b4c3d2e1f",
   "state": "running",
   "since": "2026-10-02T13:40:00.000Z",
-  "branch": "t3/migrate-tezos",
-  "pr": { "number": 412, "url": "https://github.com/lg-epitech/integration/pull/412", "state": "open", "checks": "passing" },
+  "branch": "t3/migrate-billing",
+  "pr": { "number": 412, "url": "https://github.com/example/app/pull/412", "state": "open", "checks": "passing" },
   "muted": true,
   "until": "2026-10-02T15:00:00.000Z",
   "updates": [
-    { "id": 1872, "at": "2026-10-02T14:01:40.000Z", "kind": "update", "said": "integration. The migration is done and the tests pass. Two fixtures needed TzKT's rounding.", "unsaid": "muted", "unheard": true },
-    { "id": 1860, "at": "2026-10-02T13:52:05.000Z", "kind": "sent", "text": "Use TzKT's rounding." },
-    { "id": 1851, "at": "2026-10-02T13:50:12.000Z", "kind": "notice", "said": "The Tezos migration asks which rounding to use.", "heard": "2026-10-02T13:50:20.000Z" }
+    { "id": 1872, "at": "2026-10-02T14:01:40.000Z", "kind": "update", "said": "billing. The migration is done and the tests pass. Two fixtures needed the old rounding.", "unsaid": "muted", "unheard": true },
+    { "id": 1860, "at": "2026-10-02T13:52:05.000Z", "kind": "sent", "text": "Use the old rounding." },
+    { "id": 1851, "at": "2026-10-02T13:50:12.000Z", "kind": "notice", "said": "The billing migration asks which rounding to use.", "heard": "2026-10-02T13:50:20.000Z" }
   ]
 }
 ```
@@ -365,7 +365,7 @@ A subagent's row mutes that subagent only, like any thread, and muting the threa
 
 The reviews and other work T3 Code runs for a thread as its subagents are kept to yapd by default: summed up and kept, as a muted thread's are, but never said, never counted as unheard, and left out of `recent` and of a catch-up unless you ask what that thread's subagents said. Whatever one says is kept so, even what would need you. The thread's own turns, like the one where it takes in a subagent's result, are said as ever. Subagents a provider runs inside its thread's own session, like Claude's Agent tool, never reach yapd.
 
-`PUT /threads/{key}/subagents` has a thread's subagents read to you from now on, by its `key`, percent-encoded, whether it has any yet or not; each is then said led by the thread, like "For the Tezos migration: one release blocker is left." It lasts until you take it off, never for a set time. `DELETE /threads/{key}/subagents` keeps them to yapd again, and drops what of them was waiting to be said, whatever it is, but never what's being said. Neither sends anything to a thread.
+`PUT /threads/{key}/subagents` has a thread's subagents read to you from now on, by its `key`, percent-encoded, whether it has any yet or not; each is then said led by the thread, like "For the billing migration: one release blocker is left." It lasts until you take it off, never for a set time. `DELETE /threads/{key}/subagents` keeps them to yapd again, and drops what of them was waiting to be said, whatever it is, but never what's being said. Neither sends anything to a thread.
 
 | Status | |
 | --- | --- |
@@ -374,7 +374,7 @@ The reviews and other work T3 Code runs for a thread as its subagents are kept t
 | `404` | No thread yapd knows, as for [muting](#muting-a-thread) one, and not one whose subagents are read already. |
 | `409` | It's a subagent's own key: its subagents are read by the thread it's part of. |
 
-By voice: "read me its subagents" and "stop reading its subagents" over an update, or "read me the Tezos migration's subagents" with the shortcut, and "what did its subagents say?" to hear what they kept. "What's muted?" ends with whose subagents are read.
+By voice: "read me its subagents" and "stop reading its subagents" over an update, or "read me the billing migration's subagents" with the shortcut, and "what did its subagents say?" to hear what they kept. "What's muted?" ends with whose subagents are read.
 
 ## Hearing a thread again
 
