@@ -60,6 +60,7 @@ const program = Effect.gen(function* () {
       session = cpu
       device = "CPU"
       send({ type: "warning", message: `Kokoro's GPU failed, so it runs on the CPU from now on: ${error}` })
+      send({ type: "device", device })
       await gpu.release().catch(() => {})
       return await session.run(feeds)
     }
@@ -119,15 +120,15 @@ const program = Effect.gen(function* () {
     const { id, path, first } = request
     return cancelled.delete(id)
       ? Effect.sync(() => send({ type: "cancelled", id }))
-      : render(request, (part) => send({ type: "part", id, path: part }), () => cancelled.has(id)).pipe(
+      : render(request, (part, words) => send({ type: "part", id, path: part, words }), () => cancelled.has(id)).pipe(
           Effect.matchCauseEffect({
-            onSuccess: () =>
+            onSuccess: (duration) =>
               // Given up on while it rendered, so nobody will remove it.
-              cancelled.delete(id)
+              cancelled.delete(id) || duration === undefined
                 ? Effect.promise(() => Promise.all([path, ...(first === undefined ? [] : [first])].map((file) => rm(file, { force: true })))).pipe(
                     Effect.zipRight(Effect.sync(() => send({ type: "cancelled", id }))),
                   )
-                : Effect.sync(() => send({ type: "rendered", id })),
+                : Effect.sync(() => send({ type: "rendered", id, duration })),
             onFailure: (cause) => Effect.sync(() => send({ type: "failed", id, reason: Cause.pretty(cause) })),
           }),
           Effect.ensuring(

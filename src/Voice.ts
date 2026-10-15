@@ -6,6 +6,7 @@ import * as Path from "node:path"
 import * as Config from "./Config.ts"
 import { type ProcessError, run } from "./Process.ts"
 import { TextSplitterStream } from "./vendor/kokoro/splitter.js"
+import * as Wav from "./Wav.ts"
 
 /** Renders speech to an audio file ahead of time, so playback never waits on synthesis. */
 export class Voice extends Context.Tag("yapd/Voice")<
@@ -38,11 +39,23 @@ export interface Rendering<E = ProcessError | KokoroError> {
    * alone when the text goes on after them, else the whole file.
    */
   readonly first: Effect.Effect<string, E>
+  /** How many words those first sentences are, once they're out, when they're a part of their own rather than the whole. */
+  readonly words: Effect.Effect<Option.Option<number>>
   /**
    * Waits for the whole file, which starts exactly as the first part does,
-   * sample for sample, so it plays on from where that one ends.
+   * sample for sample, so it plays on from where that one ends: with how
+   * long it plays, in seconds, when the voice tells, as Kokoro always does
+   * once a first part is out.
    */
-  readonly whole: Effect.Effect<void, E>
+  readonly whole: Effect.Effect<number | undefined, E>
+  /** Whether the whole has settled, rendered or not, without waiting for it. */
+  readonly done: Effect.Effect<boolean>
+}
+
+/** A line's first part, out before its whole, which starts exactly as it does: its file, and the render it's the start of. */
+export interface Early {
+  readonly path: string
+  readonly render: Rendering
 }
 
 /** File extension `render` writes. */
@@ -52,28 +65,40 @@ export class KokoroError extends Data.TaggedError("KokoroError")<{ readonly caus
 
 /**
  * Starts a render in the scope, with its first part early when `render` makes
- * one and calls `part` with its file. Without one, the whole is the first.
+ * one and calls `part` with its file and how many words it is. Without one,
+ * the whole is the first. What `render` gives back is how long the whole
+ * plays, when it tells.
  */
 const rendering =
-  <E>(render: (text: string, path: string, part: (path: string) => void) => Effect.Effect<void, E>) =>
+  <E>(render: (text: string, path: string, part: (path: string, words: number) => void) => Effect.Effect<number | void, E>) =>
   (text: string, path: string) =>
     Effect.gen(function* () {
       const first = yield* Deferred.make<string, E | KokoroError>()
-      const whole = yield* Deferred.make<void, E | KokoroError>()
-      const settle = (exit: Exit.Exit<void, E | KokoroError>) =>
+      const whole = yield* Deferred.make<number | undefined, E | KokoroError>()
+      let words: number | undefined
+      const settle = (exit: Exit.Exit<number | undefined, E | KokoroError>) =>
         Effect.zipRight(Deferred.done(first, Exit.as(exit, path)), Deferred.done(whole, exit))
       // Whoever waits on it elsewhere, like the conversation playing its first part, hears it was given up as a
       // failure rather than an interruption of their own. Even when the scope closes before the render has started.
       const givenUp = Exit.fail(new KokoroError({ cause: "Given up" }))
       yield* Effect.addFinalizer(() => settle(givenUp))
-      yield* render(text, path, (part) => Deferred.unsafeDone(first, Exit.succeed(part))).pipe(
+      yield* render(text, path, (part, count) => {
+        words = count
+        Deferred.unsafeDone(first, Exit.succeed(part))
+      }).pipe(
+        Effect.map((length) => (typeof length === "number" ? length : undefined)),
         // A fork takes after where it starts, and `startRender` starts it where nothing can be interrupted, which
         // would leave closing the scope waiting for the whole render rather than giving it up.
         Effect.interruptible,
         Effect.onExit((exit) => settle(Exit.isFailure(exit) && Cause.isInterruptedOnly(exit.cause) ? givenUp : exit)),
         Effect.forkScoped,
       )
-      return { first: Deferred.await(first), whole: Deferred.await(whole) } satisfies Rendering<E | KokoroError>
+      return {
+        first: Deferred.await(first),
+        words: Effect.sync(() => Option.fromNullable(words)),
+        whole: Deferred.await(whole),
+        done: Deferred.isDone(whole),
+      } satisfies Rendering<E | KokoroError>
     })
 
 /** Renders with the first sentences early when the voice can, else the whole at once, which then plays first. */
@@ -219,8 +244,12 @@ export const join = (parts: ReadonlyArray<Float32Array>, rate: number) => {
 /** The start of what `join` makes with `part` first, which can play before the rest is rendered. */
 export const head = (part: Float32Array, rate: number) => place(part, rate, true, false)
 
-/** Words a first part has at least, when there are enough sentences, so it plays for longer than the rest takes to render. */
-const enough = 6
+/**
+ * Words a first part of `text` has at least, when there are enough
+ * sentences, so it plays for longer than the rest takes to render: six, or
+ * one in fifteen of a longer line's, as the rest takes about 25 ms a word.
+ */
+const enough = (text: string) => Math.max(6, Math.ceil(words(text) / 15))
 
 const words = (text: string) => (text === "" ? 0 : text.split(/\s+/).length)
 
@@ -236,7 +265,7 @@ export const opening = <E>(text: string, fits: (text: string) => Effect.Effect<b
     let first = ""
     let taken = 0
     // At least one sentence is left for the rest.
-    while (taken < sentences.length - 1 && words(first) < enough) {
+    while (taken < sentences.length - 1 && words(first) < enough(text)) {
       const longer = first === "" ? sentences[taken]! : `${first} ${sentences[taken]}`
       if (!(yield* fits(longer))) break
       first = longer
@@ -262,16 +291,19 @@ export type Request =
 export type Reply =
   /** It has the model and is setting it up, which shouldn't take long. */
   | { readonly type: "loading" }
-  | { readonly type: "ready"; readonly device: string }
+  | { readonly type: "ready"; readonly device: Device }
   /** It couldn't load, so there's no point asking it anything. */
   | { readonly type: "unavailable"; readonly reason: string }
-  /** The first sentences of a render that asked for them are at `path`, as the whole will start. The whole follows. */
-  | { readonly type: "part"; readonly id: number; readonly path: string }
-  | { readonly type: "rendered"; readonly id: number }
+  /** The first sentences of a render that asked for them are at `path`, as the whole will start, `words` of them. The whole follows. */
+  | { readonly type: "part"; readonly id: number; readonly path: string; readonly words: number }
+  /** With how long the whole plays, in seconds, as it was saved. */
+  | { readonly type: "rendered"; readonly id: number; readonly duration: number }
   | { readonly type: "failed"; readonly id: number; readonly reason: string }
   /** It dropped a render the daemon gave up on, or finished it and removed the file. */
   | { readonly type: "cancelled"; readonly id: number }
   | { readonly type: "warning"; readonly message: string }
+  /** It moved to another device, like to the CPU once the GPU failed. */
+  | { readonly type: "device"; readonly device: Device }
 
 /** Where the Kokoro process runs the model. It takes the GPU when there is one. */
 export type Device = "GPU" | "CPU"
@@ -393,10 +425,13 @@ export const keepsItsStart = (effect: string) =>
 /**
  * Renders a request as the Kokoro process does, with `effect` unless it's
  * "none". Asked for a first part, it renders the first sentences, saves them as
- * the whole will start and tells `part`, then renders the rest: all in one
- * request, so no other render can slip in between. `cancelled` says whether it
- * was given up on meanwhile. With an effect that may not keep its start, it
- * renders the whole only, which then plays first.
+ * the whole will start and tells `part`, with how many words they are, then
+ * renders the rest: all in one request, so no other render can slip in
+ * between. `cancelled` says whether it was given up on meanwhile, when it
+ * gives nothing back. With an effect that may not keep its start, it renders
+ * the whole only, which then plays first. It gives back how long the whole
+ * plays, in seconds: with the effect, as the file ffmpeg wrote, which rings on
+ * past the samples, says.
  */
 export const speaking = <E>(speaker: Speaker<E>, effect: string) => {
   const { rate, fits } = speaker
@@ -432,27 +467,29 @@ export const speaking = <E>(speaker: Speaker<E>, effect: string) => {
 
   const speakAll = (parts: ReadonlyArray<string>) => Effect.forEach(parts, speaker.speak)
 
-  return ({ text, path, first }: Extract<Request, { type: "render" }>, part: (path: string) => void, cancelled: () => boolean) =>
+  /** Saves the whole, giving back how long it plays. */
+  const whole = (audio: Float32Array, path: string, like?: boolean) =>
+    Effect.flatMap(save(audio, path, like === undefined ? {} : { like }), (processed) => (processed ? Wav.duration(path) : Effect.succeed(audio.length / rate)))
+
+  return ({ text, path, first }: Extract<Request, { type: "render" }>, part: (path: string, words: number) => void, cancelled: () => boolean) =>
     Effect.gen(function* () {
       const opened = first === undefined || !keepsItsStart(effect) ? undefined : yield* opening(text, fits)
-      if (first === undefined || opened === undefined) {
-        yield* save(join(yield* speakAll(yield* split(text, fits)), rate), path)
-        return
-      }
+      if (first === undefined || opened === undefined) return yield* whole(join(yield* speakAll(yield* split(text, fits)), rate), path)
       const lead = yield* speaker.speak(opened.first)
       const processed = yield* save(head(lead, rate), first, { exact: true })
-      part(first)
+      part(first, words(opened.first))
       // Given up on while its first part rendered, so the rest isn't worth the wait.
-      if (cancelled()) return
-      yield* save(join([lead, ...(yield* speakAll(yield* split(opened.rest, fits)))], rate), path, { like: processed })
+      if (cancelled()) return undefined
+      return yield* whole(join([lead, ...(yield* speakAll(yield* split(opened.rest, fits)))], rate), path, processed)
     })
 }
 
 /** A render the process was asked for. */
 interface Asked {
-  readonly finished: Deferred.Deferred<void, KokoroError>
-  /** Hears where its first part is, when it asked for one. */
-  readonly part?: (path: string) => void
+  /** With how long the whole plays, in seconds. */
+  readonly finished: Deferred.Deferred<number, KokoroError>
+  /** Hears where its first part is, and how many words it is, when it asked for one. */
+  readonly part?: (path: string, words: number) => void
 }
 
 interface Child {
@@ -491,6 +528,14 @@ export const kokoro = (command: ReadonlyArray<string>, voice: string, effect: st
       device = "CPU"
       runFork(Effect.logWarning("Kokoro's process stopped or hung on the GPU, so it runs on the CPU from now on"))
     }
+    /** Where the process says it runs: on the GPU, or on the CPU when it found none, or moved there once the GPU failed. */
+    let running: Device | undefined
+    /**
+     * On the CPU, the rest of a line can take longer to render than its first
+     * part takes to play, which would leave it pausing midway: lines there
+     * render whole, and play once they have, as they always did.
+     */
+    const slow = () => device === "CPU" || running === "CPU"
 
     const start = Effect.gen(function* () {
       const ready = Deferred.unsafeMake<void, KokoroError>(FiberId.none)
@@ -521,8 +566,12 @@ export const kokoro = (command: ReadonlyArray<string>, voice: string, effect: st
             return
           case "ready":
             loaded = true
+            running = reply.device
             Deferred.unsafeDone(ready, Exit.void)
             runFork(Effect.logInfo(`Kokoro ready with voice ${voice}, on the ${reply.device}`))
+            return
+          case "device":
+            running = reply.device
             return
           case "unavailable":
             failedAt = now()
@@ -530,11 +579,11 @@ export const kokoro = (command: ReadonlyArray<string>, voice: string, effect: st
             stop()
             return
           case "part":
-            renders.get(reply.id)?.part?.(reply.path)
+            renders.get(reply.id)?.part?.(reply.path, reply.words)
             return
           case "rendered": {
             const render = renders.get(reply.id)
-            if (render !== undefined) Deferred.unsafeDone(render.finished, Exit.void)
+            if (render !== undefined) Deferred.unsafeDone(render.finished, Exit.succeed(reply.duration))
             return
           }
           case "failed":
@@ -597,10 +646,11 @@ export const kokoro = (command: ReadonlyArray<string>, voice: string, effect: st
       })
 
     /**
-     * Renders `text` to `path`. With `part`, the first sentences come early too,
-     * in a file of their own that `part` hears about once it's there.
+     * Renders `text` to `path`, giving back how long it plays. With `part`, the
+     * first sentences come early too, in a file of their own that `part` hears
+     * about once it's there, unless Kokoro is on the CPU.
      */
-    const render = (text: string, path: string, part?: (path: string) => void) =>
+    const render = (text: string, path: string, part?: (path: string, words: number) => void) =>
       Effect.gen(function* () {
         const child = yield* connection
         // Still loading, it carries on for the next update, and this one uses say.
@@ -609,7 +659,7 @@ export const kokoro = (command: ReadonlyArray<string>, voice: string, effect: st
         )
         // One at a time, as the process renders them, so the time limit only counts its own render. One given up on
         // keeps its turn, and its time limit, until the process is done with it too, since it only stops between renders.
-        yield* Effect.uninterruptibleMask((restore) =>
+        return yield* Effect.uninterruptibleMask((restore) =>
           Effect.gen(function* () {
             yield* restore(lock.take(1))
             // It may have stopped while this waited its turn.
@@ -618,18 +668,18 @@ export const kokoro = (command: ReadonlyArray<string>, voice: string, effect: st
               return yield* new KokoroError({ cause: "Kokoro's process stopped" })
             }
             const id = ++next
-            const finished = yield* Deferred.make<void, KokoroError>()
+            const finished = yield* Deferred.make<number, KokoroError>()
             // Next to the whole, so it goes wherever that one goes.
-            const first = part === undefined ? undefined : `${path}.first${extension}`
+            const first = part === undefined || slow() ? undefined : `${path}.first${extension}`
             let handed = false
             child.renders.set(id, {
               finished,
-              ...(part === undefined
+              ...(part === undefined || first === undefined
                 ? {}
                 : {
-                    part: (file: string) => {
+                    part: (file: string, words: number) => {
                       handed = true
-                      part(file)
+                      part(file, words)
                     },
                   }),
             })
@@ -674,21 +724,21 @@ export const kokoro = (command: ReadonlyArray<string>, voice: string, effect: st
  * is out, since what the fallback makes of the whole wouldn't carry on from it.
  */
 export const withFallback = (
-  render: (text: string, path: string, part?: (path: string) => void) => Effect.Effect<void, KokoroError>,
+  render: (text: string, path: string, part?: (path: string, words: number) => void) => Effect.Effect<number, KokoroError>,
   fallback: (text: string, path: string) => Effect.Effect<void, ProcessError>,
 ): Voice["Type"] => {
   const instead = (text: string, path: string) => (error: KokoroError) =>
     Effect.logWarning("Kokoro failed, using say", error).pipe(Effect.zipRight(fallback(text, path)))
   return {
-    render: (text, path) => render(text, path).pipe(Effect.catchAll(instead(text, path))),
+    render: (text, path) => render(text, path).pipe(Effect.asVoid, Effect.catchAll(instead(text, path))),
     renderFirst: rendering((text, path, part) => {
       let out = false
-      return render(text, path, (file) => {
+      return render(text, path, (file, words) => {
         out = true
-        part(file)
+        part(file, words)
       }).pipe(
         // Once its first part is out, what say makes of the whole wouldn't carry on from it, in another voice and pace.
-        Effect.catchAll((error): Effect.Effect<void, KokoroError | ProcessError> => (out ? Effect.fail(error) : instead(text, path)(error))),
+        Effect.catchAll((error): Effect.Effect<number | void, KokoroError | ProcessError> => (out ? Effect.fail(error) : instead(text, path)(error))),
       )
     }),
   }
@@ -755,9 +805,33 @@ export const remembering = (voice: Voice["Type"], dir: string, most = 64) =>
           Effect.interruptible,
           Effect.forkIn(scope),
         )
-        const others = [...kept].filter(([text]) => !ahead.has(text))
-        for (const [text, entry] of others.slice(0, Math.max(0, others.length - most))) yield* forget(text, entry)
+        yield* trim
         return made
+      }).pipe(Effect.uninterruptible)
+
+    /** Lets go of all but the newest `most` of the lines not rendered ahead. */
+    const trim = Effect.suspend(() => {
+      const others = [...kept].filter(([text]) => !ahead.has(text))
+      return Effect.forEach(others.slice(0, Math.max(0, others.length - most)), ([text, entry]) => forget(text, entry), { discard: true })
+    })
+
+    /**
+     * Keeps a short line rendered in parts once its whole is, at `path`, as
+     * a render keeps it, unless one is kept already: a copy, as the line's
+     * own file goes once it's said. All at once once it's copied, so nothing
+     * is left kept that isn't.
+     */
+    const keepWhole = (text: string, path: string) =>
+      Effect.gen(function* () {
+        if (!keeps(text) || kept.has(text)) return
+        const file = `${dir}/${crypto.randomUUID()}${extension}`
+        const copied = yield* Effect.isSuccess(Effect.tryPromise(() => Bun.write(file, Bun.file(path))))
+        // Its whole already let go of, or another kept meanwhile.
+        if (!copied || kept.has(text)) return yield* Effect.promise(() => rm(file, { force: true }))
+        const entry = yield* Deferred.make<string, ProcessError>()
+        yield* Deferred.succeed(entry, file)
+        kept.set(text, entry)
+        yield* trim
       }).pipe(Effect.uninterruptible)
 
     /** Lines rendered on a guess, by when, until they're said or it's clear they won't be. */
@@ -834,12 +908,31 @@ export const remembering = (voice: Voice["Type"], dir: string, most = 64) =>
        * A line already kept, short or rendered ahead, is copied whole, quicker
        * than any first part of it would render, and one of a single sentence
        * has no part to have early, so it's kept like any short line. Others
-       * come in parts.
+       * come in parts, a short one kept once its whole is, and how long its
+       * first part and its whole took is logged.
        */
       renderFirst: (text: string, path: string) =>
         keeps(text) && (kept.has(text) || sentencesOf(text).length < 2)
           ? rendering(render)(text, path)
-          : early(voice, text, path),
+          : Effect.gen(function* () {
+              const start = yield* Clock.currentTimeMillis
+              const rendered = yield* early(voice, text, path)
+              const took = (since: number) => Effect.map(Clock.currentTimeMillis, (now) => ((now - since) / 1000).toFixed(2))
+              yield* Effect.gen(function* () {
+                const part = yield* rendered.first
+                const first = yield* took(start)
+                yield* rendered.whole
+                const whole = yield* took(start)
+                yield* Effect.logInfo(`Render: ${words(text)} words, ${part === path ? "" : `first part ${first} s, `}whole ${whole} s`)
+                yield* keepWhole(text, path)
+              }).pipe(
+                Effect.ignore,
+                // Given up on with the render, as `startRender` starts it where nothing can be interrupted.
+                Effect.interruptible,
+                Effect.forkScoped,
+              )
+              return rendered
+            }),
       /** Renders lines ahead of time and keeps them for good, so even the first time they're said is instant, and every time after. */
       warm: (lines: ReadonlyArray<string>) =>
         Effect.forEach(

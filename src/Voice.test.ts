@@ -263,7 +263,7 @@ describe("startRender", () => {
               yield* Deferred.succeed(asked, undefined)
               yield* Deferred.await(gate)
               yield* Effect.promise(() => Promise.all([Bun.write(`${path}.first.wav`, "part"), Bun.write(path, "audio")]))
-              return { first: Effect.succeed(`${path}.first.wav`), whole: Effect.void }
+              return { first: Effect.succeed(`${path}.first.wav`), words: Effect.succeedSome(3), whole: Effect.succeed(2), done: Effect.succeed(true) }
             }),
         }
         const starting = yield* Effect.fork(startRender(voice, text, `${dir}/out.wav`, lifetime))
@@ -301,7 +301,7 @@ describe("withFallback", () => {
           withFallback(
             (_, path, part) =>
               Effect.suspend(() => {
-                if (afterPart) part?.(`${path}.first.wav`)
+                if (afterPart) part?.(`${path}.first.wav`, 3)
                 return Effect.fail(new KokoroError({ cause: "Kokoro's process stopped" }))
               }),
             (_, path) => Effect.sync(() => void said.push(path)),
@@ -344,24 +344,32 @@ describe("remembering", () => {
       }),
     ))
 
-  test("has a short line's first sentence early, unless it's kept and a copy is quicker", () =>
+  test("has a short line's first sentence early, and keeps the line once its whole is, so it's a copy after, quicker than any part", () =>
     run((dir) =>
       Effect.gen(function* () {
         const rendered: Array<string> = []
         const render = (text: string, path: string) =>
           Effect.promise(() => Bun.write(path, text)).pipe(Effect.tap(() => rendered.push(text)), Effect.asVoid)
         const voice = yield* remembering(
-          { render, renderFirst: (text, path) => Effect.as(render(text, path), { first: Effect.succeed(`${path}.first.wav`), whole: Effect.void }) },
+          {
+            render,
+            renderFirst: (text, path) =>
+              Effect.as(render(text, path), { first: Effect.succeed(`${path}.first.wav`), words: Effect.succeedSome(3), whole: Effect.succeed(2), done: Effect.succeed(true) }),
+          },
           dir,
         )
         const text = "The tests pass. Nothing needs you."
-        expect(yield* (yield* voice.renderFirst(text, `${dir}/out-a.wav`)).first).toBe(`${dir}/out-a.wav.first.wav`)
-        yield* voice.warm([text])
+        const parted = yield* voice.renderFirst(text, `${dir}/out-a.wav`)
+        expect(yield* parted.first).toBe(`${dir}/out-a.wav.first.wav`)
+        yield* parted.whole
+        // Kept a moment after its whole is.
+        yield* Effect.promise(() => Bun.sleep(20))
         expect(yield* (yield* voice.renderFirst(text, `${dir}/out-b.wav`)).first).toBe(`${dir}/out-b.wav`)
+        expect(yield* Effect.promise(() => Bun.file(`${dir}/out-b.wav`).text())).toBe(text)
         // With no part to have early, a single sentence is kept for next time, like any short line.
         yield* (yield* voice.renderFirst("On it, sir.", `${dir}/out-c.wav`)).whole
         yield* voice.render("On it, sir.", `${dir}/out-d.wav`)
-        expect(rendered).toEqual([text, text, "On it, sir."])
+        expect(rendered).toEqual([text, "On it, sir."])
       }),
     ))
 
@@ -403,7 +411,11 @@ describe("remembering", () => {
         const render = (text: string, path: string) =>
           Effect.promise(() => Bun.write(path, text)).pipe(Effect.tap(() => rendered.push(text)), Effect.asVoid)
         const voice = yield* remembering(
-          { render, renderFirst: (text, path) => Effect.as(render(text, path), { first: Effect.succeed(`${path}.first.wav`), whole: Effect.void }) },
+          {
+            render,
+            renderFirst: (text, path) =>
+              Effect.as(render(text, path), { first: Effect.succeed(`${path}.first.wav`), words: Effect.succeedSome(3), whole: Effect.succeed(2), done: Effect.succeed(true) }),
+          },
           dir,
         )
         const text = "Consider it done, sir. I'll see to every last detail of it with all the care you'd expect, and let you know the very moment it's all finished, so you can get on with your day."
@@ -567,14 +579,14 @@ const fakeKokoro = () => {
     const rendered = () => {
       writeFileSync(request.path, "audio")
       record({ rendered: request.id })
-      send({ type: "rendered", id: request.id })
+      send({ type: "rendered", id: request.id, duration: 2 })
     }
     // Its first part comes a moment later, then the rest fails, or the process dies, like on a GPU giving way.
     if (mode === "breaking" || mode === "dying") {
       if (request.first === undefined) return rendered()
       return void setTimeout(() => {
         writeFileSync(request.first!, "part")
-        send({ type: "part", id: request.id, path: request.first })
+        send({ type: "part", id: request.id, path: request.first, words: 3 })
         setTimeout(() => (mode === "dying" ? process.exit(1) : send({ type: "failed", id: request.id, reason: "GPU" })), 50)
       }, 100)
     }
@@ -582,7 +594,7 @@ const fakeKokoro = () => {
     if (request.first !== undefined && request.text.includes(". ")) {
       writeFileSync(request.first, "part")
       record({ part: request.id })
-      send({ type: "part", id: request.id, path: request.first })
+      send({ type: "part", id: request.id, path: request.first, words: 3 })
     }
     // Busy rendering, it only hears it was given up on once it's done.
     if (mode === "deaf") setTimeout(rendered, 200)
