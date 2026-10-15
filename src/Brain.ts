@@ -7,7 +7,7 @@ import * as Ledger from "./Ledger.ts"
 import type * as Memory from "./Memory.ts"
 import * as Missed from "./Missed.ts"
 import type * as Modes from "./Modes.ts"
-import { Model } from "./Model.ts"
+import { BrainModel, Model } from "./Model.ts"
 import * as Mutes from "./Mutes.ts"
 import { addressed, type Lines, unaddressed } from "./Persona.ts"
 import type * as Preferences from "./Preferences.ts"
@@ -5021,15 +5021,16 @@ export const briefPrompt = (brief: Brief, desk: Threads.Desk, now: number, style
   ].join("\n\n")
 }
 
-/** The model's decision, its spoken line in English and fit to say. */
+/** The model's decision, its spoken line in English and fit to say: decided by the brain's own model, when it has one. */
 export const ProviderBrain = Layer.effect(
   Brain,
   Effect.gen(function* () {
     const model = yield* Model
+    const thinker = yield* BrainModel
     const style = yield* Config.style
     return {
       decide: (situation) =>
-        model.ask(Decision, prompt(situation, style)).pipe(
+        thinker.ask(Decision, prompt(situation, style)).pipe(
           Effect.annotateLogs({ role: "brain" }),
           Effect.mapError((cause) => new BrainError({ cause })),
           Effect.flatMap((decided) =>
