@@ -59,6 +59,8 @@ jobs:
         with:
           ref: ${{ needs.release-please.outputs.tag }}
       - uses: oven-sh/setup-bun@v2
+      # The voice's effect runs through ffmpeg, and its tests check what ffmpeg makes of it.
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
       - run: bun install --frozen-lockfile
       - run: bun run check
       - run: bun test
