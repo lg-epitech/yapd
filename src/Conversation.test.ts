@@ -3163,6 +3163,8 @@ describe("more, and how yapd talks, over an update", () => {
     // Who needs him, catching up, new work and how yapd talks are among what's handed over, taking back such a change too.
     expect(prompt).toContain(`who needs them or what's waiting on them; catching up, like "what did I miss?" or "catch me up on the rest";`)
     expect(prompt).toContain(`starting new work in a thread of its own, like "start a thread on the flaky test" or "kick off a review of the docs";`)
+    // A reminder is yapd's to set, even one about this agent's work, which the agent can't remind him of.
+    expect(prompt).toContain(`reminding them of something later, even about this agent's work, like "remind me to merge this at five";`)
     expect(prompt).toContain(`how you talk to them from now on, like focus, quiet, going to bed, being back, shorter updates or everything in full, and taking back such a change you just told them of.`)
     expect(prompt).not.toContain(`How you talk to them is for you, never the agent`)
     expect(prompt).not.toContain(`Catching up is for you, never the agent`)

@@ -1130,6 +1130,24 @@
       "how": "tied",
       "heard": "Do you mean that this is fixed by the other ticket I referenced? Not the one you created.",
       "expect": { "intent": "send", "act": ["send"], "target": "own" }
+    },
+    {
+      "id": "S93",
+      "note": "a reminder about the work of the update he's hearing, while he's at hand: yapd's to set, never sent to its agent, which can't remind him",
+      "update": "tezos-pr",
+      "how": "tied",
+      "present": true,
+      "heard": "Remind me to merge this at five.",
+      "expect": { "act": ["remind"], "never": ["send", "start"], "neverIntent": ["send"] }
+    },
+    {
+      "id": "S94",
+      "note": "S93 while he isn't at hand: let go, dismissed or the shortcut's line, never set, never sent",
+      "update": "tezos-pr",
+      "how": "tied",
+      "present": false,
+      "heard": "Remind me to merge this at five.",
+      "expect": { "intents": ["resume", "dismiss", "answer"], "neverDone": ["remind"], "neverIntent": ["send"] }
     }
   ]
 }
