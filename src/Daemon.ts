@@ -274,7 +274,6 @@ export const make = (
     Effect.promise(() => mkdtemp(join(tmpdir(), "yapd-"))),
     (dir) => Effect.promise(() => rm(dir, { recursive: true, force: true })),
   )
-  const removeFile = (path: string) => Effect.promise(() => rm(path, { force: true }))
 
   const inbox = yield* STM.commit(TRef.make(Inbox.empty))
   const preparing = yield* FiberMap.make<string>()
@@ -520,10 +519,21 @@ export const make = (
       const audio = join(dir, `${crypto.randomUUID()}${extension}`)
       yield* Effect.acquireRelease(soon, (letGo) => letGo)
       const rendering = yield* Clock.currentTimeMillis
-      yield* voice.render(notice.spoken, audio).pipe(Effect.onError(() => removeFile(audio)))
+      // Said from its first sentences as soon as they're out, while the rest renders: given up, files and all, unless it's queued.
+      const render = yield* Effect.acquireRelease(startRender(voice, notice.spoken, audio, lifetime), (render) => (queued ? Effect.void : render.abandon))
+      const lead = yield* render.first
       // Timed from what it came of, when that's known, or else from now.
       const timing = Latency.stage(notice.timing ?? Latency.from(notice.kind, rendering, "when it was told"), "rendered", (yield* Clock.currentTimeMillis) - rendering)
-      const said = { session: notice.id, priority: notice.priority, arrivedAt: notice.at, notice, audio, timing }
+      const said: Inbox.Said = {
+        session: notice.id,
+        priority: notice.priority,
+        arrivedAt: notice.at,
+        notice,
+        audio,
+        render,
+        ...(lead === audio ? {} : { first: lead }),
+        timing,
+      }
       // Noted in the same breath as it's queued, so nothing can stop it in between.
       yield* enqueue(said, turns).pipe(
         Effect.tap((taken) =>
@@ -533,10 +543,7 @@ export const make = (
         ),
         Effect.uninterruptible,
       )
-      if (!queued) {
-        yield* removeFile(audio)
-        return yield* Effect.logInfo(`Not saying ${what}, since yapd is off`)
-      }
+      if (!queued) return yield* Effect.logInfo(`Not saying ${what}, since yapd is off`)
       yield* Effect.logInfo(`Ready: ${revealing ? "something that could give a secret away" : notice.spoken}`)
     }).pipe(
       Effect.scoped,
@@ -2201,21 +2208,35 @@ export const make = (
 
   /**
    * What's played for a notice: its own words, or those it says in their
-   * place when it asks for them just before it's played, rendered then and
-   * removed once it's said. Should rendering fail, its own words go after all.
-   * What tells it that it gets those in their place comes with them, to run
-   * once it's known it's still to be played.
+   * place when it asks for them just before it's played, rendered then, from
+   * their first sentences while the rest renders, and given up, files and
+   * all, once it's said. Should rendering fail, its own words go after all.
+   * Each with its first part, when that was out before its whole. What tells
+   * it that it gets those in their place comes with them, to run once it's
+   * known it's still to be played.
    */
   const words = (said: Inbox.Said) =>
     Effect.gen(function* () {
       const { instead } = said.notice
-      const own = { path: said.audio, spoken: said.notice.spoken, used: Effect.void }
+      const own = {
+        path: said.audio,
+        spoken: said.notice.spoken,
+        used: Effect.void,
+        ...(said.first === undefined || said.render === undefined ? {} : { first: { path: said.first, render: said.render } }),
+      }
       if (instead === undefined || !(yield* instead.when)) return own
       const path = join(dir, `${crypto.randomUUID()}${extension}`)
       // What could give a secret away, or came of a request held back as one, is logged nowhere, as for its own words.
       const what = said.notice.withheld === true || T3Actions.revealing(instead.spoken) ? "something that could give a secret away" : `"${instead.spoken}"`
-      return yield* Effect.acquireRelease(voice.render(instead.spoken, path).pipe(Effect.onError(() => removeFile(path))), () => removeFile(path)).pipe(
-        Effect.as({ path, spoken: instead.spoken, used: Effect.zipRight(Effect.logInfo(`Saying instead: ${what}`), instead.used ?? Effect.void) }),
+      return yield* Effect.acquireRelease(startRender(voice, instead.spoken, path, lifetime), (render) => render.abandon).pipe(
+        Effect.flatMap((render) =>
+          Effect.map(render.first, (lead) => ({
+            path,
+            spoken: instead.spoken,
+            used: Effect.zipRight(Effect.logInfo(`Saying instead: ${what}`), instead.used ?? Effect.void),
+            ...(lead === path ? {} : { first: { path: lead, render } }),
+          })),
+        ),
         Effect.catchAll((error) => Effect.as(Effect.logWarning(`Could not say ${what} instead`, error), own)),
       )
     })
@@ -2243,14 +2264,16 @@ export const make = (
             )
       const saying = Effect.zipRight(Effect.zipRight(begun, timed), said.notice.saying ?? Effect.void)
       const confirmed = said.notice.confirmed ?? Effect.void
-      const { path: played, spoken, used } = yield* words(said)
+      const { path: played, spoken, used, first } = yield* words(said)
+      /** Its first part, when it starts from that. */
+      const opening = first === undefined ? {} : { first }
       // Settled while its words were rendered, like a question closed by what he said meanwhile, it's dropped all the same.
       if (yield* said.notice.stale) return yield* dealtWith
       yield* used
       // Off, what he asked is answered, but the microphone stays closed: yapd is quiet again once it's said. A question it asks is
       // answered with the shortcut, as it's left open.
       if (!listening) {
-        const playback = yield* audio.play(played).pipe(Effect.onError(() => (question === undefined ? Effect.void : Effect.zipRight(dealtWith, question.unanswered))))
+        const playback = yield* conversation.playLine(played, spoken, first).pipe(Effect.onError(() => (question === undefined ? Effect.void : Effect.zipRight(dealtWith, question.unanswered))))
         yield* saying
         if (playback.confirmed) yield* confirmed
         yield* playback.finished.pipe(
@@ -2279,6 +2302,7 @@ export const make = (
         // followed up only from its end, which plays through what's said over it as a notice does.
         const followed = yield* conversation.answer({
           audio: played,
+          ...opening,
           spoken,
           saying,
           confirmed,
@@ -2299,12 +2323,13 @@ export const make = (
         // listens for a moment after it too, only as long as the pause between lines once something waits to be said next, which hears
         // it itself: heard as soon as it's said to the end, so a dictation then neither puts it back nor finds it missed.
         const heard = Effect.zipRight(Effect.zipRight(said.notice.heard ?? Effect.void, dealtWith), ended).pipe(Effect.uninterruptible)
-        return yield* conversation.tell({ audio: played, spoken, saying, confirmed, through: heard })
+        return yield* conversation.tell({ audio: played, ...opening, spoken, saying, confirmed, through: heard })
       }
       const answer = (heard: string, voiced: number, echo?: string, afterPause?: string, unsaid?: string, carried?: boolean, stopped?: number) =>
         question.answer(heard, voiced, echo, afterPause, unsaid, carried, stopped).pipe(Effect.map(Option.map((proceed) => Effect.zipRight(dealtWith, proceed))))
       const asked = {
         audio: played,
+        ...opening,
         spoken,
         saying,
         confirmed,
