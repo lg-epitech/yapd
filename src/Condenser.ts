@@ -1,6 +1,7 @@
 import { Context, Data, Effect, Layer, Option, Schema } from "effect"
 import * as Config from "./Config.ts"
 import { Model } from "./Model.ts"
+import type * as Partial from "./Partial.ts"
 import type * as T3Actions from "./T3Actions.ts"
 
 /**
@@ -60,10 +61,23 @@ export type Reworded = typeof Reworded.Type
 
 export class CondenseError extends Data.TaggedError("CondenseError")<{ readonly cause: unknown }> {}
 
+/**
+ * What a summary says while the model writes it, each told once, as soon as
+ * it's written, so what it's for can get ready meanwhile: only ever a guess at
+ * the summary, which is what counts.
+ */
+export interface Early {
+  /** How much it matters, the first thing written. */
+  readonly priority: (priority: Priority) => Effect.Effect<void>
+  /** Its headline, once that and its priority are written, only when it's in English as it is, and so said in those very words. */
+  readonly headline: (priority: Priority, headline: string) => Effect.Effect<void>
+}
+
 export class Condenser extends Context.Tag("yapd/Condenser")<
   Condenser,
   {
-    readonly condense: (project: string, turn: Turn) => Effect.Effect<Summary, CondenseError>
+    /** A turn summed up, told `early` as it's written when the model can be read as it writes. */
+    readonly condense: (project: string, turn: Turn, early?: Early) => Effect.Effect<Summary, CondenseError>
     /** What a thread called `called` waits on the user for, in words that follow its name: an approval. */
     readonly ask: (request: Extract<T3Actions.Request, { readonly _tag: "Approval" }>, called: string) => Effect.Effect<Asked, CondenseError>
     /** A part of a question a thread called `called` asks, whose words can't be said as they are, as yapd would ask it itself. */
@@ -240,14 +254,43 @@ export const inEnglish = (model: Model["Type"], spoken: string) =>
 export const summed = (priority: Priority, headline: string, more: string): Summary =>
   headline === "" ? { priority, spoken: more, more: "" } : { priority, spoken: headline, more }
 
+/**
+ * Tells `early` what the model has written as it writes it: its priority, and
+ * its headline once both are in, trimmed as the summary has it, never one
+ * that's empty, which leaves the rest to be said, or that would be translated.
+ */
+const telling = (early: Early) => {
+  let priority: Priority | undefined
+  let headline: string | undefined
+  /** Once, as the second of the two is in. */
+  const headed = () =>
+    priority === undefined || headline === undefined || headline === "" || !english(headline) ? Effect.void : early.headline(priority, headline)
+  return (key: string, value: Partial.Value) =>
+    Effect.suspend(() => {
+      if (priority === undefined && key === "priority" && Schema.is(Priority)(value)) {
+        priority = value
+        return Effect.zipRight(early.priority(value), headed())
+      }
+      if (headline === undefined && key === "headline" && typeof value === "string") {
+        headline = value.trim()
+        return headed()
+      }
+      return Effect.void
+    })
+}
+
 export const ProviderCondenser = Layer.effect(
   Condenser,
   Effect.gen(function* () {
     const model = yield* Model
     const style = yield* Config.style
     return {
-      condense: (project, turn) =>
-        model.ask(Condensed, prompt(project, turn, style)).pipe(
+      condense: (project, turn, early) =>
+        Effect.suspend(() =>
+          early === undefined || model.stream === undefined
+            ? model.ask(Condensed, prompt(project, turn, style))
+            : model.stream(Condensed, prompt(project, turn, style), telling(early)),
+        ).pipe(
           Effect.annotateLogs({ role: "condense" }),
           Effect.mapError((cause) => new CondenseError({ cause })),
           Effect.flatMap((condensed) =>
