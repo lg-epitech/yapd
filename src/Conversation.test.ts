@@ -22,7 +22,7 @@ import {
 import { Audio, AudioError, native } from "./Audio.ts"
 import * as Condenser from "./Condenser.ts"
 import * as Conversation from "./Conversation.ts"
-import { between, cut, together, unfinished, unsaid } from "./Conversation.ts"
+import { between, breath, cut, together, unfinished, unsaid } from "./Conversation.ts"
 import { defaults } from "./Endpointer.ts"
 import { Relays } from "./Relay.ts"
 import * as Helper from "./Helper.ts"
@@ -60,7 +60,8 @@ const update: Conversation.Update = {
  * those are the names of his routines. With `over`, it's that update that's read, with what the journal `kept` before it,
  * and with `present`, while he's at hand. With `reply`, that's what the Responder answers, still after five seconds;
  * with `handing`, what's yapd's to do is handed to it; with `off`, "Mute." turns yapd off; and the first `echoing`
- * frames may carry yapd's own voice.
+ * frames may carry yapd's own voice. With `fast`, what it gives a reply for is answered at once, without the model, as
+ * the Responder's quick replies are.
  */
 const conversation = (
   said: ReadonlyArray<string>,
@@ -82,6 +83,7 @@ const conversation = (
     readonly handing?: NonNullable<Parameters<typeof Conversation.make>[0]["over"]>
     readonly off?: Effect.Effect<void>
     readonly echoing?: number
+    readonly fast?: (heard: string) => Responder.Reply | undefined
   } = {},
 ) =>
   Effect.gen(function* () {
@@ -141,18 +143,22 @@ const conversation = (
       }),
       given.model === undefined
         ? Layer.succeed(Responder.Responder, {
-            respond: ({ heard: text }) =>
-              Effect.sync(() => heard.push(text)).pipe(
-                Effect.zipRight(Effect.sleep("5 seconds")),
-                Effect.as({
-                  reply:
-                    given.reply?.(text) ??
-                    (text.startsWith("Sam,")
-                      ? { intent: "resume" as const, spoken: "", message: "" }
-                      : { intent: "send" as const, spoken: text.startsWith("Just") ? "" : "Okay.", message: text }),
-                  source: "model" as const,
-                }),
-              ),
+            respond: ({ heard: text }) => {
+              const fast = given.fast?.(text)
+              return fast !== undefined
+                ? Effect.succeed({ reply: fast, source: "quick" as const })
+                : Effect.sync(() => heard.push(text)).pipe(
+                    Effect.zipRight(Effect.sleep("5 seconds")),
+                    Effect.as({
+                      reply:
+                        given.reply?.(text) ??
+                        (text.startsWith("Sam,")
+                          ? { intent: "resume" as const, spoken: "", message: "" }
+                          : { intent: "send" as const, spoken: text.startsWith("Just") ? "" : "Okay.", message: text }),
+                      source: "model" as const,
+                    }),
+                  )
+            },
           })
         : Responder.ProviderResponder.pipe(Layer.provide(Layer.merge(given.model, persona))),
       Layer.succeed(Relays, {
@@ -187,6 +193,8 @@ const conversation = (
       )
     const speak = frames(0.9, 10).pipe(Effect.zipRight(frames(0, defaults.silence)))
     const wait = (seconds: number) => TestClock.adjust(`${seconds} seconds`).pipe(Effect.zipRight(flush))
+    /** The breath what code acts on alone is held for once he's stopped, should he carry on. */
+    const held = wait(breath / 1000)
     /** Asks a question instead, once the update has been given up on, which `answer` works out what's said to, with options called `terms`. */
     const question = (answer: Conversation.Question["answer"], terms?: ReadonlyArray<string>) =>
       Fiber.interrupt(fiber).pipe(
@@ -224,6 +232,7 @@ const conversation = (
       noted,
       speak,
       wait,
+      held,
       question,
       ask,
       say,
@@ -356,6 +365,58 @@ describe("Conversation", () => {
       }),
     )
     expect(sent).toEqual(["Please merge it."])
+  })
+})
+
+describe("What code acts on alone", () => {
+  test("waits for speech he resumes: a yes, a breath, then more, over an update that asked, is worked out whole and never sent alone", async () => {
+    const asking: Conversation.Update = { ...update, needsYou: true, spoken: "The PR is up. Should I merge it?" }
+    const result = await scoped(
+      Effect.gen(function* () {
+        // A plain yes goes ahead at once, without the model; anything more is the model's.
+        const { fiber, frames, wait, heard, sent } = yield* conversation(["Yes.", "but not the tests"], 0, [], "sent", {
+          over: asking,
+          fast: (said) => (said === "Yes." ? { intent: "send", spoken: "On it.", message: "Yes." } : undefined),
+        })
+        yield* wait(10)
+        yield* frames(0.9, 10)
+        yield* frames(0, defaults.silence)
+        // 0.8 s of quiet in all: he carries on a tenth of a second after what he'd said came in.
+        yield* wait(0.1)
+        const before = [...sent]
+        yield* frames(0.9, 10)
+        yield* frames(0, defaults.silence)
+        yield* wait(26)
+        yield* Fiber.join(fiber)
+        return { before, heard, sent }
+      }),
+    )
+    expect(result).toEqual({ before: [], heard: ["Yes. but not the tests"], sent: ["Yes. but not the tests"] })
+  })
+
+  test("waits for speech he resumes: an option's name, a breath, then more, said to a question, is worked out whole and never picked alone", async () => {
+    const result = await scoped(
+      Effect.gen(function* () {
+        const picked: Array<string> = []
+        const { question, frames, wait } = yield* conversation(["Ship it.", "but only after the tests pass"])
+        // Its option's name is taken at once, as code takes it; anything more takes the model a while.
+        const asking = yield* question(
+          (heard) =>
+            Effect.as(heard === "Ship it." ? Effect.void : Effect.sleep("3 seconds"), Option.some(Effect.sync(() => void picked.push(heard)))),
+          ["Ship it", "Hold it"],
+        )
+        yield* wait(10)
+        yield* frames(0.9, 10)
+        yield* frames(0, defaults.silence)
+        yield* wait(0.1)
+        const before = [...picked]
+        yield* frames(0.9, 10)
+        yield* frames(0, defaults.silence)
+        yield* wait(4)
+        return { before, picked, answered: yield* Fiber.join(asking) }
+      }),
+    )
+    expect(result).toEqual({ before: [], picked: ["Ship it. but only after the tests pass"], answered: true })
   })
 })
 
@@ -625,14 +686,14 @@ describe("Follow-ups", () => {
     expect(over.kept).toEqual([
       {
         kind: "reply",
-        detail: { intent: "answer", source: "model", ms: 2000, modelMs: 2000, left: "PR is ready.", after: false, lateBy: 0, needsYou: false, voiced: 1.18 },
+        detail: { intent: "answer", source: "model", ms: 2000, modelMs: 2000, early: true, left: "PR is ready.", after: false, lateBy: 0, needsYou: false, voiced: 1.18 },
       },
     ])
     expect(over.timing).toEqual(["Timing: 2.0 s to work out a reply, 2.0 s of it the model's"])
     // A second and a half after it ended: taken in at once, with nothing it hadn't said.
     const after = await replied("Thanks.", 1.5)
     expect(after.kept).toEqual([
-      { kind: "reply", detail: { intent: "dismiss", source: "quick", ms: 0, after: true, lateBy: 1.5, needsYou: false, voiced: 1.18 } },
+      { kind: "reply", detail: { intent: "dismiss", source: "quick", ms: 0, early: true, after: true, lateBy: 1.5, needsYou: false, voiced: 1.18 } },
     ])
     expect(after.timing).toEqual(["Timing: 0.0 s to work out a reply, without the model"])
   })
@@ -643,12 +704,13 @@ describe("Questions", () => {
     const result = await scoped(
       Effect.gen(function* () {
         const answers: Array<string> = []
-        const { ask, speak, wait } = yield* conversation(["Yes, in yapd."])
+        const { ask, speak, wait, held } = yield* conversation(["Yes, in yapd."])
         const asking = yield* ask(answers)
         yield* wait(10)
         // Still listening, longer than after an update.
         yield* wait(5)
         yield* speak
+        yield* held
         return { answered: yield* Fiber.join(asking), answers }
       }),
     )
@@ -659,10 +721,11 @@ describe("Questions", () => {
     const result = await scoped(
       Effect.gen(function* () {
         const answers: Array<string> = []
-        const { question, speak, wait, glossaries } = yield* conversation(["The ghost net one."])
+        const { question, speak, wait, held, glossaries } = yield* conversation(["The ghost net one."])
         const asking = yield* question((heard) => Effect.succeed(Option.some(Effect.sync(() => void answers.push(heard)))), ["Mainnet", "Ghostnet"])
         yield* wait(10)
         yield* speak
+        yield* held
         return { answered: yield* Fiber.join(asking), answers, glossaries: glossaries() }
       }),
     )
@@ -702,11 +765,12 @@ describe("Questions", () => {
       scoped(
         Effect.gen(function* () {
           const told: Array<string | undefined> = []
-          const { question, speak, wait } = yield* conversation(["Yes."])
+          const { question, speak, wait, held } = yield* conversation(["Yes."])
           const asking = yield* question((_heard, _voiced, _echo, _afterPause, unsaid) => Effect.sync(() => void told.push(unsaid)).pipe(Effect.as(Option.some(Effect.void))))
           // Over it, three seconds in, it stops at two of its ten; or once it's played to the end.
           yield* wait(over ? 3 : 10)
           yield* speak
+          yield* held
           yield* Fiber.join(asking)
           return told
         }),
@@ -792,13 +856,14 @@ describe("Answers", () => {
       Effect.gen(function* () {
         const followUps: Array<string> = []
         const through: Array<string> = []
-        const { say, speak, wait } = yield* conversation(["Tell it to fix the tests."])
+        const { say, speak, wait, held } = yield* conversation(["Tell it to fix the tests."])
         const answering = yield* say(followUps, through)
         yield* wait(10)
         // Heard as soon as it's said to the end, with the microphone still open.
         const heard = [...through]
         yield* wait(2)
         yield* speak
+        yield* held
         return { followed: yield* Fiber.join(answering), followUps, heard, through }
       }),
     )
@@ -835,10 +900,11 @@ describe("Answers", () => {
       Effect.gen(function* () {
         const followUps: Array<string> = []
         const through: Array<string> = []
-        const { say, speak, wait } = yield* conversation(["Stop."])
+        const { say, speak, wait, held } = yield* conversation(["Stop."])
         const answering = yield* say(followUps, through)
         yield* wait(3)
         yield* speak
+        yield* held
         return { followed: yield* Fiber.join(answering), followUps, through }
       }),
     )
@@ -850,7 +916,7 @@ describe("Answers", () => {
       Effect.gen(function* () {
         const followUps: Array<string> = []
         const through: Array<string> = []
-        const { say, speak, wait } = yield* conversation(["Sam, dinner's in five.", "And tell it to open a PR."])
+        const { say, speak, wait, held } = yield* conversation(["Sam, dinner's in five.", "And tell it to open a PR."])
         const answering = yield* say(followUps, through)
         yield* wait(3)
         yield* speak
@@ -859,6 +925,7 @@ describe("Answers", () => {
         const heard = [...through]
         yield* wait(1)
         yield* speak
+        yield* held
         return { followed: yield* Fiber.join(answering), followUps, heard }
       }),
     )
@@ -1150,6 +1217,8 @@ const overHelper = (
       talk,
       quiet: talk(0, defaults.silence),
       wait: (seconds: number) => TestClock.adjust(`${seconds} seconds`).pipe(Effect.zipRight(flush)),
+      /** The breath what code acts on alone is held for once he's stopped, should he carry on. */
+      held: TestClock.adjust(`${breath} millis`).pipe(Effect.zipRight(flush)),
       finish: Effect.sync(() => {
         if (playing !== undefined) send({ type: "finished", id: playing.id })
         playing = undefined
@@ -1297,7 +1366,8 @@ describe("Over its first seconds, while yapd's own voice can still get into the 
     // Over its first second, with what may have been its own voice, which isn't kept with it either.
     expect(plain.responded).toEqual([{ heard: secret, told: true }])
     // Nor what the model answered to it, which may give it away in words nothing takes for a secret, nor what yapd hadn't said yet.
-    const worked = { source: "model", ms: 0, after: false, lateBy: 0, needsYou: false, voiced: 0.16 }
+    // Heard as he paused at its end.
+    const worked = { source: "model", ms: 0, early: true, after: false, lateBy: 0, needsYou: false, voiced: 0.16 }
     expect(plain.journal.map(({ kind, text, said, detail }) => ({ kind, text, said, detail }))).toEqual([
       { kind: "reply", text: undefined, said: undefined, detail: { intent: "answer", withheld: true, ...worked } },
     ])
@@ -1657,6 +1727,7 @@ describe("Over its first seconds, while yapd's own voice can still get into the 
         yield* helper.wait(0.5)
         yield* helper.talk(0.9, 15)
         yield* helper.quiet
+        yield* helper.held
         return { picked, commands: helper.commands, followed: yield* Fiber.join(helper.fiber), followUps: helper.followed }
       }),
     )
@@ -1682,6 +1753,7 @@ describe("Over its first seconds, while yapd's own voice can still get into the 
         yield* helper.wait(2)
         yield* helper.talk(0.9, 10)
         yield* helper.quiet
+        yield* helper.held
         return {
           offered: helper.offered.map(({ heard, echo }) => ({ heard, told: echo !== undefined })),
           plays: helper.plays.map(seconds),
@@ -2666,6 +2738,7 @@ describe("A line listened to from its end", () => {
         yield* helper.wait(1)
         yield* helper.talk(0.9, 20)
         yield* helper.quiet
+        yield* helper.held
         return { commands: helper.commands, offered: helper.offered, followed: helper.followed, done: yield* Fiber.join(helper.fiber) }
       }),
     )
@@ -2765,6 +2838,7 @@ describe("A line listened to from its end", () => {
         yield* helper.talk(0.9, 10)
         yield* helper.quiet
         yield* helper.wait(0.2)
+        yield* helper.held
         return { followed: helper.followed, done: yield* Fiber.join(helper.fiber) }
       }),
     )
@@ -2788,7 +2862,7 @@ describe("A line listened to from its end", () => {
           // Past two seconds after it ended, and a beat.
           yield* helper.wait(0.3)
           const late = Option.isSome(yield* Fiber.poll(helper.fiber))
-          if (talk) yield* helper.quiet
+          if (talk) yield* Effect.zipRight(helper.quiet, helper.held)
           return { early, late, followed: helper.followed }
         }),
       )

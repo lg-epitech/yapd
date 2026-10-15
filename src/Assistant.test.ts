@@ -1072,6 +1072,43 @@ describe("Assistant", () => {
     })
   })
 
+  test("an option's name or an approve, worked out as he stops, does nothing until it's taken, so what he says after a breath is worked out with it", async () => {
+    // Worked out at once, as code takes it, then let go as he carried on, which the conversation holds it a breath for.
+    const asking = waitingOn({ id: "q1", kind: "user_input" })
+    const question = { id: "next", question: "Ship it now?", options: [{ label: "Ship it" }, { label: "Hold it (Recommended)" }] }
+    const picked = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(
+          (situation) => Brain.decision({ act: "reply", target: handle(situation, asking), text: "Ship it, but only after the tests pass.", pending: "answers" }),
+          undefined,
+          { others: [asking], items: card("q1", [question]) },
+        )
+        yield* asked(made, asking)
+        const alone = yield* made.questions().at(-1)!.question!.answer("Ship it.", 1)
+        const before = made.dispatched.length
+        yield* made.answer("Ship it. But only after the tests pass.")
+        return { alone: Option.isSome(alone), before, answers: answered(made.dispatched) }
+      }),
+    )
+    expect(picked).toEqual({ alone: true, before: 0, answers: [{ next: "Ship it, but only after the tests pass." }] })
+    const cloud = waitingOn({ id: "r1", kind: "command" })
+    const approving = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(
+          (situation) => Brain.decision({ act: "decide", target: handle(situation, cloud), how: "accept", pending: "answers", rest: "only the read" }),
+          undefined,
+          { others: [cloud], items: approval("r1", "rm -rf build") },
+        )
+        yield* asked(made, cloud)
+        const alone = yield* made.questions().at(-1)!.question!.answer("Approve.", 1)
+        const before = made.dispatched.length
+        yield* made.answer("Approve. Only the read.")
+        return { alone: Option.isSome(alone), before, dispatched: made.dispatched.length }
+      }),
+    )
+    expect(approving).toEqual({ alone: true, before: 0, dispatched: 0 })
+  })
+
   test("an approval in the rest of a request, which is the model's words, never his, is never allowed: it's read back to him, and 'approve' then allows it", async () => {
     const cloud = waitingOn({ id: "r1", kind: "command" })
     const result = await run(

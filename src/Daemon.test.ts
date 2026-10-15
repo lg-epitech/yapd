@@ -7,6 +7,7 @@ import * as Brain from "./Brain.ts"
 import { Waiting, WaitingLive } from "./ClaudeCode.ts"
 import { CondenseError, Condenser, type Turn } from "./Condenser.ts"
 import type * as Conversation from "./Conversation.ts"
+import { breath } from "./Conversation.ts"
 import * as Daemon from "./Daemon.ts"
 import * as Drafts from "./Drafts.ts"
 import { defaults } from "./Endpointer.ts"
@@ -7006,6 +7007,8 @@ describe("Daemon with a thread's subagents", () => {
         yield* stopHere(handle, "s-jarvis", "The Jarvis work is merged.")
         yield* wait(1)
         yield* talk
+        // Done once he's stopped and the breath after it is out, as he might have carried on.
+        yield* wait(breath / 1000)
         const reading = yield* mutes.reads(jarvisKey)
         yield* wait(2)
         yield* talk
@@ -7057,7 +7060,8 @@ describe("Daemon with a thread's subagents", () => {
     // Only what's for the agent reaches it.
     expect(result.responded).toEqual(["Have a subagent review it."])
     expect(result.followUps).toEqual(["s-review-1 sent: Have a subagent review it."])
-    expect(result.mutes).toEqual([[reviewKey, "Sol review", 60 * 60_000 + 1_000]])
+    // From when it's done, once he's stopped and the breath after it is out.
+    expect(result.mutes).toEqual([[reviewKey, "Sol review", 60 * 60_000 + 1_000 + breath]])
     expect(result.reading).toBe(false)
   })
 
