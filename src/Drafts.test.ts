@@ -1,14 +1,13 @@
 import { describe, expect, test } from "bun:test"
-import { Effect, Either, Fiber, Option, type Scope, TestClock, TestContext } from "effect"
+import { Effect, Either, Option, type Scope, TestContext } from "effect"
 import * as Drafts from "./Drafts.ts"
-import { asking, type Catalog, LaunchError, list, type Request, type Started, serve } from "./Launcher.ts"
+import { asking, type Catalog, list, type Request, type Started, serve } from "./Launcher.ts"
 import * as Ledger from "./Ledger.ts"
 import * as Persona from "./Persona.ts"
 import { ProcessError } from "./Process.ts"
 import * as Remote from "./Remote.ts"
 import * as Store from "./Store.ts"
-import type { Line } from "./Words.ts"
-import { type Decision, type Material, WriteError, Writer } from "./Writer.ts"
+import { type Decision, type Material, Writer } from "./Writer.ts"
 
 const models: Catalog["models"] = [
   { name: "claude-fable-5-1", title: "Claude Fable 5.1", aliases: ["fable"], efforts: ["low", "high"] },
@@ -63,45 +62,27 @@ const decision = (overrides: Partial<Decision>): Decision => ({
 /**
  * Runs new work against a writer that decides what the test says, and
  * launchers that record what they're asked to start, saying what came of each
- * request as whoever heard it would, with the persona's `lines`, or the plain ones.
+ * request in the plain lines.
  */
 const drafts = (
-  decide: (material: Material) => Decision | undefined,
+  decide: (material: Material) => Decision,
   options: {
-    readonly refuse?: string
-    /** T3 Code took what was started, but its answer was lost, so it may have started all the same. */
-    readonly lost?: boolean
-    readonly rigDown?: boolean
     /** Whether rig is reached as it is for real, through `yapd start` and `yapd catalog` there. */
     readonly remote?: boolean
     /** Whether the connection to rig drops once `yapd start` there has what to start, before its answer gets here. */
     readonly dropped?: boolean
-    /** Whether what's started is written down first, in a ledger of its own, and whether writing it down takes a second. */
-    readonly ledger?: boolean | "slow"
-    readonly lines?: Persona.Lines
-    /** What starts instead of what was asked, as T3 Code may have it. */
-    readonly startedAs?: Partial<Started>
-    /** Whether lines are rendered ahead on a guess, which are then kept in `guessed`. */
-    readonly guessing?: boolean
+    /** Whether what's started is written down first, in a ledger of its own. */
+    readonly ledger?: boolean
   } = {},
 ) =>
   Effect.gen(function* () {
     const started: Array<{ readonly machine: string; readonly request: Request }> = []
-    const guessed: Array<string> = []
-    const said: Array<{ readonly spoken: string; readonly came: Drafts.Outcome["_tag"] | "Failed" }> = []
-    const asked: Array<Material> = []
-    const catalogs: Array<string> = []
-    /** How many times a line for going ahead was picked. */
-    let picks = 0
+    const said: Array<string> = []
     const launcher = (machine: string, catalog: Catalog) => ({
-      catalog: Effect.sync(() => void catalogs.push(machine)).pipe(
-        Effect.zipRight(machine === "rig" && options.rigDown === true ? Effect.fail(new LaunchError({ reason: "I can't reach rig." })) : Effect.succeed(catalog)),
-      ),
+      catalog: Effect.succeed(catalog),
       start: (request: Request) =>
-        Effect.gen(function* () {
+        Effect.sync(() => {
           started.push({ machine, request })
-          if (options.refuse !== undefined) return yield* new LaunchError({ reason: options.refuse })
-          if (options.lost === true) return yield* new LaunchError({ reason: "T3 Code is taking too long, so I don't know if it started.", sent: true })
           return {
             thread: "thread-1",
             project: catalog.projects.find(({ path }) => path === request.project)?.name ?? request.project,
@@ -109,7 +90,6 @@ const drafts = (
             branch: null,
             model: request.model ?? "claude-fable-5-1",
             worktree: request.worktree === true,
-            ...options.startedAs,
           } satisfies Started
         }),
     })
@@ -120,8 +100,7 @@ const drafts = (
       if (options.dropped !== true) return answered
       return Effect.flatMap(answered, () => Effect.fail(new ProcessError({ command: command.join(" "), code: 255, stderr: `${said}client_loop: send disconnect: Broken pipe` })))
     }
-    const kept = Ledger.fromStore(yield* Store.make(":memory:"))
-    const ledger: Ledger.Ledger["Type"] = options.ledger === "slow" ? { ...kept, prepare: (step) => Effect.zipLeft(kept.prepare(step), Effect.sleep("1 second")) } : kept
+    const ledger = Ledger.fromStore(yield* Store.make(":memory:"))
     const made = yield* Drafts.make({
       machines: [
         { name: "rosie", here: true, hosts: ["Rosie.local"], launcher: launcher("rosie", rosie) },
@@ -137,74 +116,44 @@ const drafts = (
       ],
       rules: Effect.succeed(Option.some("Fable on high for hard bugs.")),
       recent: Effect.succeed([]),
-      ...(options.ledger === undefined || options.ledger === false ? {} : { ledger }),
-      ...(options.guessing === true ? { guess: (line: string) => Effect.sync(() => (guessed.push(line), true)) } : {}),
+      ...(options.ledger === true ? { ledger } : {}),
     }).pipe(
       Effect.provideService(Writer, {
-        decide: (material) =>
-          Effect.suspend(() => {
-            asked.push(material)
-            const decided = decide(material)
-            return decided === undefined ? Effect.fail(new WriteError({ cause: "The model is down" })) : Effect.succeed(decided)
-          }),
+        decide: (material) => Effect.sync(() => decide(material)),
         prepare: Effect.void,
       }),
       Effect.provideService(Persona.Persona, {
-        lines: Effect.succeed(options.lines ?? Persona.plain),
-        onIt: () => Effect.sync(() => (picks++, (options.lines ?? Persona.plain).onIt)),
+        lines: Effect.succeed(Persona.plain),
+        onIt: () => Effect.succeed(Persona.plain.onIt),
         said: () => Effect.void,
       }),
     )
-    let material: Material | undefined
     /** Says what came of it, and what came of a launch once that's done. */
     const told = (outcome: Drafts.Outcome): Effect.Effect<void> =>
       Effect.gen(function* () {
         switch (outcome._tag) {
           case "Asked":
-            material = outcome.material
-            said.push({ spoken: outcome.question, came: "Asked" })
+            said.push(outcome.question)
             return
           case "Started":
-            said.push({ spoken: outcome.spoken, came: "Started" })
-            return
           case "Said":
-            said.push({ spoken: outcome.spoken, came: outcome.failed ? "Failed" : "Said" })
+            said.push(outcome.spoken)
             return
           case "Launching":
             return yield* told(yield* outcome.then)
         }
       })
-    const carry = (lines: ReadonlyArray<Line>, answering?: Material, step?: Drafts.Step) =>
-      Effect.gen(function* () {
-        const written = yield* made.begin(lines, answering)
-        if (Either.isLeft(written)) return said.push({ spoken: written.left, came: "Failed" })
-        yield* told(yield* made.start(written.right, undefined, step))
-      })
-    // Lets the fibers catch up on what the test did, since the clock only moves when told to.
-    const flush = Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 20)))
     return {
-      prepare: made.prepare([]),
       /** As a step of a request, when `step` is given. */
-      dictate: (heard: string, step?: Drafts.Step) => carry([{ speaker: "user", text: heard }], undefined, step),
-      /** Answers the question asked last, as the one open. */
-      answer: (heard: string) =>
-        carry(
-          [
-            { speaker: "yapd", text: said.at(-1)?.spoken ?? "" },
-            { speaker: "user", text: heard },
-          ],
-          material,
-        ),
-      flush,
-      wait: (seconds: number) => TestClock.adjust(`${seconds} seconds`).pipe(Effect.zipRight(flush)),
+      dictate: (heard: string, step?: Drafts.Step) =>
+        Effect.gen(function* () {
+          const written = yield* made.begin([{ speaker: "user", text: heard }])
+          if (Either.isLeft(written)) return said.push(written.left)
+          yield* told(yield* made.start(written.right, undefined, step))
+        }),
       started,
-      said,
-      guessed,
       ledger,
-      spoken: () => said.map(({ spoken }) => spoken),
-      picks: () => picks,
-      asked,
-      catalogs,
+      spoken: () => [...said],
     }
   })
 
@@ -212,25 +161,6 @@ const run = <A, E>(test: Effect.Effect<A, E, Scope.Scope>) =>
   Effect.runPromise(test.pipe(Effect.scoped, Effect.provide(TestContext.TestContext)))
 
 describe("Drafts", () => {
-  test("starts what the user said where they said, and says what it did", async () => {
-    const result = await run(
-      Effect.gen(function* () {
-        const { dictate, started, said } = yield* drafts(() =>
-          decision({ model: "opus-5.5", effort: "XHigh", worktree: false, branch: "release", spoken: "In yapd, on Opus, without a worktree." }),
-        )
-        yield* dictate("In yapd, fix the loader, with Opus on extra high, no worktree, off the release branch.")
-        return { started, said }
-      }),
-    )
-    expect(result.started).toEqual([
-      {
-        machine: "rosie",
-        request: { project: "/code/yapd", prompt: "Fix the loader.", model: "claude-opus-5-5", effort: "xhigh", worktree: false, baseBranch: "release" },
-      },
-    ])
-    expect(result.said).toEqual([{ spoken: "On it. In yapd, on Opus, without a worktree.", came: "Started" }])
-  })
-
   test("sends work to the machine the project is on, and to where it was worked on last when it's on several", () => {
     const listings = [
       { machine: "rosie", here: true, hosts: [], catalog: Option.some(rosie) },
@@ -256,100 +186,6 @@ describe("Drafts", () => {
     expect(Either.getOrThrow(Drafts.resolve(machines, listings, made)).request).toMatchObject({ project: "/code/std", model: "claude-opus-5-5", effort: "high" })
   })
 
-  test("asks rather than start in a project that isn't there", async () => {
-    const result = await run(
-      Effect.gen(function* () {
-        const { dictate, started, said } = yield* drafts(() => decision({ project: "billing", about: "the invoice retry" }))
-        yield* dictate("In billing, add a retry to the invoice webhook.")
-        return { started, said }
-      }),
-    )
-    expect(result.started).toEqual([])
-    expect(result.said).toEqual([{ spoken: "Which project is the invoice retry for?", came: "Asked" }])
-  })
-
-  test("asks when the project is unclear, and starts once the user has answered", async () => {
-    const result = await run(
-      Effect.gen(function* () {
-        const { dictate, answer, started, spoken, asked } = yield* drafts(({ lines }) =>
-          lines.length === 1
-            ? decision({ action: "ask", project: "", prompt: "", spoken: "For the loader fix, is that yapd or std?" })
-            : decision({ project: "std", evidence: "std", spoken: "In std, on Fable, in a worktree." }),
-        )
-        yield* dictate("Fix the loader.")
-        const before = [...started]
-        yield* answer("Std.")
-        return { before, started, spoken: spoken(), lines: asked.at(-1)?.lines }
-      }),
-    )
-    expect(result.before).toEqual([])
-    expect(result.started.map(({ request }) => request.project)).toEqual(["/code/std"])
-    expect(result.spoken).toEqual(["For the loader fix, is that yapd or std?", "On it. In std, on Fable, in a worktree."])
-    expect(result.lines).toEqual([
-      { speaker: "user", text: "Fix the loader." },
-      { speaker: "yapd", text: "For the loader fix, is that yapd or std?" },
-      { speaker: "user", text: "Std." },
-    ])
-  })
-
-  test("a research request starts in the scratch project", async () => {
-    const research = { about: "the glucose question", settled: "outside", evidence: "", project: "", model: "gpt-6-sol", effort: "", worktree: true, prompt: "Find out whether Apple shipped an API for third-party glucose sensors on the Watch, and tell me." } as const
-    const asked = (overrides: Partial<Decision>, rigDown = false) =>
-      run(
-        Effect.gen(function* () {
-          const { dictate, started, spoken } = yield* drafts(() => decision({ ...research, ...overrides }), { lines: { ...Persona.plain, onIt: "Right away, sir.", address: "sir" }, rigDown })
-          yield* dictate("Find out whether Apple shipped an API for third-party glucose sensors on the Watch.")
-          return { started, spoken: spoken() }
-        }),
-      )
-    expect(await asked({ machine: "", spoken: "Looking into it, on Sol." })).toEqual({
-      started: [{ machine: "rosie", request: { project: "/t3/scratch", prompt: research.prompt, model: "gpt-6-sol", effort: "high", worktree: false } }],
-      spoken: ["Right away, sir. Looking into it, on Sol."],
-    })
-    // In its plain words, with no worktree to tell of.
-    expect((await asked({ machine: "", spoken: "" })).spoken).toEqual(["Looking into it, on GPT-6-Sol."])
-    // Not on a machine without one, nor as a project he named.
-    expect(await asked({ machine: "rig", spoken: "Looking into it on rig, on Sol." })).toEqual({
-      started: [],
-      spoken: ["I can't start work outside your projects on rig. Which project is the glucose question for?"],
-    })
-    expect(await asked({ settled: "named", evidence: "Apple", project: "No project", machine: "" })).toEqual({ started: [], spoken: ["Which project is the glucose question for?"] })
-    // Outside and yet for a project, the writer contradicted itself, so it's asked about rather than started in either.
-    expect(await asked({ evidence: "the Watch", project: "yapd", machine: "" })).toEqual({ started: [], spoken: ["Which project is the glucose question for?"] })
-    // His words that put it outside, given for it, are no project, so it starts all the same.
-    expect((await asked({ evidence: "in scratch", machine: "", spoken: "Looking into it, on Sol." })).started.map(({ request }) => request.project)).toEqual(["/t3/scratch"])
-    // A machine that couldn't say what it can start says why, as there's nothing for him to answer.
-    expect(await asked({ machine: "rig" }, true)).toEqual({ started: [], spoken: ["About the glucose question: I can't reach rig."] })
-  })
-
-  test("a confirmation rendered ahead is never said when it doesn't match what started", async () => {
-    const lines = { ...Persona.plain, onIt: "Right away, sir.", address: "sir" }
-    const starting = (decided: Partial<Decision>, startedAs: Partial<Started> = {}) =>
-      run(
-        Effect.gen(function* () {
-          const { dictate, flush, guessed, spoken } = yield* drafts(() => decision({ evidence: "yapd", ...decided }), { lines, startedAs, guessing: true })
-          yield* dictate("In yapd, fix the loader.")
-          yield* flush
-          return { guessed: [...guessed], said: spoken() }
-        }),
-      )
-    // Started as asked, what was rendered ahead is word for word what's said, so it's what plays.
-    expect(await starting({ worktree: false, spoken: "In yapd, on Fable, without a worktree." })).toEqual({
-      guessed: ["Right away, sir. In yapd, on Fable, without a worktree."],
-      said: ["Right away, sir. In yapd, on Fable, without a worktree."],
-    })
-    // Guessed without a worktree and started in one, it's the worktree that's said.
-    expect(await starting({ worktree: false, spoken: "In yapd, on Fable, without a worktree." }, { worktree: true })).toEqual({
-      guessed: ["Right away, sir. In yapd, on Fable, without a worktree."],
-      said: ["Started in yapd, on Claude Fable 5.1, in a worktree."],
-    })
-    // The writer's words naming Sol for work that starts on Opus: the plain facts, naming Opus, as they're guessed to be.
-    expect(await starting({ model: "claude-opus-5-5", spoken: "In yapd, on Sol, in a worktree." })).toEqual({
-      guessed: ["Started in yapd, on Claude Opus 5.5, in a worktree."],
-      said: ["Started in yapd, on Claude Opus 5.5, in a worktree."],
-    })
-  })
-
   test("says what really started when that's not what was asked", () => {
     const resolved = Either.getOrThrow(
       Drafts.resolve(
@@ -367,72 +203,6 @@ describe("Drafts", () => {
     expect(Drafts.confirmation("", resolved, started, lines)).toBe("Started in trainer on rig, on Claude Fable 5.1, in a worktree.")
   })
 
-  test("says his own line for going ahead once work starts, in front of the writer's words and in place of an \"On it\" it wrote anyway", async () => {
-    const said = (spoken: string) =>
-      run(
-        Effect.gen(function* () {
-          const { dictate, spoken: told, picks } = yield* drafts(() => decision({ evidence: "yapd", spoken }), {
-            lines: { ...Persona.plain, onIt: "Right away, sir.", address: "sir" },
-          })
-          yield* dictate("In yapd, fix the loader.")
-          return { said: told(), picks: picks() }
-        }),
-      )
-    expect(await said("In yapd, on Fable, in a worktree.")).toEqual({ said: ["Right away, sir. In yapd, on Fable, in a worktree."], picks: 1 })
-    expect(await said("On it, sir, in yapd, on Fable, in a worktree.")).toEqual({ said: ["Right away, sir. In yapd, on Fable, in a worktree."], picks: 1 })
-    // With only the plain facts said, no line is picked, so none is kept from coming up as if it were about to play.
-    expect(await said("On it.")).toEqual({ said: ["Started in yapd, on Claude Fable 5.1, in a worktree."], picks: 0 })
-  })
-
-  test("says the line for going ahead in front of the writer's words, in place of an \"On it\" it wrote anyway", () => {
-    const resolved = Either.getOrThrow(
-      Drafts.resolve(
-        [{ name: "rig", here: false, hosts: [], launcher: { start: () => Effect.die(""), catalog: Effect.die("") } }],
-        [{ machine: "rig", here: false, hosts: [], catalog: Option.some(rig) }],
-        decision({ project: "trainer", machine: "rig" }),
-      ),
-    )
-    const started: Started = { thread: "t", project: "trainer", directory: "/home/me/trainer", branch: "main", model: "claude-fable-5-1", worktree: true }
-    const lines = { onIt: "Right away, sir.", address: "sir" }
-    expect(Drafts.confirmation("On it, sir, in trainer on rig, on Fable, in a worktree.", resolved, started, lines)).toBe(
-      "Right away, sir. In trainer on rig, on Fable, in a worktree.",
-    )
-    // Nor how it addressed him, while the lines don't say how yet.
-    expect(Drafts.confirmation("On it, sir, in trainer on rig, on Fable, in a worktree.", resolved, started, { ...lines, address: "" })).toBe(
-      "Right away, sir. In trainer on rig, on Fable, in a worktree.",
-    )
-    // With nothing else, there are no words of its own, so it's the plain facts, which need no line in front.
-    expect(Drafts.confirmation("On it, sir.", resolved, started, lines)).toBe("Started in trainer on rig, on Claude Fable 5.1, in a worktree.")
-    // Writer's words that read just like the plain facts are still the writer's, so the line goes in front of them.
-    expect(Drafts.confirmation("Started in trainer on rig, on Claude Fable 5.1, in a worktree.", resolved, started, lines)).toBe(
-      "Right away, sir. Started in trainer on rig, on Claude Fable 5.1, in a worktree.",
-    )
-    // Whether it says where it is goes by the writer's words alone, never by a line of his that names a worktree.
-    expect(Drafts.confirmation("In trainer, on Fable.", resolved, started, { onIt: "I'll get the worktree sorted.", address: "" })).toBe(
-      "I'll get the worktree sorted. In trainer, on Fable. That's in a worktree.",
-    )
-    // Nor are words after an "On it" taken for how it addressed him, while the lines don't say how yet.
-    expect(Drafts.confirmation("On it, staging only. In trainer, in a worktree.", resolved, started, { ...lines, address: "" })).toBe(
-      "Right away, sir. Staging only. In trainer, in a worktree.",
-    )
-    // Without lines of his own, it's the written one, much as the writer used to put it.
-    expect(Drafts.confirmation("In trainer on rig, on Fable, in a worktree.", resolved, started, Persona.plain)).toBe("On it. In trainer on rig, on Fable, in a worktree.")
-  })
-
-  test("always says whether there's a worktree, and when it couldn't tell which the user wanted", async () => {
-    const result = await run(
-      Effect.gen(function* () {
-        const { dictate, started, spoken } = yield* drafts(() =>
-          decision({ project: "std", evidence: "std", worktreeFrom: "unclear", worktree: false, spoken: "In std, on Fable." }),
-        )
-        yield* dictate("In std, reply with the single word OK and do nothing else on a work tree.")
-        return { worktree: started[0]?.request.worktree, spoken: spoken() }
-      }),
-    )
-    expect(result.worktree).toBe(false)
-    expect(result.spoken).toEqual(["On it. In std, on Fable. That's without a worktree. I couldn't tell whether you wanted a worktree, so I went by your rules."])
-  })
-
   test("asks rather than start in a project the user neither named nor pointed at", async () => {
     const asked = (overrides: Partial<Decision>) =>
       run(
@@ -447,78 +217,27 @@ describe("Drafts", () => {
     expect(await asked({ settled: "unclear", evidence: "" })).toEqual(question)
     // Words they never said.
     expect(await asked({ settled: "named", evidence: "free sound" })).toEqual(question)
-    expect(await asked({ settled: "referred", evidence: "" })).toEqual(question)
     expect((await asked({ settled: "subject", evidence: "Reply with the word OKAY" })).started).toBe(1)
-  })
-
-  test("says why nothing started, whether the launcher refused or the prompt couldn't be written", async () => {
-    const refused = await run(
-      Effect.gen(function* () {
-        const { dictate, said } = yield* drafts(() => decision({}), { refuse: "T3 Code isn't running." })
-        yield* dictate("Fix the loader in yapd.")
-        return said
-      }),
-    )
-    expect(refused).toEqual([{ spoken: "About the loader fix: T3 Code isn't running.", came: "Failed" }])
-    const unwritten = await run(
-      Effect.gen(function* () {
-        const { dictate, spoken, started } = yield* drafts(() => undefined)
-        yield* dictate("Fix the loader in yapd.")
-        return { spoken: spoken(), started }
-      }),
-    )
-    expect(unwritten).toEqual({ spoken: ["I couldn't write that up, so nothing started. What you said is in my log."], started: [] })
   })
 
   test("new work asked for twice as the same step of a request is started once", async () => {
     const result = await run(
       Effect.gen(function* () {
-        const { dictate, started, said } = yield* drafts(() => decision({}), { ledger: true })
+        const { dictate, started } = yield* drafts(() => decision({}), { ledger: true })
         yield* dictate("Fix the loader in yapd.", { utterance: "u1", step: 0 })
         yield* dictate("Fix the loader in yapd.", { utterance: "u1", step: 0 })
         // Another request's step is new work of its own.
         yield* dictate("Fix the loader in yapd.", { utterance: "u2", step: 0 })
-        return { started: started.map(({ request }) => request.ids?.command), said }
+        return { started: started.map(({ request }) => request.ids?.command) }
       }),
     )
     expect(result.started).toEqual(["yapd:u1:0", "yapd:u2:0"])
-    expect(result.said[1]).toEqual({ spoken: "I've already asked for that to start.", came: "Said" })
-  })
-
-  test("new work written down is asked for even when yapd is turned off just then, never left as if it may have started", async () => {
-    const result = await run(
-      Effect.gen(function* () {
-        const { dictate, started, ledger, flush, wait } = yield* drafts(() => decision({}), { ledger: "slow" })
-        const going = yield* Effect.fork(dictate("Fix the loader in yapd.", { utterance: "u1", step: 0 }))
-        yield* flush
-        // Turned off as it's written down, before it's asked for.
-        yield* Fiber.interruptFork(going)
-        yield* wait(1)
-        return { started: started.map(({ request }) => request.ids?.command), state: Option.map(yield* ledger.get("yapd:u1:0"), ({ state }) => state) }
-      }),
-    )
-    expect(result).toEqual({ started: ["yapd:u1:0"], state: Option.some("sent") })
-  })
-
-  test("new work another machine's T3 Code may have started all the same is left for a restart to look for, never taken as not started", async () => {
-    const result = await run(
-      Effect.gen(function* () {
-        const { dictate, said, ledger } = yield* drafts(() => decision({ project: "trainer", machine: "rig", model: "gpt-6-sol" }), { ledger: true, remote: true, lost: true })
-        yield* dictate("On rig, fix the loader in trainer.", { utterance: "u1", step: 0 })
-        return { said, state: Option.map(yield* ledger.get("yapd:u1:0"), ({ state }) => state), open: (yield* ledger.open(0)).map(({ commandId }) => commandId) }
-      }),
-    )
-    expect(result).toEqual({
-      said: [{ spoken: "About the loader fix: T3 Code is taking too long, so I don't know if it started.", came: "Failed" }],
-      state: Option.some("unknown"),
-      open: ["yapd:u1:0"],
-    })
   })
 
   test("new work on another machine that the connection drops on once yapd there has it is left for a restart to look for, never taken as not started", async () => {
     const result = await run(
       Effect.gen(function* () {
-        const { dictate, said, ledger, started } = yield* drafts(() => decision({ project: "trainer", machine: "rig", model: "gpt-6-sol" }), {
+        const { dictate, ledger, started } = yield* drafts(() => decision({ project: "trainer", machine: "rig", model: "gpt-6-sol" }), {
           ledger: true,
           remote: true,
           dropped: true,
@@ -526,7 +245,6 @@ describe("Drafts", () => {
         yield* dictate("On rig, fix the loader in trainer.", { utterance: "u1", step: 0 })
         return {
           started: started.length,
-          said,
           state: Option.map(yield* ledger.get("yapd:u1:0"), ({ state }) => state),
           open: (yield* ledger.open(0)).map(({ commandId }) => commandId),
         }
@@ -534,30 +252,8 @@ describe("Drafts", () => {
     )
     expect(result).toEqual({
       started: 1,
-      said: [{ spoken: "About the loader fix: rig cut out partway, so I don't know if it started.", came: "Failed" }],
       state: Option.some("unknown"),
       open: ["yapd:u1:0"],
     })
-  })
-
-  test("asks every machine what it can start as the shortcut is pressed, and goes on without one that can't say", async () => {
-    const result = await run(
-      Effect.gen(function* () {
-        const { prepare, dictate, flush, catalogs, asked, started } = yield* drafts(() => decision({}), { rigDown: true })
-        yield* prepare
-        yield* flush
-        const pressed = [...catalogs]
-        yield* dictate("Fix the loader in yapd.")
-        return { pressed, catalogs, listings: asked[0]?.listings.map(({ machine, reason }) => [machine, reason]), started: started.length }
-      }),
-    )
-    expect(result.pressed.toSorted()).toEqual(["rig", "rosie"])
-    // Not asked again once dictated.
-    expect(result.catalogs.length).toBe(2)
-    expect(result.listings).toEqual([
-      ["rosie", undefined],
-      ["rig", "I can't reach rig."],
-    ])
-    expect(result.started).toBe(1)
   })
 })

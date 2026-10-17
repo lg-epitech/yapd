@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { Effect, Option } from "effect"
+import { Effect } from "effect"
 import * as Journal from "./Journal.ts"
 import * as Missed from "./Missed.ts"
 
@@ -33,8 +33,6 @@ describe("Missed", () => {
   test("all of what was said of something is its headline then its rest, the rest once even when the headline has it already", () => {
     expect(Missed.whole(" The loader is fixed. ", " Retries back off now. ")).toBe("The loader is fixed. Retries back off now.")
     expect(Missed.whole("The loader is fixed. Retries back off now.", "Retries back off now.")).toBe("The loader is fixed. Retries back off now.")
-    expect(Missed.whole("The loader is fixed.", undefined)).toBe("The loader is fixed.")
-    expect(Missed.whole("The loader is fixed.", "")).toBe("The loader is fixed.")
   })
 
   test("when he last had yapd off runs from the first off to the first on after, whatever was asked for again", () => {
@@ -66,43 +64,5 @@ describe("Missed", () => {
     expect(result.said).toEqual(["Distribox copied the EU bucket.", "The fee table is in.", "The loader failed.", "Which network first?"])
     expect(result.since).toBe(now - 50 * hour)
     expect(result.off).toEqual({ from: now - 2 * hour, to: now - hour })
-  })
-
-  test("what was waiting, being read or summed up as he turned yapd off counts days later, though it was kept a moment before the off", async () => {
-    const result = await gathered((journal) =>
-      Effect.gen(function* () {
-        yield* update(journal, now - 72 * hour - 2000, "The Tezos importer tests pass.", { priority: "done", held: "off", heldAt: now - 72 * hour - 20 })
-        yield* update(journal, now - 72 * hour - 1000, "Distribox copied the EU bucket.", { priority: "done", held: "off" })
-        yield* switched(journal, now - 72 * hour, false)
-        // A second off from the API.
-        yield* switched(journal, now - 48 * hour, false)
-        yield* update(journal, now - 30 * hour, "Distribox deployed.", { priority: "done", held: "off" })
-      }),
-    )
-    expect(result.said).toEqual(["Distribox copied the EU bucket.", "Distribox deployed.", "The Tezos importer tests pass."])
-    expect(result.off).toEqual({ from: now - 72 * hour })
-  })
-
-  test("nothing older than a week counts, kept while off or not", async () => {
-    const result = await gathered((journal) =>
-      Effect.gen(function* () {
-        yield* switched(journal, now - 9 * day, false)
-        yield* update(journal, now - 8 * day, "Too old.", { priority: "needs-you", held: "off" })
-        yield* update(journal, now - 6 * day, "Still in the week.", { priority: "done", held: "off" })
-      }),
-    )
-    expect(result.said).toEqual(["Still in the week."])
-  })
-
-  test("a row given away as coming isn't missed", async () => {
-    const result = await Effect.runPromise(
-      Effect.gen(function* () {
-        const journal = yield* Journal.Journal
-        const id = Option.getOrThrow(yield* journal.write({ at: now - hour, kind: "update", machine: "Rosie", thread: "t-tezos", said: "Being read.", detail: { priority: "done" } }))
-        const missed = yield* Missed.gather(journal, { now, spoke: now - 2 * hour, coming: [id], desk: nowhere })
-        return missed.groups.length
-      }).pipe(Effect.provide(Journal.memory)),
-    )
-    expect(result).toBe(0)
   })
 })

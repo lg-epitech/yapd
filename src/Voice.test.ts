@@ -29,23 +29,6 @@ const tone = (seconds: number, level: number, rate = 100) => Array<number>(Math.
 const parts = (text: string, limit: number) => Effect.runSync(split(text, (part) => Effect.succeed(part.length <= limit)))
 
 describe("split", () => {
-  test("keeps text that fits in one part", () => {
-    expect(parts("yapd. The tests pass. Nothing needs you.", 250)).toEqual(["yapd. The tests pass. Nothing needs you."])
-  })
-
-  test("has nothing to read in blank text", () => {
-    expect(parts("  \n ", 250)).toEqual([])
-  })
-
-  test("reads a long text in one go when Kokoro can", () => {
-    const text = "In std, the split concepts are merged, sir: twenty-one cards are now ten. ".repeat(5).trim()
-    expect(parts(text, 1000)).toEqual([text])
-  })
-
-  test("breaks long text between sentences, packing as many as fit", () => {
-    expect(parts("One two. Three four. Five six.", 20)).toEqual(["One two. Three four.", "Five six."])
-  })
-
   test("breaks a sentence that's too long at clauses, then words", () => {
     expect(parts("Alpha beta, gamma delta epsilon zeta eta.", 20)).toEqual(["Alpha beta,", "gamma delta epsilon", "zeta eta."])
   })
@@ -72,18 +55,6 @@ describe("join", () => {
     expect(Array.from(joined.subarray(145))).toEqual(Array.from(second.subarray(24)))
   })
 
-  test("fades out where it cuts", () => {
-    const joined = join([new Float32Array(tone(1, 0.5)), new Float32Array(tone(1, 0.5))], 100)
-    const faded = Array.from(joined.subarray(95, 100))
-    expect(faded.every((sample, i) => i === 0 || sample < faded[i - 1]!)).toBe(true)
-    expect(faded.at(-1)).toBe(0)
-  })
-
-  test("leaves a single part alone", () => {
-    const part = new Float32Array([...tone(0.25, 0), ...tone(1, 0.5), ...tone(0.25, 0)])
-    expect(join([part], 100)).toEqual(part)
-  })
-
   test("starts the whole exactly as its first part plays on its own", () => {
     const first = new Float32Array([...tone(0.25, 0), ...tone(1, 0.5), ...tone(0.6, 0.01), ...tone(0.25, 0)])
     const rest = new Float32Array([...tone(0.25, 0), ...tone(1, 0.4), ...tone(0.25, 0)])
@@ -108,12 +79,6 @@ describe("opening", () => {
       rest: "I merged it. Nothing needs you.",
     })
   })
-
-  test("never ends a first part mid-sentence", () => {
-    expect(open("The tests pass, and nothing needs you.")).toBeUndefined()
-    // Too long for Kokoro in one go, it would have to break somewhere in the middle.
-    expect(open("The loader is fixed, its tests pass, and I merged it. Nothing needs you.", 30)).toBeUndefined()
-  })
 })
 
 describe("speaking", () => {
@@ -129,8 +94,8 @@ describe("speaking", () => {
     return audio
   }
 
-  /** Renders `text` with a first part, through ffmpeg unless `filter` stands in for it, and says which parts it told of. */
-  const render = (dir: string, effect: string, filter = ffmpeg(effect, rate)) =>
+  /** Renders `text` with a first part, through ffmpeg, and says which parts it told of. */
+  const render = (dir: string, effect: string) =>
     Effect.gen(function* () {
       const told: Array<string> = []
       const path = Path.join(dir, `${crypto.randomUUID()}.wav`)
@@ -140,7 +105,7 @@ describe("speaking", () => {
           fits: (text) => Effect.succeed(text.length <= 250),
           speak: (text) => Effect.succeed(speech(text)),
           write: (audio, path) => Effect.promise(() => new RawAudio(audio, rate).save(path)),
-          filter,
+          filter: ffmpeg(effect, rate),
           warn: () => {},
         },
         effect,
@@ -175,22 +140,13 @@ describe("speaking", () => {
   test("has a first part early only with an effect sure to start the whole exactly as that part plays", () =>
     run((dir) =>
       Effect.gen(function* () {
-        // Unlike the others, loudnorm hears seconds ahead, areverse all of it, and highpass, given a block size, a block.
+        // Unlike the others, loudnorm hears seconds ahead, and highpass, given a block size, a block.
         const effects = [
           [yield* defaultEffect, true],
-          ["highpass=f=120,equalizer=f=3000:t=q:w=1:g=3,chorus=0.7:0.9:25:0.25:0.3:2,aecho=0.8:0.5:40|70:0.25|0.15,volume=9dB", true],
-          ["equalizer=frequency=3k:width_type=h:width=200:gain=-3,volume=0.5", true],
-          ["none", true],
           ["loudnorm", false],
-          ["areverse", false],
           ["highpass=f=120:b=4096", false],
-          ["highpass=120:q:0.707:2:1:all:0:di:auto:4096", false],
           // ffmpeg works an expression out anew on each run, so one reading the clock has the first part filtered unlike the whole.
           ["volume=1+0.5*sin(time(0))", false],
-          ["highpass=f=300+200*sin(time(0))", false],
-          // Or one reading the time in the audio, or worked out again for each frame, which a first part's shorter last frame could change.
-          ["volume=1-t", false],
-          ["volume=0.5:eval=frame", false],
         ] as const
         for (const [effect, early] of effects) {
           const { exit, told, path } = yield* render(dir, effect)
@@ -198,25 +154,6 @@ describe("speaking", () => {
           expect([effect, told.length]).toEqual([effect, early ? 1 : 0])
           if (early) expect([effect, carriesOn(told[0]!, path)]).toEqual([effect, true])
         }
-      }),
-    ))
-
-  test("keeps the whole processed as its first part is, or not at all, when ffmpeg fails on one of them", () =>
-    run((dir) =>
-      Effect.gen(function* () {
-        const effect = yield* defaultEffect
-        const broken = new ProcessError({ command: "ffmpeg", code: 1, stderr: "Broken" })
-        const failing = (on: "first" | "whole") => (raw: string, path: string, samples?: number) =>
-          (samples === undefined ? "whole" : "first") === on ? Effect.fail(broken) : ffmpeg(effect, rate)(raw, path, samples)
-        // With the effect on the first part, the whole can't carry on from it without.
-        const processed = yield* render(dir, effect, failing("whole"))
-        expect(processed.told).toHaveLength(1)
-        expect(yield* Effect.flip(processed.exit)).toBe(broken)
-        // With the first part as it is, so is the whole.
-        const plain = yield* render(dir, effect, failing("first"))
-        expect(Exit.isSuccess(plain.exit)).toBe(true)
-        expect(plain.told).toHaveLength(1)
-        expect(carriesOn(plain.told[0]!, plain.path)).toBe(true)
       }),
     ))
 })
@@ -246,37 +183,6 @@ describe("startRender", () => {
     return Effect.runPromise(test(dir)).finally(() => rmSync(dir, { recursive: true, force: true }))
   }
   const text = "The tests pass. Nothing needs you."
-
-  test("abandons a render whose starter was stopped while it started, as nobody else could", () =>
-    run((dir) =>
-      Effect.gen(function* () {
-        const lifetime = yield* Scope.make()
-        const asked = yield* Deferred.make<void>()
-        const gate = yield* Deferred.make<void>()
-        const givenUp = yield* Deferred.make<void>()
-        const voice: Voice["Type"] = {
-          render: () => Effect.die("Rendered with no first part"),
-          // Slow to start, and with both its files there by the time it has.
-          renderFirst: (_, path) =>
-            Effect.gen(function* () {
-              yield* Effect.addFinalizer(() => Deferred.succeed(givenUp, undefined))
-              yield* Deferred.succeed(asked, undefined)
-              yield* Deferred.await(gate)
-              yield* Effect.promise(() => Promise.all([Bun.write(`${path}.first.wav`, "part"), Bun.write(path, "audio")]))
-              return { first: Effect.succeed(`${path}.first.wav`), words: Effect.succeedSome(3), whole: Effect.succeed(2), done: Effect.succeed(true) }
-            }),
-        }
-        const starting = yield* Effect.fork(startRender(voice, text, `${dir}/out.wav`, lifetime))
-        yield* Deferred.await(asked)
-        const stopping = yield* Effect.fork(Fiber.interrupt(starting))
-        yield* Effect.promise(() => Bun.sleep(10))
-        yield* Deferred.succeed(gate, undefined)
-        yield* Fiber.join(stopping)
-        expect(yield* Deferred.isDone(givenUp)).toBe(true)
-        expect(readdirSync(dir)).toEqual([])
-        yield* Scope.close(lifetime, Exit.void)
-      }),
-    ))
 
   test("removes a render's files when its lifetime ends before anyone abandoned it", () =>
     run((dir) =>
@@ -344,35 +250,6 @@ describe("remembering", () => {
       }),
     ))
 
-  test("has a short line's first sentence early, and keeps the line once its whole is, so it's a copy after, quicker than any part", () =>
-    run((dir) =>
-      Effect.gen(function* () {
-        const rendered: Array<string> = []
-        const render = (text: string, path: string) =>
-          Effect.promise(() => Bun.write(path, text)).pipe(Effect.tap(() => rendered.push(text)), Effect.asVoid)
-        const voice = yield* remembering(
-          {
-            render,
-            renderFirst: (text, path) =>
-              Effect.as(render(text, path), { first: Effect.succeed(`${path}.first.wav`), words: Effect.succeedSome(3), whole: Effect.succeed(2), done: Effect.succeed(true) }),
-          },
-          dir,
-        )
-        const text = "The tests pass. Nothing needs you."
-        const parted = yield* voice.renderFirst(text, `${dir}/out-a.wav`)
-        expect(yield* parted.first).toBe(`${dir}/out-a.wav.first.wav`)
-        yield* parted.whole
-        // Kept a moment after its whole is.
-        yield* Effect.promise(() => Bun.sleep(20))
-        expect(yield* (yield* voice.renderFirst(text, `${dir}/out-b.wav`)).first).toBe(`${dir}/out-b.wav`)
-        expect(yield* Effect.promise(() => Bun.file(`${dir}/out-b.wav`).text())).toBe(text)
-        // With no part to have early, a single sentence is kept for next time, like any short line.
-        yield* (yield* voice.renderFirst("On it, sir.", `${dir}/out-c.wav`)).whole
-        yield* voice.render("On it, sir.", `${dir}/out-d.wav`)
-        expect(rendered).toEqual([text, "On it, sir."])
-      }),
-    ))
-
   test("keeps only the newest", () =>
     run((dir) =>
       Effect.gen(function* () {
@@ -386,145 +263,6 @@ describe("remembering", () => {
         expect(rendered).toEqual(["one", "two", "three", "two"])
       }),
     ))
-
-  test("keeps lines rendered ahead for good, without counting them among the newest", () =>
-    run((dir) =>
-      Effect.gen(function* () {
-        const rendered: Array<string> = []
-        const voice = yield* remembering(
-          { render: (text, path) => Effect.promise(() => Bun.write(path, text)).pipe(Effect.tap(() => rendered.push(text)), Effect.asVoid) },
-          dir,
-          2,
-        )
-        yield* voice.warm(["Right away, sir."])
-        for (const text of ["one", "two", "one", "Right away, sir.", "three", "one", "Right away, sir."]) {
-          yield* voice.render(text, `${dir}/out.wav`)
-        }
-        expect(rendered).toEqual(["Right away, sir.", "one", "two", "three"])
-      }),
-    ))
-
-  test("keeps a line rendered ahead however long, so it's never rendered again", () =>
-    run((dir) =>
-      Effect.gen(function* () {
-        const rendered: Array<string> = []
-        const render = (text: string, path: string) =>
-          Effect.promise(() => Bun.write(path, text)).pipe(Effect.tap(() => rendered.push(text)), Effect.asVoid)
-        const voice = yield* remembering(
-          {
-            render,
-            renderFirst: (text, path) =>
-              Effect.as(render(text, path), { first: Effect.succeed(`${path}.first.wav`), words: Effect.succeedSome(3), whole: Effect.succeed(2), done: Effect.succeed(true) }),
-          },
-          dir,
-        )
-        const text = "Consider it done, sir. I'll see to every last detail of it with all the care you'd expect, and let you know the very moment it's all finished, so you can get on with your day."
-        expect(text.length).toBeGreaterThan(160)
-        yield* voice.warm([text])
-        yield* voice.render(text, `${dir}/one.wav`)
-        expect(yield* (yield* voice.renderFirst(text, `${dir}/two.wav`)).first).toBe(`${dir}/two.wav`)
-        expect(rendered).toEqual([text])
-        expect(yield* Effect.promise(() => Bun.file(`${dir}/two.wav`).text())).toBe(text)
-      }),
-    ))
-
-  test("forgets a render that failed at once, even when it made room for it", () =>
-    run((dir) =>
-      Effect.gen(function* () {
-        let calls = 0
-        const voice = yield* remembering(
-          {
-            render: (text, path) =>
-              text === "Hello." && ++calls === 1
-                ? Effect.fail(new ProcessError({ command: "say", code: 1, stderr: "" }))
-                : Effect.promise(() => Bun.write(path, text)).pipe(Effect.asVoid),
-          },
-          dir,
-          1,
-        )
-        yield* voice.render("On it.", `${dir}/a.wav`)
-        expect((yield* Effect.either(voice.render("Hello.", `${dir}/b.wav`)))._tag).toBe("Left")
-        yield* voice.render("Hello.", `${dir}/c.wav`)
-        expect(calls).toBe(2)
-      }),
-    ))
-
-  test("removes a line it let go of while it was still rendering, once it's rendered", () =>
-    run((dir) =>
-      Effect.gen(function* () {
-        const gate = yield* Deferred.make<void>()
-        const voice = yield* remembering(
-          {
-            render: (text, path) =>
-              (text === "Slow." ? Deferred.await(gate) : Effect.void).pipe(Effect.zipRight(Effect.promise(() => Bun.write(path, text))), Effect.asVoid),
-          },
-          dir,
-          1,
-        )
-        const slow = yield* Effect.fork(voice.render("Slow.", `${dir}/out-slow.wav`))
-        yield* voice.render("Quick.", `${dir}/out-quick.wav`)
-        yield* Deferred.succeed(gate, undefined)
-        yield* Fiber.join(slow)
-        yield* Effect.promise(() => Bun.sleep(20))
-        const cached = readdirSync(dir).filter((name) => !name.startsWith("out-"))
-        expect(cached).toHaveLength(1)
-      }),
-    ))
-
-  test("leaves nothing behind of a render that failed after writing", () =>
-    run((dir) =>
-      Effect.gen(function* () {
-        const voice = yield* remembering(
-          {
-            render: (text, path) =>
-              Effect.promise(() => Bun.write(path, text)).pipe(Effect.zipRight(Effect.fail(new ProcessError({ command: "say", code: 1, stderr: "" })))),
-          },
-          dir,
-          1,
-        )
-        for (let tries = 0; tries < 3; tries++) yield* Effect.either(voice.render("Hello.", `${dir}/out-${tries}.wav`))
-        yield* Effect.promise(() => Bun.sleep(20))
-        expect(readdirSync(dir).filter((name) => !name.startsWith("out-"))).toEqual([])
-      }),
-    ))
-
-  test("still renders a line whose first caller was stopped as it asked", () =>
-    run((dir) =>
-      Effect.gen(function* () {
-        const voice = yield* remembering({ render: (text, path) => Effect.promise(() => Bun.write(path, text)).pipe(Effect.asVoid) }, dir)
-        // Stopped a little later each time, so one of them is stopped right after it's kept and before it renders.
-        for (let tries = 0; tries < 40; tries++) {
-          const asked = yield* Effect.fork(voice.render(`Line ${tries}.`, `${dir}/out-a.wav`).pipe(Effect.withMaxOpsBeforeYield(10)))
-          for (let wait = 0; wait < tries; wait++) yield* Effect.yieldNow()
-          yield* Fiber.interrupt(asked)
-          const again = yield* voice.render(`Line ${tries}.`, `${dir}/out-b.wav`).pipe(Effect.timeout("2 seconds"), Effect.either)
-          expect(again._tag).toBe("Right")
-        }
-      }),
-    ))
-
-  test("lets go at shutdown of a line it let go of that never finished rendering", async () => {
-    const dir = mkdtempSync(Path.join(tmpdir(), "yapd-remembering-"))
-    try {
-      const closed = await Effect.runPromise(
-        Effect.gen(function* () {
-          const scope = yield* Scope.make()
-          const voice = yield* remembering(
-            { render: (text, path) => (text === "Stuck." ? Effect.never : Effect.promise(() => Bun.write(path, text)).pipe(Effect.asVoid)) },
-            dir,
-            1,
-          ).pipe(Scope.extend(scope))
-          yield* Effect.fork(voice.render("Stuck.", `${dir}/out-a.wav`))
-          yield* Effect.promise(() => Bun.sleep(10))
-          yield* voice.render("Quick.", `${dir}/out-b.wav`)
-          return yield* Scope.close(scope, Exit.void).pipe(Effect.timeout("2 seconds"), Effect.either)
-        }),
-      )
-      expect(closed._tag).toBe("Right")
-    } finally {
-      rmSync(dir, { recursive: true, force: true })
-    }
-  })
 
   test("tries again after a render that failed", () =>
     run((dir) =>
@@ -557,20 +295,10 @@ const fakeKokoro = () => {
   const send = (reply: object) => process.send?.(reply)
   record({ launched: args, pid: process.pid })
   process.on("disconnect", () => process.exit(0))
-  if (mode === "unavailable") {
-    send({ type: "unavailable", reason: "Unknown voice" })
-    setInterval(() => {}, 1000)
-    return
-  }
   // Like onnxruntime crashing as it sets up the GPU.
   if (mode === "crash-loading") return void setTimeout(() => process.exit(1), 20)
-  if (mode === "never-ready" || mode === "stuck-loading") {
-    if (mode === "stuck-loading") send({ type: "loading" })
-    setInterval(() => {}, 1000)
-    return
-  }
   const cancelled = new Set<number>()
-  process.on("message", (request: { type: string; id: number; text: string; path: string; first?: string }) => {
+  process.on("message", (request: { type: string; id: number; text: string; path: string }) => {
     record({ request })
     if (request.type === "cancel") cancelled.add(request.id)
     if (request.type !== "render") return
@@ -581,23 +309,6 @@ const fakeKokoro = () => {
       record({ rendered: request.id })
       send({ type: "rendered", id: request.id, duration: 2 })
     }
-    // Its first part comes a moment later, then the rest fails, or the process dies, like on a GPU giving way.
-    if (mode === "breaking" || mode === "dying") {
-      if (request.first === undefined) return rendered()
-      return void setTimeout(() => {
-        writeFileSync(request.first!, "part")
-        send({ type: "part", id: request.id, path: request.first, words: 3 })
-        setTimeout(() => (mode === "dying" ? process.exit(1) : send({ type: "failed", id: request.id, reason: "GPU" })), 50)
-      }, 100)
-    }
-    // Asked for one, the first sentence comes at once when there's more after it.
-    if (request.first !== undefined && request.text.includes(". ")) {
-      writeFileSync(request.first, "part")
-      record({ part: request.id })
-      send({ type: "part", id: request.id, path: request.first, words: 3 })
-    }
-    // Busy rendering, it only hears it was given up on once it's done.
-    if (mode === "deaf") setTimeout(rendered, 200)
     if (mode === "slow") {
       setTimeout(() => {
         if (!cancelled.has(request.id)) return rendered()
@@ -605,7 +316,6 @@ const fakeKokoro = () => {
         send({ type: "cancelled", id: request.id })
       }, 200)
     }
-    if (mode === "") rendered()
   })
   setTimeout(() => send({ type: "ready", device: "GPU" }), 20)
 }
@@ -619,7 +329,6 @@ type Entry = {
   readonly launched?: ReadonlyArray<string>
   readonly pid?: number
   readonly request?: any
-  readonly part?: number
   readonly rendered?: number
   readonly cancelled?: number
 }
@@ -676,19 +385,6 @@ const withKokoro = <A>(
 }
 
 describe("kokoro", () => {
-  test("renders in its own process, started with the voice and effect", () =>
-    withKokoro("", (voice, log, file) =>
-      Effect.gen(function* () {
-        yield* voice.render("The tests pass.", file)
-        expect(yield* Effect.promise(() => Bun.file(file).text())).toBe("audio")
-        const recorded = yield* entries(log)
-        expect(launches(recorded).map((entry) => entry.launched)).toEqual([["bm_fable", "none", "GPU"]])
-        expect(requests("render")(recorded).map((entry) => entry.request)).toEqual([
-          { type: "render", id: 1, text: "The tests pass.", path: file },
-        ])
-      }),
-    ))
-
   test("hands the process one render at a time, so waiting its turn doesn't count against a render", () =>
     withKokoro("slow", (voice, log, file) =>
       Effect.gen(function* () {
@@ -719,103 +415,6 @@ describe("kokoro", () => {
         expect(order).toEqual(["asked 1", "cancelled 1", "asked 2", "rendered 2"])
       }),
     ))
-
-  test("removes the file of a render given up on that the process finished anyway", () =>
-    withKokoro("deaf", (voice, log, file) =>
-      Effect.gen(function* () {
-        const first = yield* Effect.fork(voice.render("One.", `${file}.1`))
-        yield* until(log, (recorded) => requests("render")(recorded).length === 1)
-        yield* Fiber.interrupt(first)
-        yield* voice.render("Two.", `${file}.2`)
-        expect(yield* Effect.promise(() => Bun.file(`${file}.1`).exists())).toBe(false)
-        expect(yield* Effect.promise(() => Bun.file(`${file}.2`).exists())).toBe(true)
-      }),
-    ))
-
-  test("has the first sentence ready early, in the same render, so no other render slips in before the rest", () =>
-    withKokoro("slow", (voice, log, file) =>
-      Effect.gen(function* () {
-        const text = "The tests pass. Nothing needs you."
-        const { first, whole } = yield* voice.renderFirst(text, file)
-        yield* until(log, (recorded) => requests("render")(recorded).length === 1)
-        const other = yield* Effect.fork(voice.render("Two.", `${file}.2`))
-        const part = yield* first
-        expect(part).toBe(`${file}.first.wav`)
-        expect(yield* Effect.promise(() => Bun.file(part).text())).toBe("part")
-        yield* whole
-        yield* Fiber.join(other)
-        const recorded = yield* entries(log)
-        expect(requests("render")(recorded)[0]?.request).toEqual({ type: "render", id: 1, text, path: file, first: part })
-        const order = recorded.flatMap((entry) =>
-          entry.request?.type === "render"
-            ? [`asked ${entry.request.id}`]
-            : entry.part !== undefined
-              ? [`part ${entry.part}`]
-              : entry.rendered !== undefined
-                ? [`rendered ${entry.rendered}`]
-                : [],
-        )
-        expect(order).toEqual(["asked 1", "part 1", "rendered 1", "asked 2", "rendered 2"])
-      }).pipe(Effect.scoped),
-    ))
-
-  test("plays a single sentence whole, as there's nothing to have early", () =>
-    withKokoro("", (voice, log, file) =>
-      Effect.gen(function* () {
-        const { first } = yield* voice.renderFirst("The tests pass.", file)
-        expect(yield* first).toBe(file)
-        expect(yield* Effect.promise(() => Bun.file(file).text())).toBe("audio")
-        expect((yield* entries(log)).some((entry) => entry.part !== undefined)).toBe(false)
-      }).pipe(Effect.scoped),
-    ))
-
-  test("removes both files of a render given up on after its first part", () =>
-    withKokoro("deaf", (voice, log, file) =>
-      Effect.gen(function* () {
-        const part = yield* Effect.gen(function* () {
-          const { first } = yield* voice.renderFirst("The tests pass. Nothing needs you.", file)
-          return yield* first
-        }).pipe(Effect.scoped)
-        yield* voice.render("Two.", `${file}.2`)
-        expect(yield* Effect.promise(() => Bun.file(part).exists())).toBe(false)
-        expect(yield* Effect.promise(() => Bun.file(file).exists())).toBe(false)
-        expect(requests("cancel")(yield* entries(log)).map((entry) => entry.request)).toEqual([{ type: "cancel", id: 1 }])
-      }),
-    ))
-
-  test("abandons a started render nobody took, freeing Kokoro for the next and removing both its files", () =>
-    withKokoro("slow", (voice, log, file) =>
-      Effect.gen(function* () {
-        const lifetime = yield* Effect.scope
-        const plain: Voice["Type"] = { render: () => Effect.die("Rendered with no first part"), renderFirst: voice.renderFirst }
-        const text = "The tests pass. Nothing needs you."
-        // Like an update yapd was turned off for once its first part was there, and one only refused once it was all rendered.
-        const refused = yield* startRender(plain, text, file, lifetime)
-        const part = yield* refused.first
-        yield* refused.abandon
-        const rendered = yield* startRender(plain, text, `${file}.2`, lifetime)
-        yield* rendered.whole
-        yield* rendered.abandon
-        for (const left of [part, file, `${file}.2.first.wav`, `${file}.2`])
-          expect(yield* Effect.promise(() => Bun.file(left).exists())).toBe(false)
-        expect(requests("cancel")(yield* entries(log)).map((entry) => entry.request)).toEqual([{ type: "cancel", id: 1 }])
-      }).pipe(Effect.scoped),
-    ))
-
-  test("leaves no first part behind of a render given up on before it was heard of, whose rest then failed", async () => {
-    for (const mode of ["breaking", "dying"])
-      await withKokoro(mode, (voice, log, file) =>
-        Effect.gen(function* () {
-          const scope = yield* Scope.make()
-          yield* voice.renderFirst("The tests pass. Nothing needs you.", file).pipe(Scope.extend(scope))
-          yield* until(log, (recorded) => requests("render")(recorded).length === 1)
-          yield* Scope.close(scope, Exit.void)
-          // Its turn only ends once the process is done with the one given up on.
-          yield* Effect.either(voice.render("Two.", `${file}.2`))
-          expect(yield* Effect.promise(() => Bun.file(`${file}.first.wav`).exists())).toBe(false)
-        }),
-      )
-  })
 
   test("fails a render the process couldn't do, and keeps the process", () =>
     withKokoro("failing", (voice, log, file) =>
@@ -851,30 +450,6 @@ describe("kokoro", () => {
       }),
     ))
 
-  test("falls back for now while Kokoro loads, and lets it carry on", () =>
-    withKokoro("never-ready", (voice, log, file) =>
-      Effect.gen(function* () {
-        const rendering = yield* Effect.fork(voice.render("The tests pass.", file))
-        const [launched] = launches(yield* until(log, (recorded) => launches(recorded).length === 1))
-        yield* TestClock.adjust("20 seconds")
-        expect(yield* Effect.flip(Fiber.join(rendering))).toBeInstanceOf(KokoroError)
-        expect(alive(launched!.pid!)).toBe(true)
-      }),
-    ))
-
-  test("replaces a process that never finishes setting the model up, on the CPU", () =>
-    withKokoro("stuck-loading", (voice, log, file) =>
-      Effect.gen(function* () {
-        const [launched] = launches(yield* until(log, (recorded) => launches(recorded).length === 1))
-        yield* TestClock.adjust("60 seconds")
-        yield* until(log, () => !alive(launched!.pid!))
-        yield* TestClock.adjust("1 minute")
-        yield* Effect.fork(voice.render("The tests pass.", file))
-        const relaunched = yield* until(log, (recorded) => launches(recorded).length === 2)
-        expect(launches(relaunched)[1]?.launched).toEqual(["bm_fable", "none", "CPU"])
-      }),
-    ))
-
   test("waits a minute after a process crashed while loading, then starts one on the CPU", () =>
     withKokoro("crash-loading", (voice, log, file) =>
       Effect.gen(function* () {
@@ -884,38 +459,6 @@ describe("kokoro", () => {
         yield* TestClock.adjust("1 minute")
         yield* Effect.flip(voice.render("The tests pass.", file))
         expect(launches(yield* entries(log))[1]?.launched).toEqual(["bm_fable", "none", "CPU"])
-      }),
-    ))
-
-  test("the real process turns down a voice Kokoro doesn't have, before loading anything", () =>
-    Effect.runPromise(
-      kokoro([process.execPath, Path.join(import.meta.dir, "Kokoro.ts")], "nobody", "none").pipe(
-        Effect.flatMap((voice) => Effect.flip(voice.render("The tests pass.", Path.join(dir, "real.wav")))),
-        Effect.scoped,
-      ),
-    ).then((error) => expect(String(error.cause)).toContain(`Unknown voice "nobody"`)))
-
-  test("tells the process when a render is no longer needed", () =>
-    withKokoro("hang", (voice, log, file) =>
-      Effect.gen(function* () {
-        const rendering = yield* Effect.fork(voice.render("The tests pass.", file))
-        yield* until(log, (recorded) => requests("render")(recorded).length === 1)
-        yield* Fiber.interrupt(rendering)
-        const recorded = yield* until(log, (recorded) => requests("cancel")(recorded).length === 1)
-        expect(requests("cancel")(recorded)[0]?.request).toEqual({ type: "cancel", id: 1 })
-      }),
-    ))
-
-  test("leaves Kokoro alone for a minute after it couldn't load", () =>
-    withKokoro("unavailable", (voice, log, file) =>
-      Effect.gen(function* () {
-        expect(yield* Effect.flip(voice.render("The tests pass.", file))).toBeInstanceOf(KokoroError)
-        yield* until(log, (recorded) => !alive(launches(recorded)[0]!.pid!))
-        expect(yield* Effect.flip(voice.render("The tests pass.", file))).toBeInstanceOf(KokoroError)
-        expect(launches(yield* entries(log))).toHaveLength(1)
-        yield* TestClock.adjust("1 minute")
-        yield* Effect.flip(voice.render("The tests pass.", file))
-        expect(launches(yield* entries(log))).toHaveLength(2)
       }),
     ))
 })

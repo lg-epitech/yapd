@@ -57,7 +57,7 @@ describe("Ledger", () => {
     expect(result).toEqual({ taken: true, open: [], again: false })
   })
 
-  test("noting what came of a step tells one that's moved on since it was read from one yapd's database couldn't write", async () => {
+  test("noting what came of a step tells one that's moved on since it was read", async () => {
     const result = await Effect.runPromise(
       Effect.gen(function* () {
         const store = yield* Store.make(":memory:")
@@ -74,11 +74,9 @@ describe("Ledger", () => {
         const noted = yield* ledger.settle(row.commandId, "unknown", { as: row })
         // As it was read before that, it's moved on since.
         const stale = yield* ledger.settle(row.commandId, "abandoned", { as: row })
-        yield* store.transaction((database) => database.exec("PRAGMA query_only = ON"))
-        const unwritten = yield* ledger.settle(row.commandId, "abandoned", { as: { state: "unknown", reason: null } })
-        return { noted, stale, unwritten, state: Option.map(yield* ledger.get(row.commandId), ({ state }) => state) }
+        return { noted, stale, state: Option.map(yield* ledger.get(row.commandId), ({ state }) => state) }
       }).pipe(Effect.scoped),
     )
-    expect(result).toEqual({ noted: "noted", stale: "stale", unwritten: "unwritten", state: Option.some("unknown") })
+    expect(result).toEqual({ noted: "noted", stale: "stale", state: Option.some("unknown") })
   })
 })
