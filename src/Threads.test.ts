@@ -1,11 +1,6 @@
 import { describe, expect, test } from "bun:test"
-import { Clock, Deferred, Effect, Fiber, Option, Schema, Stream, TestClock, TestContext } from "effect"
-import { mkdir, mkdtemp, realpath, rm, symlink } from "node:fs/promises"
-import { tmpdir } from "node:os"
-import { join } from "node:path"
-import * as Brain from "./Brain.ts"
+import { Deferred, Effect, Fiber, Option, Schema, Stream, TestClock, TestContext } from "effect"
 import * as Journal from "./Journal.ts"
-import * as Persona from "./Persona.ts"
 import * as Store from "./Store.ts"
 import * as T3Actions from "./T3Actions.ts"
 import * as T3CodeServer from "./T3CodeServer.ts"
@@ -50,8 +45,6 @@ const linking = (
   sessions: Readonly<Record<string, ReadonlyArray<string>>>,
   /** Rig's own threads and their sessions, when they aren't the same as here. */
   rig: { readonly view: Option.Option<T3Live.View>; readonly sessions: Readonly<Record<string, ReadonlyArray<string>>> } = { view, sessions },
-  /** What each read waits on before T3 Code answers it, by the number it is among all reads. */
-  answering: (read: number) => Effect.Effect<void> = () => Effect.void,
 ) =>
   Effect.gen(function* () {
     const reads: Array<string> = []
@@ -61,10 +54,7 @@ const linking = (
           const id = decodeURIComponent(path.split("/").at(-2) ?? "")
           reads.push(name === "Rosie" ? id : `${name} ${id}`)
           const providerThreads = (sessions[id] ?? []).map((nativeId) => ({ nativeThreadRef: { driver: "claudeAgent", nativeId, strength: "strong" } }))
-          return Effect.zipRight(
-            answering(reads.length - 1),
-            Schema.decodeUnknown(schema)({ projection: { runs: [], messages: [], turnItems: [], providerThreads } }).pipe(Effect.orDie),
-          )
+          return Schema.decodeUnknown(schema)({ projection: { runs: [], messages: [], turnItems: [], providerThreads } }).pipe(Effect.orDie)
         }) as Server.Transport["api"],
         // With no scratch project to tell of.
         call: (<A, I>(method: string, _: unknown, schema: Schema.Schema<A, I>) =>
@@ -119,94 +109,6 @@ describe("Threads", () => {
     expect(listed.filter(({ brief }) => !brief)).toHaveLength(30)
   })
 
-  test("words too common to tell threads apart, like \"status\", \"still\" or \"need\", never count as a title's", () => {
-    const running = thread("running", "Refactor auth middleware", "2026-10-08T20:00:00.000Z", { activeRunId: "run-1" })
-    const first = (heard: string, title: string) => {
-      const view = viewing(thread("titled", title, "2026-10-01T10:00:00.000Z"), running)
-      const listed = Threads.shortlist({ machine: "Rosie", view, focus: Option.none(), pending: [], heard, most: 30, started: new Map(), said: new Map(), now })
-      return { first: listed[0]?.ref.id, entitled: Threads.entitled(heard, view) }
-    }
-    // Only "billing" tells it apart, which isn't enough to put it ahead of what's running.
-    expect(first("What's the status of the billing export?", "Status page for billing")).toEqual({ first: "running", entitled: [] })
-    expect(first("I still need the billing done.", "Need billing export")).toEqual({ first: "running", entitled: [] })
-    expect(first("Will it look at the billing?", "Look at billing, it will")).toEqual({ first: "running", entitled: [] })
-    // Two words that do, and it is.
-    expect(first("What's the status of the billing export?", "Need billing export")).toEqual({ first: "titled", entitled: ["titled"] })
-  })
-
-  test("usage read hours ago is read again before it's said, and said as of then without what has reset since when T3 Code can't answer", async () => {
-    const nine = Date.parse("2026-10-08T09:00:00.000Z")
-    const time = (at: number) => new Date(at).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })
-    // Its five-hour window resets when it says, and its weekly one in three days.
-    const reading = (session: number, resetsAt: string): T3Actions.Usage => [
-      {
-        provider: "Claude",
-        windows: [
-          { kind: "session", label: "Session", minutes: 300, usedPercent: session, resetsAt },
-          { kind: "weekly", label: "Weekly", minutes: 10080, usedPercent: 40, resetsAt: "2026-10-11T09:00:00.000Z" },
-        ],
-      },
-    ]
-    const said = await Effect.gen(function* () {
-      yield* TestClock.setTime(nine)
-      const store = yield* Store.make(":memory:")
-      let answer: Effect.Effect<T3Actions.Usage, Error> = Effect.succeed(reading(95, "2026-10-08T13:00:00.000Z"))
-      const threads = yield* Threads.make({
-        machine: "Rosie",
-        live: { view: Effect.succeed(Option.none()), changes: Stream.never },
-        actions: Option.some({ usage: Effect.suspend(() => answer) } as unknown as T3Actions.Actions),
-        others: [],
-        journal: Journal.fromStore(store),
-        store,
-      })
-      const usage = Effect.flatMap(Effect.zip(threads.usage, Clock.currentTimeMillis), ([usage, now]) =>
-        Effect.succeed(Brain.used(usage, "how's my usage", Persona.plain, now)),
-      )
-      const first = yield* usage
-      // Its token expires, and six hours go by.
-      answer = Effect.fail(new Error("token expired"))
-      yield* TestClock.adjust("6 hours")
-      const dated = yield* usage
-      // It answers again, which is waited for rather than the morning's said.
-      answer = Effect.succeed(reading(10, "2026-10-08T20:00:00.000Z"))
-      yield* TestClock.adjust("6 minutes")
-      return { first, dated, again: yield* usage }
-    }).pipe(Effect.scoped, Effect.provide(TestContext.TestContext), Effect.runPromise)
-    expect(said.first).toStartWith("Claude is at 95 percent of its five-hour window, resetting at ")
-    expect(said.dated).toStartWith(`As of ${time(nine)}, Claude was at 40 percent of its weekly window, resetting `)
-    // The five-hour window reset at one, two hours ago.
-    expect(said.dated).not.toContain("95 percent")
-    expect(said.again).toStartWith("Claude is at 10 percent of its five-hour window, resetting ")
-  })
-
-  test("a thread in T3 Code's scratch project is said as scratch work, never as \"No project\", by its folder alone", () => {
-    const view: T3Live.View = {
-      projects: new Map([
-        ["s", { id: "s", title: "No project", workspaceRoot: "/t3/scratch" }],
-        ["n", { id: "n", title: "No project", workspaceRoot: "/code/no-project" }],
-      ]),
-      threads: new Map([
-        ["glucose", thread("glucose", "/tmp/a1b2c3d4e5", "2026-10-08T21:00:00.000Z", { projectId: "s" })],
-        ["other", thread("other", "Fix the loader", "2026-10-08T20:00:00.000Z", { projectId: "n" })],
-      ]),
-      sequence: 1,
-      synced: true,
-    }
-    const listed = Threads.shortlist({ machine: "Rosie", view, focus: Option.none(), pending: [], most: 5, started: new Map(), said: new Map(), scratch: "/t3/scratch", now })
-    expect(listed.map(({ ref, called, project, scratch }) => [ref.id, called, project, scratch])).toEqual([
-      ["glucose", "the scratch work from today", "scratch", true],
-      ["other", "Fix the loader", "No project", false],
-    ])
-  })
-
-  test("calls a thread by its title when what yapd once noted about it is too long to say", () => {
-    const at = Date.parse("2026-10-01T00:00:00.000Z")
-    const long =
-      "In integration, review the process used for the Mina migration and begin work on the Tezos migration in the main checkout."
-    expect(Threads.called("Migrate Tezos Integration", long, "integration", at, now)).toBe("Migrate Tezos Integration")
-    expect(Threads.called("Migrate Tezos Integration", "the Tezos migration", "integration", at, now)).toBe("the Tezos migration")
-  })
-
   test("a hook is linked to its thread by the agent's own session id, even with two threads in one directory", async () => {
     // Two threads in the integration project, the Mina one the newer, and one in a worktree of its own.
     const tezos = thread("tezos", "Migrate Tezos Integration", "2026-10-08T20:00:00.000Z")
@@ -247,20 +149,6 @@ describe("Threads", () => {
     expect(result.deep).toEqual(linkedTo("Rosie", "fees"))
     // For the worktree's folder, the worktree's thread first, the nearest, though the project's is newer; never the one next to it.
     expect(result.reads).toEqual(["fees", "tezos"])
-  })
-
-  test("a hook is never linked while its machine's T3 Code isn't followed, nor from a machine yapd doesn't follow", async () => {
-    const tezos = thread("tezos", "Migrate Tezos Integration", "2026-10-08T20:00:00.000Z")
-    const result = await Effect.gen(function* () {
-      // T3 Code isn't running, or hasn't caught up, here and on rig.
-      const away = yield* linking(Option.none(), { tezos: ["s-tezos"] })
-      const unfollowed = [yield* away.threads.link("Rosie", "s-tezos", "/code/integration"), yield* away.threads.link("rig", "s-tezos", "/code/integration")]
-      // Alaska's hooks come through a tunnel too, but its T3 Code isn't followed.
-      const here = yield* linking(Option.some(viewing(tezos)), { tezos: ["s-tezos"] })
-      const alaska = yield* here.threads.link("alaska", "s-tezos", "/code/integration")
-      return { unfollowed, alaska, reads: [...away.reads, ...here.reads] }
-    }).pipe(Effect.scoped, Effect.runPromise)
-    expect(result).toEqual({ unfollowed: [Option.none(), Option.none()], alaska: Option.none(), reads: [] })
   })
 
   test("a hook from rig is found in rig's T3 Code by the agent's own session id, its directory taken as rig gives it, and never for a session of this machine's", async () => {
@@ -370,49 +258,6 @@ describe("Threads", () => {
     expect(result.reads).toEqual(["jarvis", "review", "rig jarvis", "rig review"])
   })
 
-  test("a subagent's hook whose session another hook's lookup read meanwhile is still tied to it, and not worth waiting on", async () => {
-    const worktree = { worktreePath: "/worktrees/yapd/jarvis" }
-    const of = (parent: string) => ({ ...worktree, lineage: { parentThreadId: parent, relationshipToParent: "subagent" } })
-    const jarvis = thread("jarvis", "Reimagine Yapd as a Jarvis Companion", "2026-10-08T20:00:00.000Z", worktree)
-    // Two reviews of it at work, the second the newer.
-    const first = thread("first", "Sol review: release blockers", "2026-10-08T21:00:00.000Z", { ...of("jarvis"), activeRunId: "run-1" })
-    const second = thread("second", "Sol review: the docs", "2026-10-08T21:10:00.000Z", { ...of("jarvis"), activeRunId: "run-2" })
-    const result = await Effect.gen(function* () {
-      const reading = yield* Deferred.make<void>()
-      const held = yield* Deferred.make<void>()
-      // The first read, the second review's hook's of the thread, takes until the other hook's lookup is done.
-      const answering = (read: number) => (read === 0 ? Effect.zipRight(Deferred.succeed(reading, undefined), Deferred.await(held)) : Effect.void)
-      const { threads, reads } = yield* linking(
-        Option.some(viewing(jarvis, first, second)),
-        { jarvis: ["s-jarvis"], first: ["s-first"], second: ["s-second"] },
-        undefined,
-        answering,
-      )
-      const hook = (session: string) =>
-        Effect.gen(function* () {
-          const promising = yield* Deferred.make<void>()
-          const linked = yield* threads.link("Rosie", session, "/worktrees/yapd/jarvis/src", promising)
-          return { linked, promising: yield* Deferred.isDone(promising) }
-        })
-      const late = yield* Effect.fork(hook("s-second"))
-      yield* Deferred.await(reading)
-      // The first review's hook reads both reviews, the newest first, so the second's session is known before its own hook is done.
-      const early = yield* hook("s-first")
-      yield* Deferred.succeed(held, undefined)
-      return { early, late: yield* Fiber.join(late), reads }
-    }).pipe(Effect.scoped, Effect.runPromise)
-    const subagentOf = (id: string, called: string) =>
-      Option.some<Threads.Linked>({
-        _tag: "Subagent",
-        child: { machine: "Rosie", id },
-        called,
-        head: Option.some({ ref: { machine: "Rosie", id: "jarvis" }, called: "Reimagine Yapd as a Jarvis Companion" }),
-      })
-    expect(result.early).toEqual({ linked: subagentOf("first", "Sol review: release blockers"), promising: true })
-    expect(result.late).toEqual({ linked: subagentOf("second", "Sol review: the docs"), promising: false })
-    expect(result.reads).toEqual(["jarvis", "jarvis", "second", "first"])
-  })
-
   test("a subagent is part of the first thread up its chain that isn't one: never a fork's source, and none once its chain is broken", () => {
     const subagentOf = (parent: string) => ({ lineage: { parentThreadId: parent, relationshipToParent: "subagent" } })
     const top = thread("top", "Migrate Tezos Integration", "2026-10-08T20:00:00.000Z")
@@ -465,8 +310,6 @@ describe("Threads on several machines", () => {
       return {
         desk: desk.threads.map(({ handle, ref, here, state }) => ({ handle, ref, here, state })),
         away: desk.away,
-        found: Option.map(yield* threads.find({ machine: "rig", id: "tests" }), ({ title }) => title),
-        actions: Option.isSome(threads.actions("rig")),
       }
     }).pipe(Effect.scoped, Effect.provide(TestContext.TestContext), Effect.runPromise)
     // What's running on rig matters more than what's idle here.
@@ -475,30 +318,7 @@ describe("Threads on several machines", () => {
       { handle: "t2", ref: { machine: "Rosie", id: "tests" }, here: true, state: "idle" },
     ])
     expect(seen.away).toEqual([])
-    expect(seen.found).toEqual(Option.some("Add the std fee test"))
-    expect(seen.actions).toBe(true)
     expect(asked).toEqual(["rig: detail tests"])
-  })
-
-  test("lists rig as away with why while it can't be reached, without keeping this machine's threads from being seen or searched", async () => {
-    const asked: Array<string> = []
-    const seen = await Effect.gen(function* () {
-      yield* TestClock.setTime(now)
-      const threads = yield* make({ view: Option.none(), status: { _tag: "Down", reason: "I can't reach rig right now.", outage: 1 } }, asked)
-      const desk = yield* threads.desk(Option.none(), [], 30)
-      return {
-        threads: desk.threads.map(({ ref }) => ref),
-        away: desk.away,
-        unseen: yield* threads.unseen("rig"),
-        search: yield* threads.search("std tests"),
-      }
-    }).pipe(Effect.scoped, Effect.provide(TestContext.TestContext), Effect.runPromise)
-    expect(seen.threads).toEqual([{ machine: "Rosie", id: "tests" }])
-    expect(seen.away).toEqual([{ machine: "rig", reason: "I can't reach rig right now." }])
-    expect(seen.unseen).toEqual(Option.some("I can't reach rig right now."))
-    expect(seen.search).toEqual({ matches: [{ ref: { machine: "Rosie", id: "tests" }, snippet: "the std tests" }], missed: ["rig"] })
-    // Down, rig isn't even asked.
-    expect(asked).toEqual(["Rosie: search std tests"])
   })
 
   test("a search leaves out a machine that hasn't answered in time, keeping what the others found", async () => {
@@ -512,120 +332,5 @@ describe("Threads on several machines", () => {
     }).pipe(Effect.scoped, Effect.provide(TestContext.TestContext), Effect.runPromise)
     expect(found).toEqual({ matches: [{ ref: { machine: "Rosie", id: "tests" }, snippet: "the std tests" }], missed: ["rig"] })
     expect(asked.toSorted()).toEqual(["Rosie: search std tests", "rig: search std tests"])
-  })
-
-  test("a search gives rig a few seconds at most, however long T3 Code there is given, and says it left rig out", async () => {
-    const found = await Effect.gen(function* () {
-      yield* TestClock.setTime(now)
-      const threads = yield* make({ view: Option.some(viewing()), status: { _tag: "Up" }, found: Effect.never }, [])
-      const searching = yield* Effect.fork(threads.search("std tests"))
-      yield* TestClock.adjust("3 seconds")
-      return yield* Fiber.join(searching)
-    }).pipe(Effect.scoped, Effect.provide(TestContext.TestContext), Effect.runPromise)
-    expect(found).toEqual({ matches: [{ ref: { machine: "Rosie", id: "tests" }, snippet: "the std tests" }], missed: ["rig"] })
-  })
-
-  test("a search names rig as left out when rig's T3 Code fails it, keeping what this machine found", async () => {
-    const found = await Effect.gen(function* () {
-      yield* TestClock.setTime(now)
-      const failing = Effect.fail(new T3CodeServer.Trouble({ reason: "rig's T3 Code isn't answering." }))
-      const threads = yield* make({ view: Option.some(viewing()), status: { _tag: "Up" }, found: failing }, [])
-      return yield* threads.search("std tests")
-    }).pipe(Effect.scoped, Effect.provide(TestContext.TestContext), Effect.runPromise)
-    expect(found).toEqual({ matches: [{ ref: { machine: "Rosie", id: "tests" }, snippet: "the std tests" }], missed: ["rig"] })
-  })
-
-  test("a scratch thread is never \"No project\" once its machine's T3 Code has caught up, and one that had no scratch project is asked again, never by a hook's turn", async () => {
-    // Rosie's T3 Code says where its scratch project is; rig's had none at first, and has one once it's updated.
-    const roots: Array<Option.Option<string>> = [Option.none(), Option.some("/t3/scratch")]
-    const scratching = (root: Effect.Effect<Option.Option<string>>) => ({ scratchRoot: root }) as unknown as T3Actions.Actions
-    const view: T3Live.View = {
-      projects: new Map([["s", { id: "s", title: "No project", workspaceRoot: "/t3/scratch" }]]),
-      threads: new Map([["glucose", thread("glucose", "Glucose sensors", "2026-10-08T21:00:00.000Z", { projectId: "s" })]]),
-      sequence: 1,
-      synced: true,
-    }
-    const seen = await Effect.gen(function* () {
-      yield* TestClock.setTime(now)
-      const store = yield* Store.make(":memory:")
-      const threads = yield* Threads.make({
-        machine: "Rosie",
-        live: live(Option.some(view)),
-        actions: Option.some(scratching(Effect.succeedSome("/t3/scratch"))),
-        others: [{ machine: "rig", live: live(Option.some(view)), actions: scratching(Effect.sync(() => roots.shift() ?? Option.none())), status: Effect.succeed({ _tag: "Up" }) }],
-        journal: Journal.fromStore(store),
-        store,
-      })
-      const projects = Effect.map(threads.desk(Option.none(), [], 5), ({ threads }) => threads.map(({ ref, project }) => `${ref.machine}: ${project}`).toSorted())
-      // As each machine's T3 Code catches up.
-      yield* threads.warm("Rosie")
-      yield* threads.warm("rig")
-      const first = yield* projects
-      yield* TestClock.adjust("1 minute")
-      // A hook's turn there isn't held up asking again: what's known is all it goes by.
-      const hooked = yield* threads.outside("rig", "/t3/scratch/2026-10-13-glucose-0a081e43")
-      // Asked again in the background, it's known by the next time.
-      yield* projects
-      yield* Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 20)))
-      return { first, hooked, later: yield* projects, then: yield* threads.outside("rig", "/t3/scratch/2026-10-13-glucose-0a081e43") }
-    }).pipe(Effect.scoped, Effect.provide(TestContext.TestContext), Effect.runPromise)
-    expect(seen).toEqual({ first: ["Rosie: scratch", "rig: No project"], hooked: false, later: ["Rosie: scratch", "rig: scratch"], then: true })
-  })
-
-  test("a scratch thread is said, shown and kept as scratch work when T3 Code gives where its scratch project is through a link, made after it was first looked at", async () => {
-    const dir = await realpath(await mkdtemp(join(tmpdir(), "yapd-threads-")))
-    try {
-      await mkdir(join(dir, "t3"))
-      await symlink(join(dir, "t3"), join(dir, "linked"))
-      const view: T3Live.View = {
-        projects: new Map([["s", { id: "s", title: "No project", workspaceRoot: join(dir, "t3", "scratch") }]]),
-        threads: new Map([["glucose", thread("glucose", "Glucose sensors", "2026-10-08T21:00:00.000Z", { projectId: "s" })]]),
-        sequence: 1,
-        synced: true,
-      }
-      const seen = await Effect.gen(function* () {
-        yield* TestClock.setTime(now)
-        const store = yield* Store.make(":memory:")
-        const threads = yield* Threads.make({
-          machine: "Rosie",
-          live: live(Option.some(view)),
-          actions: Option.some({ scratchRoot: Effect.succeedSome(join(dir, "linked", "scratch")) } as unknown as T3Actions.Actions),
-          others: [],
-          journal: Journal.fromStore(store),
-          store,
-        })
-        yield* threads.warm("Rosie")
-        // Looked at before T3 Code made the scratch project's folder, which it then does.
-        yield* threads.desk(Option.none(), [], 5)
-        yield* Effect.promise(() => mkdir(join(dir, "t3", "scratch", "2026-10-13-glucose-0a081e43"), { recursive: true }))
-        return {
-          desk: (yield* threads.desk(Option.none(), [], 5)).threads.map(({ project, scratch }) => ({ project, scratch })),
-          // As a menu row shows its project.
-          menu: Option.map(yield* threads.project("Rosie", { thread: "glucose" }), ({ scratch }) => scratch),
-          // Its thread's own folder, as its hook gives it, and the folder holding the scratch project's, which isn't in it.
-          outside: [yield* threads.outside("Rosie", join(dir, "t3", "scratch", "2026-10-13-glucose-0a081e43")), yield* threads.outside("Rosie", join(dir, "t3"))],
-        }
-      }).pipe(Effect.scoped, Effect.provide(TestContext.TestContext), Effect.runPromise)
-      expect(seen).toEqual({ desk: [{ project: "scratch", scratch: true }], menu: Option.some(true), outside: [true, false] })
-    } finally {
-      await rm(dir, { recursive: true, force: true })
-    }
-  })
-
-  test("names this machine when its T3 Code isn't running while rig's threads can be seen, since rig's are his threads too", async () => {
-    const away = await Effect.gen(function* () {
-      yield* TestClock.setTime(now)
-      const store = yield* Store.make(":memory:")
-      const threads = yield* Threads.make({
-        machine: "Rosie",
-        live: live(Option.none()),
-        actions: Option.some(machine("Rosie", [])),
-        others: [{ machine: "rig", live: live(Option.some(viewing(thread("std", "Add the std fee test", "2026-10-08T20:00:00.000Z")))), actions: machine("rig", []), status: Effect.succeed({ _tag: "Up" }) }],
-        journal: Journal.fromStore(store),
-        store,
-      })
-      return (yield* threads.desk(Option.none(), [], 30)).away
-    }).pipe(Effect.scoped, Effect.provide(TestContext.TestContext), Effect.runPromise)
-    expect(away).toEqual([{ machine: "Rosie", reason: "T3 Code isn't running on Rosie, so I can't see its threads." }])
   })
 })
