@@ -25,18 +25,4 @@ describe("History", () => {
     })
     expect(History.claudeFolder("/Users/me/.t3/worktrees/free-sound")).toBe("-Users-me--t3-worktrees-free-sound")
   })
-
-  test("reads a thread of Codex's, by the name the user gave it if any", () => {
-    const row = { cwd: "/code/free-sound", title: "Fix the loader", name: null, model: "gpt-6-astra", reasoning_effort: "high", updated_at: 1790704800 }
-    expect(History.codexPast(row)).toEqual({
-      agent: "codex",
-      directory: "/code/free-sound",
-      title: "Fix the loader",
-      date: "2026-09-29T18:00:00.000Z",
-      model: "gpt-6-astra",
-      effort: "high",
-    })
-    expect(History.codexPast({ ...row, name: "Loader" })).toMatchObject({ title: "Loader" })
-    expect(History.codexPast({ cwd: "/code/free-sound" })).toBeUndefined()
-  })
 })

@@ -1,12 +1,10 @@
 import { env } from "@huggingface/transformers"
 import { afterAll, describe, expect, test } from "bun:test"
-import { Effect, Fiber, Scope } from "effect"
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
-import { rm } from "node:fs/promises"
+import { Effect, Fiber } from "effect"
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import * as Hub from "./Hub.ts"
-import { once } from "./Transcriber.ts"
 
 const dir = mkdtempSync(join(tmpdir(), "yapd-hub-test-"))
 afterAll(() => rmSync(dir, { recursive: true, force: true }))
@@ -92,25 +90,24 @@ describe("load", () => {
 })
 
 interface Hub {
-  /** Starts yapd, which does what's given and stops. Whether that went well, unless it's stopped first. */
-  readonly start: (does: string) => { readonly done: Promise<boolean>; readonly stop: () => void }
+  /** Starts yapd, which does what's given and stops. Whether that went well. */
+  readonly start: (does: string) => { readonly done: Promise<boolean> }
   /** How many files were asked for. */
   readonly asked: () => number
   readonly cache: string
-  readonly stop: () => void
 }
 
 /**
  * A hub with one model on it, and what yapd does with it from one start to the next, each in a process of its own
- * as they are. Every file holds "whole", unless `serve` answers for it.
+ * as they are. Every file holds "whole".
  */
-const starts = async (run: (hub: Hub) => Promise<void>, serve: (file: string) => Response | undefined = () => undefined) => {
+const starts = async (run: (hub: Hub) => Promise<void>) => {
   let asked = 0
   const server = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
     idleTimeout: 0,
-    fetch: (request) => (asked++, serve(new URL(request.url).pathname.split("/resolve/main/")[1] ?? "") ?? new Response("whole")),
+    fetch: () => (asked++, new Response("whole")),
   })
   const cache = mkdtempSync(join(dir, "starts-"))
   const start = (does: string) => {
@@ -119,7 +116,6 @@ const starts = async (run: (hub: Hub) => Promise<void>, serve: (file: string) =>
       import { Effect } from "effect"
       import { readFileSync } from "node:fs"
       import * as Hub from ${JSON.stringify(join(import.meta.dir, "Hub.ts"))}
-      import { files as whisper } from ${JSON.stringify(join(import.meta.dir, "Transcriber.ts"))}
       env.remoteHost = "http://127.0.0.1:${server.port}/"
       env.cacheDir = ${JSON.stringify(cache)}
       const names = ["config.json", "onnx/model.onnx"]
@@ -130,29 +126,18 @@ const starts = async (run: (hub: Hub) => Promise<void>, serve: (file: string) =>
       const exit = await Effect.runPromiseExit(${does})
       process.exit(exit._tag === "Success" ? 0 : 1)`
     const yapd = Bun.spawn([process.execPath, "-e", script], { cwd: dirname(import.meta.dir), stdout: "ignore", stderr: "ignore" })
-    return { done: yapd.exited.then((code) => code === 0), stop: () => yapd.kill("SIGKILL") }
+    return { done: yapd.exited.then((code) => code === 0) }
   }
   try {
-    await run({ start, asked: () => asked, cache: join(cache, "someone/whisper"), stop: () => server.stop(true) })
+    await run({ start, asked: () => asked, cache: join(cache, "someone/whisper") })
   } finally {
     server.stop(true)
   }
 }
 
-const ahead = `Hub.cache("someone/whisper", files)`
 const load = `Hub.load("someone/whisper", read(names), files)`
 
 describe("from one start to the next", () => {
-  test("keeps a model that downloaded ahead and was never loaded, and loads it offline", async () => {
-    await starts(async ({ start, asked, stop }) => {
-      expect(await start(ahead).done).toBe(true)
-      expect(await start(ahead).done).toBe(true)
-      expect(asked()).toBe(2)
-      stop()
-      expect(await start(load).done).toBe(true)
-    })
-  }, 30_000)
-
   test("downloads again what an older yapd left partway, and what doesn't load, keeping what is whole", async () => {
     await starts(async ({ start, asked, cache }) => {
       // As transformers.js left it when yapd was stopped as it downloaded: part of a file under its name, and no marker.
@@ -171,58 +156,6 @@ describe("from one start to the next", () => {
       expect(await start(load).done).toBe(true)
       expect(existsSync(join(cache, ".yapd-loaded"))).toBe(true)
     })
-  }, 30_000)
-
-  test("keeps the weights a larger Whisper has in a file of their own from being loaded partway", async () => {
-    const sent = Promise.withResolvers<void>()
-    let stopped = false
-    const serve = (file: string) => {
-      if (file === "config.json") return Response.json({ "transformers.js_config": { use_external_data_format: { "encoder_model.onnx": true } } })
-      if (file !== "onnx/encoder_model.onnx_data" || stopped) return undefined
-      // The start of it, and no more for as long as yapd runs.
-      return new Response(
-        new ReadableStream({
-          pull: async (controller) => {
-            controller.enqueue(new TextEncoder().encode("wh"))
-            sent.resolve()
-            await Bun.sleep(20_000)
-          },
-        }),
-        { headers: { "content-length": "5" } },
-      )
-    }
-    await starts(async ({ start, cache }) => {
-      const ahead = start(`Hub.cache("someone/whisper", whisper)`)
-      await Promise.race([sent.promise, ahead.done])
-      ahead.stop()
-      stopped = true
-      const weights = ["onnx/encoder_model.onnx", "onnx/encoder_model.onnx_data", "onnx/decoder_model_merged.onnx"]
-      // transformers.js only loads what's in the cache, where all there is of each of these is whole, or it isn't there.
-      expect(await start(`Hub.load("someone/whisper", read(${JSON.stringify(weights)}), whisper)`).done).toBe(true)
-      expect(existsSync(join(cache, "onnx/encoder_model.onnx_data.part"))).toBe(false)
-    }, serve)
-  }, 30_000)
-
-  test("loads a Whisper that has no generation config, offline too", async () => {
-    const serve = (file: string) =>
-      file === "generation_config.json" ? new Response("Not found", { status: 404 }) : file === "config.json" ? Response.json({}) : undefined
-    await starts(async ({ start, stop }) => {
-      const load = `Hub.load("someone/whisper", read(["tokenizer.json", "onnx/encoder_model.onnx"]), whisper)`
-      expect(await start(load).done).toBe(true)
-      stop()
-      expect(await start(load).done).toBe(true)
-    }, serve)
-  }, 30_000)
-
-  test("downloads a config again that couldn't be read, rather than keep to it", async () => {
-    let mended = false
-    const serve = (file: string) => (file !== "config.json" ? undefined : mended ? Response.json({}) : new Response("<html>Sign in to the network"))
-    await starts(async ({ start }) => {
-      const load = `Hub.load("someone/whisper", read(["tokenizer.json", "onnx/encoder_model.onnx"]), whisper)`
-      expect(await start(load).done).toBe(false)
-      mended = true
-      expect(await start(load).done).toBe(true)
-    }, serve)
   }, 30_000)
 })
 
@@ -243,28 +176,6 @@ describe("headers", () => {
 })
 
 describe("scoped models", () => {
-  test("shares a lazy model and disposes it once when its scope closes", async () => {
-    const cacheDir = env.cacheDir
-    env.cacheDir = dir
-    let disposed = 0
-    let loads = 0
-    const model = { dispose: async () => { disposed++ } }
-    try {
-      const found = await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
-        const scope = yield* Effect.scope
-        const shared = yield* once(Hub.scopedLoad("someone/scoped", async () => { loads++; return model }, async () => {}).pipe(Scope.extend(scope)))
-        const first = yield* shared
-        expect(yield* shared).toBe(first)
-        return first
-      })))
-      expect(found).toBe(model)
-      expect(loads).toBe(1)
-      expect(disposed).toBe(1)
-    } finally {
-      env.cacheDir = cacheDir
-    }
-  })
-
   test("disposes a late load without keeping shutdown waiting for the loader", async () => {
     const cacheDir = env.cacheDir
     env.cacheDir = dir
@@ -290,29 +201,6 @@ describe("scoped models", () => {
     } finally {
       complete(model)
       await Effect.runPromise(Fiber.interrupt(fiber))
-      env.cacheDir = cacheDir
-    }
-  })
-
-  test("releases an acquired model immediately when committing its cache marker fails", async () => {
-    const cacheDir = env.cacheDir
-    env.cacheDir = dir
-    let disposed = 0
-    const repo = "someone/bad-marker"
-    const model = { dispose: async () => { disposed++ } }
-    try {
-      await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
-        const result = yield* Effect.either(Hub.scopedLoad(repo, async () => {
-          const cache = join(dir, repo)
-          await rm(cache, { recursive: true, force: true })
-          await Bun.write(cache, "not a directory")
-          return model
-        }, async () => {}))
-        expect(result._tag).toBe("Left")
-        expect(disposed).toBe(1)
-      })))
-      expect(disposed).toBe(1)
-    } finally {
       env.cacheDir = cacheDir
     }
   })

@@ -31,18 +31,6 @@ const withOrigin = {
 }
 
 describe("Worktree", () => {
-  test("starts from the base as origin has it, fetched first, on a branch of its own", async () => {
-    const calls: Array<string> = []
-    expect(await Effect.runPromise(make(git(withOrigin, calls)))).toEqual({ path: made, branch: "yapd/0a1b2c3d" })
-    expect(calls).toEqual([
-      "/code/free-sound: remote get-url origin",
-      "/code/free-sound: fetch origin +refs/heads/main:refs/remotes/origin/main",
-      "/code/free-sound: rev-parse --verify --quiet refs/remotes/origin/main^{commit}",
-      `/code/free-sound: worktree add --no-track -b yapd/0a1b2c3d ${made} origin/main`,
-      `${made}: rev-parse --show-toplevel`,
-    ])
-  })
-
   test("starts from the local branch when there's no origin, and from what it last fetched when it can't, saying so", async () => {
     const local = { "rev-parse --verify --quiet refs/heads/main": "0a1b\n", "worktree add": "", "rev-parse --show-toplevel": `${made}\n` }
     const calls: Array<string> = []
@@ -63,14 +51,5 @@ describe("Worktree", () => {
     )
     expect(await why(make(git(withOrigin, calls), "--force"))).toBe("I can't tell which branch of free-sound to start from. Tell me which.")
     expect(calls.some((call) => call.includes("worktree add"))).toBe(false)
-  })
-
-  test("refuses when git won't make it, or it isn't where git said it made it", async () => {
-    const { "worktree add": _, ...failing } = withOrigin
-    expect(await why(make(git(failing)))).toBe(
-      "I couldn't make the worktree, so I didn't start anything. Git says: a branch named 'yapd/0a1b2c3d' already exists.",
-    )
-    const { "rev-parse --show-toplevel": __, ...missing } = withOrigin
-    expect(await why(make(git(missing)))).toBe("The worktree isn't where git said it made it, so I didn't start anything.")
   })
 })

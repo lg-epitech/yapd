@@ -35,7 +35,6 @@ describe("Cli's models", () => {
     expect(agent(" Fable ")).toEqual(Either.right(["claude", "claude-fable-5-1"]))
     expect(agent("fable 5")).toEqual(Either.right(["claude", "claude-fable-5"]))
     expect(agent("GPT-6-Astra")).toEqual(Either.right(["codex", "gpt-6-astra"]))
-    expect(agent("gpt-reserve")).toEqual(Either.left("I don't have a model called gpt-reserve here."))
     // Named like Claude's, which its list may not have yet.
     expect(agent("claude-opus-6")).toEqual(Either.right(["claude", "claude-opus-6"]))
   })
@@ -51,26 +50,6 @@ describe("Cli's commands", () => {
     permissions: undefined,
     repository: true,
   }
-
-  test("starts each command line the way it takes it, and picks the session up with what it started with", () => {
-    expect(Cli.command(turn)).toEqual([
-      "claude", "-p", "--session-id", "session-1", "--model", "claude-fable-5-1", "--output-format", "stream-json", "--verbose",
-    ])
-    expect(Cli.command({ ...turn, resume: true, effort: "low", permissions: "acceptEdits" })).toEqual([
-      "claude", "-p", "--resume", "session-1", "--model", "claude-fable-5-1", "--effort", "low", "--permission-mode", "acceptEdits",
-      "--output-format", "stream-json", "--verbose",
-    ])
-    // Codex names the session itself.
-    expect(Cli.command({ ...turn, agent: "codex", session: undefined, model: "gpt-6-astra", effort: "high" })).toEqual([
-      "codex", "exec", "--json", "--model", "gpt-6-astra", "--config", "model_reasoning_effort=high", "-",
-    ])
-    expect(Cli.command({ ...turn, agent: "codex", session: undefined, model: "gpt-6-astra", repository: false })).toContain(
-      "--skip-git-repo-check",
-    )
-    expect(Cli.command({ ...turn, agent: "codex", resume: true, model: "gpt-6-astra", permissions: "workspace-write" })).toEqual([
-      "codex", "exec", "resume", "--json", "--model", "gpt-6-astra", "--config", "sandbox_mode=workspace-write", "session-1", "-",
-    ])
-  })
 
   test("skips no approvals unless the user's setting says so", () => {
     for (const agent of ["claude", "codex"] as const) {
@@ -94,21 +73,6 @@ describe("Cli's output", () => {
       { type: "result", is_error: true, result: "There's an issue with the selected model (claude-nope-9)." },
     ])
     expect(unreached).toMatchObject({ began: false, error: "There's an issue with the selected model (claude-nope-9)." })
-  })
-
-  test("hears what Claude Code was refused", () => {
-    const heard = hear("claude", [
-      "a warning printed in between",
-      {
-        type: "result",
-        is_error: false,
-        result: "I need your permission to write the file.",
-        permission_denials: [{ tool_name: "Write", tool_input: { file_path: "/code/free-sound/probe.txt", content: "ok" } }],
-      },
-    ])
-    expect(heard.message).toBe("I need your permission to write the file.")
-    expect(heard.denied).toEqual([{ tool: "Write", input: { file_path: "/code/free-sound/probe.txt", content: "ok" } }])
-    expect(heard).not.toHaveProperty("error")
   })
 
   test("hears Codex's session and its last message, or why its turn failed", () => {

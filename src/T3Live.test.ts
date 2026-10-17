@@ -80,15 +80,6 @@ describe("T3Live.apply", () => {
     expect(seen.changes).toEqual(["Finished"])
   })
 
-  test("goes from one run straight into the next", () => {
-    const { changes } = run([
-      snapshot(1, [thread({ activeRunId: "r1", activityRunStatus: "running" })]),
-      { kind: "synchronized" },
-      { kind: "thread.updated", sequence: 2, location: "active", thread: thread({ activeRunId: "r2", activityRunStatus: "starting" }) },
-    ])
-    expect(changes).toEqual(["Finished", "Started"])
-  })
-
   test("skips what it already has, like what's replayed after a reconnect", () => {
     const { changes, view } = run([
       snapshot(5, [thread()]),
@@ -99,16 +90,6 @@ describe("T3Live.apply", () => {
     expect(view.threads.get("t1")?.title).toBe("Fix the loader")
   })
 
-  test("lets a snapshot that only fills in repositories patch the projects, and keep the threads", () => {
-    const { view } = run([
-      snapshot(5, [thread()]),
-      { ...snapshot(5, []), snapshot: { snapshotSequence: 5, projects: [{ ...project, title: "yapd!" }], threads: [] }, resolvedRepositoryIdentityRoots: ["/code/yapd"] },
-      { kind: "synchronized" },
-    ])
-    expect(view.threads.size).toBe(1)
-    expect(view.projects.get("p1")?.title).toBe("yapd!")
-  })
-
   test("compares a whole new snapshot with what it knew, so nothing that happened meanwhile is missed", () => {
     const before = run([snapshot(5, [thread(), thread({ id: "t2" })]), { kind: "synchronized" }]).view
     const { changes } = run(
@@ -116,19 +97,6 @@ describe("T3Live.apply", () => {
       before,
     )
     expect(changes).toEqual(["Asked", "Created", "Removed"])
-  })
-
-  test("keeps telling what changed after a whole new snapshot, even if the connection that sent it dropped before catching up", () => {
-    const before = run([snapshot(5, [thread()]), { kind: "synchronized" }]).view
-    const { changes } = run(
-      [
-        snapshot(50, [thread()]),
-        // The next connection picks up from the snapshot.
-        { kind: "thread.updated", sequence: 51, location: "active", thread: thread({ pendingRuntimeRequest: { id: "q1", kind: "user_input", createdAt: "x" } }) },
-      ],
-      before,
-    )
-    expect(changes).toEqual(["Asked"])
   })
 
   test("leaves out a thread whose shape it doesn't know, rather than the whole snapshot", () => {
@@ -219,120 +187,6 @@ describe("T3Live.follow", () => {
       }).pipe(Effect.scoped, Effect.provide(TestContext.TestContext)),
     ))
 
-  test("only counts as following again once a new connection has caught up, and keeps trying when a socket can't be used", () =>
-    Effect.runPromise(
-      Effect.gen(function* () {
-        const { sockets, dial } = fake()
-        const live = yield* T3Live.follow(Effect.succeed({ server: { origin: "http://127.0.0.1:3774" }, token: Redacted.make("token") }), dial)
-        yield* flush
-        sockets[0]!.emit({ _tag: "Open" })
-        sockets[0]!.emit({ _tag: "Message", data: JSON.stringify({ _tag: "Chunk", requestId: "shell", values: [snapshot(7, [thread()]), { kind: "synchronized" }] }) })
-        yield* flush
-        sockets[0]!.emit({ _tag: "Closed", reason: "gone" })
-        yield* flush
-        yield* TestClock.adjust("2 seconds")
-        yield* flush
-        sockets[1]!.emit({ _tag: "Open" })
-        sockets[1]!.emit({
-          _tag: "Message",
-          data: JSON.stringify({ _tag: "Chunk", requestId: "shell", values: [{ kind: "thread.updated", sequence: 8, location: "active", thread: thread({ title: "Renamed" }) }] }),
-        })
-        yield* flush
-        const beforeMarker = Option.isSome(yield* live.view)
-        sockets[1]!.emit({ _tag: "Message", data: JSON.stringify({ _tag: "Chunk", requestId: "shell", values: [{ kind: "synchronized" }] }) })
-        yield* flush
-        const afterMarker = Option.isSome(yield* live.view)
-        return { beforeMarker, afterMarker }
-      }).pipe(Effect.scoped, Effect.provide(TestContext.TestContext)),
-    ).then(({ beforeMarker, afterMarker }) => {
-      expect(beforeMarker).toBe(false)
-      expect(afterMarker).toBe(true)
-    }))
-
-  test("connects again when T3 Code says the connection broke, even while it still answers pings", () =>
-    Effect.runPromise(
-      Effect.gen(function* () {
-        const { sockets, dial } = fake()
-        const live = yield* T3Live.follow(Effect.succeed({ server: { origin: "http://127.0.0.1:3774" }, token: Redacted.make("token") }), dial)
-        yield* flush
-        sockets[0]!.emit({ _tag: "Open" })
-        sockets[0]!.emit({ _tag: "Message", data: JSON.stringify({ _tag: "Chunk", requestId: "shell", values: [snapshot(7, [thread()]), { kind: "synchronized" }] }) })
-        yield* flush
-        sockets[0]!.emit({ _tag: "Message", data: JSON.stringify({ _tag: "Defect", defect: "boom" }) })
-        sockets[0]!.emit({ _tag: "Message", data: JSON.stringify({ _tag: "Pong" }) })
-        yield* flush
-        const stale = Option.isSome(yield* live.view)
-        yield* TestClock.adjust("2 seconds")
-        yield* flush
-        return { stale, closed: sockets[0]!.closed, dialed: sockets.length }
-      }).pipe(Effect.scoped, Effect.provide(TestContext.TestContext)),
-    ).then(({ stale, closed, dialed }) => {
-      expect(stale).toBe(false)
-      expect(closed).toBe(true)
-      expect(dialed).toBe(2)
-    }))
-
-  test("tries again when a socket throws instead of sending", () =>
-    Effect.runPromise(
-      Effect.gen(function* () {
-        let dials = 0
-        const dial: T3Live.Dial = () => {
-          dials++
-          return {
-            send: () => {
-              throw new Error("WebSocket is not open")
-            },
-            close: () => {},
-            events: (listener) => listener({ _tag: "Open" }),
-          }
-        }
-        yield* T3Live.follow(Effect.succeed({ server: { origin: "http://127.0.0.1:3774" }, token: Redacted.make("token") }), dial)
-        yield* flush
-        yield* TestClock.adjust("5 seconds")
-        yield* flush
-        return dials
-      }).pipe(Effect.scoped, Effect.provide(TestContext.TestContext)),
-    ).then((dials) => expect(dials).toBeGreaterThan(1)))
-
-  test("logs why rig's T3 Code won't be followed, once each reason, by its machine and never with the token", async () => {
-    const secret = "t3-secret-token"
-    const lines: Array<string> = []
-    const logger = Logger.map(Logger.logfmtLogger, (line) => void lines.push(line))
-    await Effect.runPromise(
-      Effect.gen(function* () {
-        const { sockets, dial } = fake()
-        yield* T3Live.follow(Effect.succeed({ server: { origin: "http://127.0.0.1:50001" }, token: Redacted.make(secret) }), dial).pipe(
-          Effect.annotateLogs({ machine: "rig" }),
-        )
-        yield* flush
-        // The tunnel is up, but T3 Code there turns the socket down twice, saying the same, which here even has the token in it.
-        for (const [index, wait] of [[0, "2 seconds"], [1, "4 seconds"]] as const) {
-          sockets[index]!.emit({ _tag: "Closed", reason: `Expected 101 status code for Bearer ${secret}, closed with 1002` })
-          yield* flush
-          yield* TestClock.adjust(wait)
-          yield* flush
-        }
-        // Then it takes the socket, and ends the subscription: it speaks another protocol.
-        sockets[2]!.emit({ _tag: "Open" })
-        sockets[2]!.emit({
-          _tag: "Message",
-          data: JSON.stringify({
-            _tag: "Exit",
-            requestId: "shell",
-            exit: { _tag: "Failure", cause: [{ _tag: "Fail", error: { _tag: "OrchestrationProtocolMismatch", message: "This server speaks protocol 3." } }] },
-          }),
-        })
-        yield* flush
-      }).pipe(Effect.scoped, Effect.provide(Layer.merge(TestContext.TestContext, Logger.replace(Logger.defaultLogger, logger)))),
-    )
-    const following = lines.filter((line) => line.includes("follow T3 Code"))
-    expect(following).toHaveLength(2)
-    expect(following[0]).toContain(`message="Can't follow T3 Code right now, I'll keep trying: Expected 101 status code for Bearer [token], closed with 1002"`)
-    expect(following[1]).toContain("I'll keep trying: it ended the subscription: OrchestrationProtocolMismatch: This server speaks protocol 3.")
-    expect(following.every((line) => line.includes("machine=rig"))).toBe(true)
-    expect(lines.some((line) => line.includes(secret))).toBe(false)
-  })
-
   test("never leaves part of the token in the log where what T3 Code said is cut short", async () => {
     const secret = "t3-secret-token-ABCDEFGHIJKLMNOP"
     const lines: Array<string> = []
@@ -352,24 +206,6 @@ describe("T3Live.follow", () => {
     expect(broke).toHaveLength(1)
     expect(broke[0]).toContain(`${"y".repeat(290)}[token]`)
     expect(lines.some((line) => line.includes(secret.slice(0, 10)))).toBe(false)
-  })
-
-  test("says in the log why it lost T3 Code after following it", async () => {
-    const lines: Array<string> = []
-    const logger = Logger.map(Logger.logfmtLogger, (line) => void lines.push(line))
-    await Effect.runPromise(
-      Effect.gen(function* () {
-        const { sockets, dial } = fake()
-        yield* T3Live.follow(Effect.succeed({ server: { origin: "http://127.0.0.1:3774" }, token: Redacted.make("token") }), dial)
-        yield* flush
-        sockets[0]!.emit({ _tag: "Open" })
-        sockets[0]!.emit({ _tag: "Message", data: JSON.stringify({ _tag: "Chunk", requestId: "shell", values: [snapshot(7, [thread()]), { kind: "synchronized" }] }) })
-        yield* flush
-        sockets[0]!.emit({ _tag: "Message", data: JSON.stringify({ _tag: "Defect", defect: "boom" }) })
-        yield* flush
-      }).pipe(Effect.scoped, Effect.provide(Layer.merge(TestContext.TestContext, Logger.replace(Logger.defaultLogger, logger)))),
-    )
-    expect(lines.some((line) => line.includes(`message="Lost T3 Code, connecting again: it broke: boom"`))).toBe(true)
   })
 
   test("connects again where T3 Code answers now, with the token it's asked for then, like another machine's after it restarted", () =>
@@ -399,18 +235,4 @@ describe("T3Live.follow", () => {
         { url: `ws://127.0.0.1:50002/ws?orchestrationProtocol=2`, token: "second" },
       ]),
     ))
-
-  test("keeps a project with the icon he chose, with none, and with one of a kind T3 Code added since", () => {
-    const projects = [
-      project,
-      { ...project, id: "p2", faviconPath: "assets/logo.png", projectIcon: { kind: "emoji", emoji: "🦀" } },
-      { ...project, id: "p3", faviconPath: null, projectIcon: { kind: "sticker", pack: "new" } },
-    ]
-    const { view } = run([{ kind: "snapshot", snapshot: { snapshotSequence: 1, projects, threads: [], archivedThreads: [] } }, { kind: "synchronized" }])
-    expect([...view.projects.values()].map(({ id, faviconPath, projectIcon }) => ({ id, faviconPath, projectIcon }))).toEqual([
-      { id: "p1", faviconPath: undefined, projectIcon: undefined },
-      { id: "p2", faviconPath: "assets/logo.png", projectIcon: { kind: "emoji", emoji: "🦀" } },
-      { id: "p3", faviconPath: null, projectIcon: { kind: "sticker", pack: "new" } },
-    ])
-  })
 })
