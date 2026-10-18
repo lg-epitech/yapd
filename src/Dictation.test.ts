@@ -46,6 +46,7 @@ const dictation = (
           Layer.succeed(Shortcut.Shortcut, {
             events: Stream.fromPubSub(events),
             cancel: PubSub.publish(events, { _tag: "Cancelled" as const }),
+            send: PubSub.publish(events, { _tag: "Sent" as const }),
             toggle: () => Effect.void,
           }),
           Layer.succeed(Audio, {
@@ -116,7 +117,8 @@ const dictation = (
     // Lets the fibers catch up on what the test did, since the clock only moves when told to.
     const flush = Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 20)))
     yield* flush
-    const press = (event: Shortcut.Event["_tag"]) => PubSub.publish(events, { _tag: event }).pipe(Effect.zipRight(flush))
+    const press = (event: Shortcut.Event["_tag"], onPause = false) =>
+      PubSub.publish(events, event === "Started" ? { _tag: event, onPause } : { _tag: event }).pipe(Effect.zipRight(flush))
     /** Only heard while the microphone is open. */
     const talk = (picture: string) =>
       Effect.suspend(() =>
@@ -317,4 +319,32 @@ describe("Dictation", () => {
     expect(result.transcripts).toEqual([""])
   })
 
+  test("sends one started to be, like from a phone, once he's spoken and then gone quiet for two seconds, but not over a shorter pause or before he's spoken", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { press, talk, dictating, transcripts } = yield* dictation(["Add a settings screen."])
+        yield* press("Started", true)
+        // A click, then a long silence, isn't him having spoken.
+        yield* talk(`x${".".repeat(100)}`)
+        const beforeSpeech = yield* dictating
+        yield* talk(`${"x".repeat(20)}${".".repeat(40)}${"x".repeat(20)}${".".repeat(61)}`)
+        const justShort = yield* dictating
+        yield* talk(".")
+        return { beforeSpeech, justShort, after: yield* dictating, transcripts }
+      }),
+    )
+    expect(result).toEqual({ beforeSpeech: 1, justShort: 1, after: 0, transcripts: ["Add a settings screen."] })
+  })
+
+  test("waits for the press to send one started without it, however long he's quiet", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { press, talk, dictating, transcripts } = yield* dictation(["Keep listening."])
+        yield* press("Started")
+        yield* talk(`${"x".repeat(20)}${".".repeat(200)}`)
+        return { during: yield* dictating, transcripts: [...transcripts] }
+      }),
+    )
+    expect(result).toEqual({ during: 1, transcripts: [] })
+  })
 })

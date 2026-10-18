@@ -238,7 +238,7 @@ const Event = Schema.Union(
   Schema.Struct({ type: Schema.Literal("failed"), id: Schema.String, message: Schema.String }),
   Schema.Struct({ type: Schema.Literal("error"), message: Schema.String }),
   Schema.Struct({ type: Schema.Literal("shortcut"), registered: Schema.Boolean, message: Schema.optional(Schema.String) }),
-  Schema.Struct({ type: Schema.Literal("pressed"), key: Schema.Literal("shortcut", "escape") }),
+  Schema.Struct({ type: Schema.Literal("pressed"), key: Schema.Literal("shortcut", "escape"), onPause: Schema.optional(Schema.Boolean) }),
 )
 const decodeEvent = Schema.decodeUnknownOption(Schema.parseJson(Event))
 
@@ -363,7 +363,8 @@ export interface Owner {
   readonly greeted: () => void
   /** How taking the shortcut's keys went. */
   readonly registered: (ok: boolean, message?: string) => void
-  readonly pressed: (key: Shortcut.Key) => void
+  /** `onPause` when a dictation it starts is to be sent once he stops talking. */
+  readonly pressed: (key: Shortcut.Key, onPause?: boolean) => void
   /** What it plays, or whether it listens, may have changed. */
   readonly changed: () => void
   /** Its link went, and with it whatever it played and heard. */
@@ -577,7 +578,7 @@ export const device = (
           owner.registered(event.value.registered, event.value.message)
           return
         case "pressed":
-          owner.pressed(event.value.key)
+          owner.pressed(event.value.key, event.value.onPause)
       }
     }
 
@@ -886,10 +887,10 @@ export const router = <E = never, R = never>(local?: (owner: Owner, cues: Cues, 
       registered: (ok, message) => {
         if (shortcut !== undefined) runSync(shortcut.registered(ok, message))
       },
-      pressed: (key) => {
+      pressed: (key, onPause) => {
         if (id !== "local") runFork(Effect.logInfo(`${name} pressed ${key === "shortcut" ? "the shortcut" : "Escape"}`))
         used.set(id, now())
-        if (shortcut !== undefined) runSync(hotkeys ? shortcut.pressed(key) : shortcut.direct(key))
+        if (shortcut !== undefined) runSync(hotkeys ? shortcut.pressed(key, onPause) : shortcut.direct(key, onPause))
       },
       changed,
       // Whatever was being dictated on the device in use goes with it.

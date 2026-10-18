@@ -71,20 +71,19 @@ export const parse = (value: string): Either.Either<Option.Option<Keys>, string>
 export type Key = "shortcut" | "escape"
 
 export type Event =
-  /** The user pressed the shortcut to dictate new work. */
-  | { readonly _tag: "Started" }
+  /** The user pressed the shortcut to dictate new work, to be sent once they stop talking when `onPause`, like from a phone. */
+  | { readonly _tag: "Started"; readonly onPause?: boolean }
   /** They pressed it again, to send it. */
   | { readonly _tag: "Sent" }
   /** They pressed Escape instead. */
   | { readonly _tag: "Cancelled" }
 
-const started: Event = { _tag: "Started" }
 const sent: Event = { _tag: "Sent" }
 const cancelled: Event = { _tag: "Cancelled" }
 
 /** Whether the user is dictating after a press, and what the press meant. */
-export const press = (dictating: boolean, key: Key): { readonly dictating: boolean; readonly event?: Event } => {
-  if (key === "shortcut") return { dictating: !dictating, event: dictating ? sent : started }
+export const press = (dictating: boolean, key: Key, onPause = false): { readonly dictating: boolean; readonly event?: Event } => {
+  if (key === "shortcut") return { dictating: !dictating, event: dictating ? sent : { _tag: "Started", onPause } }
   // Escape can still arrive just after it was let go.
   return dictating ? { dictating: false, event: cancelled } : { dictating }
 }
@@ -96,6 +95,8 @@ export class Shortcut extends Context.Tag("yapd/Shortcut")<
     readonly events: Stream.Stream<Event>
     /** Ends a dictation from this side, like when it runs too long, as if the user pressed Escape. */
     readonly cancel: Effect.Effect<void>
+    /** Sends a dictation from this side, like when the user stopped talking, as if they pressed again: nothing when none is on. */
+    readonly send: Effect.Effect<void>
     /**
      * Takes the keys, or lets them go, Escape too, so they work in other apps
      * while yapd is off. Nothing pressed before reaches anyone after, not even
@@ -106,7 +107,7 @@ export class Shortcut extends Context.Tag("yapd/Shortcut")<
 >() {}
 
 /** When no shortcut is set, or nothing can take it. */
-export const none: Shortcut["Type"] = { events: Stream.never, cancel: Effect.void, toggle: () => Effect.void }
+export const none: Shortcut["Type"] = { events: Stream.never, cancel: Effect.void, send: Effect.void, toggle: () => Effect.void }
 
 /**
  * Keeps whether the user is dictating on this side, and has the helper take
@@ -130,9 +131,9 @@ export const make = (keys: Keys, send: (message: object) => void, initially: boo
       if (on) unanswered++
       send(on ? { type: "shortcut", key: keys.key, modifiers: keys.modifiers } : { type: "shortcut" })
     }
-    const step = (key: Key) =>
+    const step = (key: Key, onPause?: boolean) =>
       Effect.suspend(() => {
-        const next = press(dictating, key)
+        const next = press(dictating, key, onPause)
         if (next.dictating !== dictating) send({ type: "escape", on: next.dictating })
         dictating = next.dictating
         return next.event === undefined ? Effect.void : publish(next.event)
@@ -141,7 +142,7 @@ export const make = (keys: Keys, send: (message: object) => void, initially: boo
      * From the helper, only while it holds the keys as last asked, so a press
      * still on its way from before they were let go of and taken again does nothing.
      */
-    const pressed = (key: Key) => Effect.suspend(() => (on && unanswered === 0 ? step(key) : Effect.void))
+    const pressed = (key: Key, onPause?: boolean) => Effect.suspend(() => (on && unanswered === 0 ? step(key, onPause) : Effect.void))
 
     const toggle = (next: boolean) =>
       Effect.sync(() => {
@@ -159,6 +160,7 @@ export const make = (keys: Keys, send: (message: object) => void, initially: boo
           Stream.filterMap((published) => (published.turns === turns ? Option.some(published.event) : Option.none())),
         ),
         cancel: step("escape"),
+        send: Effect.suspend(() => (dictating ? step("shortcut") : Effect.void)),
         toggle,
       } satisfies Shortcut["Type"],
       /** A helper has just started, holding no keys and with nothing on its way. */
@@ -181,7 +183,7 @@ export const make = (keys: Keys, send: (message: object) => void, initially: boo
        * From a device that holds no keys, like a phone's button, so there's
        * nothing to wait for it to register: only while the keys are taken.
        */
-      direct: (key: Key) => Effect.suspend(() => (on ? step(key) : Effect.void)),
+      direct: (key: Key, onPause?: boolean) => Effect.suspend(() => (on ? step(key, onPause) : Effect.void)),
       /**
        * The device dictated on went away, letting go of whatever was being
        * dictated, and of Escape, which any other device still holding it for
