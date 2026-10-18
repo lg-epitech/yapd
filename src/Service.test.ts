@@ -17,7 +17,8 @@ describe("Service", () => {
   })
 
   test("quotes what systemd runs, so a path with spaces or a % stays one word, as written", () => {
-    const unit = Service.unit({ ...options, main: "/home/me/my yapd/src/main.ts", path: "/home/me/100%/bin:/usr/bin", command: "client" })
+    const unit = Service.unit({ ...options, main: "/home/me/my yapd/src/main.ts", workingDirectory: "/home/me/.yapd 100%", path: "/home/me/100%/bin:/usr/bin", command: "client" })
+    expect(unit).toContain("WorkingDirectory=/home/me/.yapd 100%%\n")
     expect(unit).toContain('ExecStart="/Users/me/.bun/bin/bun" "/home/me/my yapd/src/main.ts" "client"')
     expect(unit).toContain('Environment="PATH=/home/me/100%%/bin:/usr/bin"')
   })

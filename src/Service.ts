@@ -79,7 +79,7 @@ export const plist = (options: Options) => `<?xml version="1.0" encoding="UTF-8"
 </plist>
 `
 
-/** A value as systemd reads it inside double quotes, with its own `%` specifiers kept literal. */
+/** A value as systemd reads it inside double quotes, with its own `%` specifiers kept literal. WorkingDirectory takes no quotes, only the rest of its line. */
 const quoted = (value: string) => `"${value.replaceAll("\\", "\\\\").replaceAll('"', '\\"').replaceAll("%", "%%")}"`
 
 /** Starts with the user's systemd, which lingering keeps up while they're logged out, and restarts whenever it exits. */
@@ -89,7 +89,7 @@ After=network-online.target
 
 [Service]
 ExecStart=${[options.bun, options.main, options.command ?? "serve"].map(quoted).join(" ")}
-WorkingDirectory=${quoted(options.workingDirectory)}
+WorkingDirectory=${options.workingDirectory.replaceAll("%", "%%")}
 Environment=${quoted(`PATH=${options.path}`)}${Object.entries(options.environment ?? {})
   .map(([name, value]) => `
 Environment=${quoted(`${name}=${value}`)}`)
