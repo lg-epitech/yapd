@@ -99,11 +99,11 @@ const device = (delayPlaying = false) =>
     }
   })
 
-const run = <A, E>(effect: Effect.Effect<A, E, Scope.Scope>, shortcut = "none") =>
+const run = <A, E>(effect: Effect.Effect<A, E, Scope.Scope>, shortcut = "none", config: ReadonlyArray<readonly [string, string]> = []) =>
   Effect.runPromise(
     effect.pipe(
       Effect.scoped,
-      Effect.withConfigProvider(ConfigProvider.fromMap(new Map([["YAPD_SHORTCUT", shortcut]]))),
+      Effect.withConfigProvider(ConfigProvider.fromMap(new Map([["YAPD_SHORTCUT", shortcut], ...config]))),
       Effect.provide(TestContext.TestContext),
     ),
   )
@@ -320,6 +320,34 @@ describe("Devices", () => {
       }),
       "ctrl+option+cmd+space",
     ))
+
+  test("a Mac's shortcut sends on a pause unless YAPD_SEND_ON_PAUSE is false, and a phone's press says for itself", async () => {
+    /** Whether each dictation started, the Mac's then the phone's, is sent on a pause. */
+    const started = (phone: boolean, config: ReadonlyArray<readonly [string, string]> = []) =>
+      run(
+        Effect.gen(function* () {
+          const context = yield* router()
+          const sockets = Option.getOrThrow(Context.get(context, Devices).sockets)
+          const shortcut = Context.get(context, Shortcut)
+          yield* shortcut.toggle(true)
+          const events = yield* Effect.fork(Stream.runCollect(Stream.take(Stream.filter(shortcut.events, ({ _tag }) => _tag === "Started"), 2)))
+          yield* settle
+          const mac = client(sockets, "mac")
+          mac.mac()
+          mac.say({ type: "shortcut", registered: true })
+          mac.say({ type: "pressed", key: "shortcut" })
+          mac.say({ type: "pressed", key: "shortcut" })
+          const iphone = client(sockets)
+          iphone.hello()
+          iphone.say({ type: "pressed", key: "shortcut", onPause: phone })
+          return [...(yield* Fiber.join(events))].map((event) => (event._tag === "Started" ? event.onPause : undefined))
+        }),
+        "ctrl+option+cmd+space",
+        config,
+      )
+    expect(await started(false)).toEqual([true, false])
+    expect(await started(true, [["YAPD_SEND_ON_PAUSE", "false"]])).toEqual([false, true])
+  })
 
   test("a client connecting again as itself takes the place of the one before", () =>
     run(

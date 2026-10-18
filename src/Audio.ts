@@ -363,7 +363,7 @@ export interface Owner {
   readonly greeted: () => void
   /** How taking the shortcut's keys went. */
   readonly registered: (ok: boolean, message?: string) => void
-  /** `onPause` when a dictation it starts is to be sent once he stops talking. */
+  /** `onPause` when a dictation it starts is to be sent once he stops talking: as `YAPD_SEND_ON_PAUSE` says when it doesn't say. */
   readonly pressed: (key: Shortcut.Key, onPause?: boolean) => void
   /** What it plays, or whether it listens, may have changed. */
   readonly changed: () => void
@@ -879,6 +879,8 @@ export const router = <E = never, R = never>(local?: (owner: Owner, cues: Cues, 
     const keys = yield* Config.shortcut
     // Taken once yapd knows whether it's on, which it may have been turned off before it stopped.
     const shortcut = Option.isSome(keys) ? yield* Shortcut.make(keys.value, broadcast, false) : undefined
+    /** For a press that doesn't say, like a Mac's shortcut. */
+    const sendOnPause = yield* Config.sendOnPause
     const changed = () => report(joined.some(({ speaker }) => speaker.speaking()), joined.some(({ speaker }) => speaker.listening()))
     const owner = (id: string, hotkeys: boolean, name = id): Owner => ({
       greeted: () => {
@@ -890,7 +892,8 @@ export const router = <E = never, R = never>(local?: (owner: Owner, cues: Cues, 
       pressed: (key, onPause) => {
         if (id !== "local") runFork(Effect.logInfo(`${name} pressed ${key === "shortcut" ? "the shortcut" : "Escape"}`))
         used.set(id, now())
-        if (shortcut !== undefined) runSync(hotkeys ? shortcut.pressed(key, onPause) : shortcut.direct(key, onPause))
+        const pause = onPause ?? sendOnPause
+        if (shortcut !== undefined) runSync(hotkeys ? shortcut.pressed(key, pause) : shortcut.direct(key, pause))
       },
       changed,
       // Whatever was being dictated on the device in use goes with it.

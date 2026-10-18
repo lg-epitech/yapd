@@ -460,7 +460,7 @@ The device tells yapd:
 | `{"type": "stopped", "id", "at"}` | It stopped at `at` seconds, as told. Without an `id`, nothing was playing. yapd waits five seconds for this, then drops the connection. |
 | `{"type": "failed", "id", "message"}` | It couldn't play it. |
 | `{"type": "rested"}` | It closed its microphone of its own accord. |
-| `{"type": "pressed", "key", "onPause"}` | You pressed `shortcut`, to start dictating or to send it, or `escape`, to drop it. A phone's button is `shortcut`. With `onPause: true`, a dictation it starts is sent once you've spoken and then been quiet for about two seconds, as if you'd pressed again. |
+| `{"type": "pressed", "key", "onPause"}` | You pressed `shortcut`, to start dictating or to send it, or `escape`, to drop it. A phone's button is `shortcut`. With `onPause: true`, a dictation it starts is sent once you've spoken and then been quiet for about two seconds, as if you'd pressed again; with `false`, only when you press again. Without it, as `YAPD_SEND_ON_PAUSE` says, which is on unless set to `false`. |
 | `{"type": "shortcut", "registered", "message"}` | From a device with `hotkeys`: whether it took the keys, and why not. |
 | `{"type": "error", "message"}` | Something went wrong, for yapd's log. |
 
