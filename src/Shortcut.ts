@@ -177,6 +177,11 @@ export const make = (keys: Keys, send: (message: object) => void, initially: boo
             : Effect.logWarning(`Can't use ${format(keys)} to dictate new work: ${message}. Pick another with YAPD_SHORTCUT.`)
         }),
       pressed,
+      /**
+       * From a device that holds no keys, like a phone's button, so there's
+       * nothing to wait for it to register: only while the keys are taken.
+       */
+      direct: (key: Key) => Effect.suspend(() => (on ? step(key) : Effect.void)),
       /** The helper quit, letting go of Escape and whatever was being dictated. */
       quit: Effect.suspend(() => {
         if (!dictating) return Effect.void

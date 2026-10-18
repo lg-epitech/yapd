@@ -1,8 +1,10 @@
 import type { Socket } from "bun"
 import { describe, expect, test } from "bun:test"
-import { ConfigProvider, Context, Effect, Fiber, Option, Queue, Runtime, type Scope, TestClock, TestContext } from "effect"
-import { Audio, native } from "./Audio.ts"
+import { ConfigProvider, Context, Effect, Either, Fiber, Option, Queue, Runtime, type Scope, Stream, TestClock, TestContext } from "effect"
+import { Audio, type ClientSocket, Devices, native, router, wav } from "./Audio.ts"
 import * as Helper from "./Helper.ts"
+import { Shortcut } from "./Shortcut.ts"
+import * as Wire from "./Wire.ts"
 
 interface Command {
   readonly type: string
@@ -80,6 +82,7 @@ const device = (delayPlaying = false) =>
     }
     return {
       audio,
+      context,
       finish: Effect.sync(() => {
         if (playing !== undefined) send({ type: "finished", id: playing })
         playing = undefined
@@ -94,14 +97,57 @@ const device = (delayPlaying = false) =>
     }
   })
 
-const run = <A, E>(effect: Effect.Effect<A, E, Scope.Scope>) =>
+const run = <A, E>(effect: Effect.Effect<A, E, Scope.Scope>, shortcut = "none") =>
   Effect.runPromise(
     effect.pipe(
       Effect.scoped,
-      Effect.withConfigProvider(ConfigProvider.fromMap(new Map([["YAPD_SHORTCUT", "none"]]))),
+      Effect.withConfigProvider(ConfigProvider.fromMap(new Map([["YAPD_SHORTCUT", shortcut]]))),
       Effect.provide(TestContext.TestContext),
     ),
   )
+
+/** A client on `/audio`, like a phone: what it was sent, and saying things to yapd as it would. */
+const client = (sockets: NonNullable<Option.Option.Value<Devices["Type"]["sockets"]>>, id = "phone") => {
+  const sent: Array<string | Uint8Array> = []
+  let closed = false
+  const socket: ClientSocket = {
+    send: (data) => void sent.push(data),
+    close: () => {
+      closed = true
+    },
+  }
+  sockets.open(socket)
+  const say = (message: object) => sockets.message(socket, JSON.stringify(message))
+  return {
+    sent,
+    closed: () => closed,
+    say,
+    hello: () => say({ type: "hello", permission: "authorized", client: { id, name: id } }),
+    frame: (value: number) => sockets.message(socket, Wire.pcm16(new Float32Array(Wire.samples).fill(value))),
+    leave: () => sockets.close(socket),
+    /** What it was told, as JSON, of a type. */
+    told: (type: string) => sent.flatMap((data) => (typeof data === "string" ? [JSON.parse(data) as { readonly type: string; readonly [key: string]: unknown }] : [])).filter((message) => message.type === type),
+  }
+}
+
+/** Lets what was forked get as far as it can without the clock. */
+const settle = Effect.repeatN(Effect.yieldNow(), 20)
+
+/** Stops what was forked, giving a client that never says it stopped as long as yapd waits for it. */
+const drop = <A, E>(fiber: Fiber.Fiber<A, E>) =>
+  Effect.gen(function* () {
+    const stopping = yield* Effect.fork(Fiber.interrupt(fiber))
+    yield* settle
+    yield* TestClock.adjust("1 minute")
+    yield* Fiber.join(stopping)
+  })
+
+/** A short WAV file to play, in a folder of its own. */
+const sound = Effect.promise(async () => {
+  const path = `${await Bun.$`mktemp -d`.text().then((dir) => dir.trim())}/line.wav`
+  await Bun.write(path, wav(new Float32Array(2400)))
+  return path
+})
 
 describe("Native audio", () => {
   test("ends microphone subscribers on disconnect, and a later playback gets a fresh microphone", () =>
@@ -192,6 +238,100 @@ describe("Native audio", () => {
         yield* fake.next("play")
         yield* Fiber.interrupt(playing)
         expect(fake.order).toEqual(["play", "stop"])
+      }),
+    ))
+})
+
+describe("Devices", () => {
+  test("plays on a client that connected, sending it the file first, and hears its microphone, until it goes", () =>
+    run(
+      Effect.gen(function* () {
+        const context = yield* router()
+        const audio = Context.get(context, Audio)
+        const sockets = Option.getOrThrow(Context.get(context, Devices).sockets)
+        const path = yield* sound
+        // With nothing there, nothing waits for it.
+        expect(Either.isLeft(yield* Effect.either(Effect.scoped(audio.play(path))))).toBe(true)
+        const phone = client(sockets)
+        phone.hello()
+        const playing = yield* Effect.fork(audio.play(path))
+        yield* settle
+        const [file, play] = phone.sent
+        expect(file instanceof Uint8Array && Wire.readFile(file)?.bytes.length).toBe(Bun.file(path).size)
+        const told = typeof play === "string" ? JSON.parse(play) : undefined
+        expect(told).toMatchObject({ type: "play", file: file instanceof Uint8Array ? Wire.readFile(file)?.id : "" })
+        phone.say({ type: "active", listening: true })
+        phone.say({ type: "playing", id: told.id, duration: 0.1 })
+        const playback = yield* Fiber.join(playing)
+        expect(playback.confirmed).toBe(true)
+        const microphone = yield* audio.microphone
+        if (Option.isNone(microphone)) return expect(Option.isSome(microphone)).toBe(true)
+        phone.frame(0.25)
+        expect((yield* Queue.take(microphone.value))[0]).toBeCloseTo(0.25, 3)
+        // Gone while it played, what it played never finishes.
+        phone.leave()
+        expect(Either.isLeft(yield* Effect.either(playback.finished))).toBe(true)
+        expect(yield* Queue.isShutdown(microphone.value)).toBe(true)
+      }),
+    ))
+
+  test("the device last pressed on is in use, a phone's press needs no keys of its own, and the helper takes over once it's gone", () =>
+    run(
+      Effect.gen(function* () {
+        const fake = yield* device()
+        const sockets = Option.getOrThrow(Context.get(fake.context, Devices).sockets)
+        const shortcut = Context.get(fake.context, Shortcut)
+        yield* shortcut.toggle(true)
+        const events = yield* Effect.fork(Stream.runHead(shortcut.events))
+        yield* settle
+        const phone = client(sockets)
+        phone.hello()
+        // Connecting isn't using: the helper, there first, is still the one in use.
+        yield* Effect.scoped(Effect.zipRight(Effect.fork(fake.audio.play("/tmp/first.wav")), fake.next("play")))
+        expect(phone.told("play")).toHaveLength(0)
+        phone.say({ type: "pressed", key: "shortcut" })
+        expect(Option.map(yield* Fiber.join(events), ({ _tag }) => _tag)).toEqual(Option.some("Started"))
+        // Whether a dictation is on is told to every device, the phone too.
+        expect(phone.told("escape")).toEqual([{ type: "escape", on: true }])
+        const path = yield* sound
+        const playing = yield* Effect.fork(Effect.scoped(fake.audio.play(path)))
+        yield* settle
+        expect(phone.told("play")).toHaveLength(1)
+        yield* drop(playing)
+        phone.leave()
+        fake.order.length = 0
+        yield* Effect.scoped(Effect.zipRight(Effect.fork(fake.audio.play("/tmp/after.wav")), fake.next("play")))
+        expect(fake.order).toContain("play")
+      }),
+      "ctrl+option+cmd+space",
+    ))
+
+  test("a client connecting again as itself takes the place of the one before", () =>
+    run(
+      Effect.gen(function* () {
+        const context = yield* router()
+        const sockets = Option.getOrThrow(Context.get(context, Devices).sockets)
+        const first = client(sockets)
+        first.hello()
+        const second = client(sockets)
+        second.hello()
+        expect(first.closed()).toBe(true)
+        const path = yield* sound
+        const playing = yield* Effect.fork(Effect.scoped(Context.get(context, Audio).play(path)))
+        yield* settle
+        expect(first.told("play")).toHaveLength(0)
+        expect(second.told("play")).toHaveLength(1)
+        // Stopped, it says so, and stays.
+        const stopping = yield* Effect.fork(Fiber.interrupt(playing))
+        yield* settle
+        second.say({ type: "stopped", id: second.told("play")[0]?.id, at: 0 })
+        yield* Fiber.join(stopping)
+        // Played again, it's sent no file, since it has it.
+        const again = yield* Effect.fork(Effect.scoped(Context.get(context, Audio).play(path)))
+        yield* settle
+        expect(second.told("play")).toHaveLength(2)
+        expect(second.sent.filter((data) => data instanceof Uint8Array)).toHaveLength(1)
+        yield* drop(again)
       }),
     ))
 })
