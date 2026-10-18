@@ -62,6 +62,8 @@ final class Talk {
   @ObservationIgnored private let speaker = Speaker()
   @ObservationIgnored private let connection = Connection()
   @ObservationIgnored private var activity: Activity<TalkAttributes>?
+  /// The last change to the Live Activity, which the next waits for, so an older state can't land after a newer one.
+  @ObservationIgnored private var updating: Task<Void, Never>?
   @ObservationIgnored private var idle: Task<Void, Never>?
   /// The same every time, so yapd knows it again.
   @ObservationIgnored private let id: String = {
@@ -77,6 +79,10 @@ final class Talk {
   static var sendsOnPause: Bool { UserDefaults.standard.object(forKey: "sendsOnPause") as? Bool ?? true }
 
   init() {
+    // One left from an app iOS ended while it showed would stay on the Lock Screen, saying what it did then.
+    for left in Activity<TalkAttributes>.activities {
+      Task { await left.end(nil, dismissalPolicy: .immediate) }
+    }
     let connection = connection
     let speaker = speaker
     speaker.tell = { connection.send($0) }
@@ -279,22 +285,27 @@ final class Talk {
   private func hold() {
     guard holding == .invalid else { return }
     holding = UIApplication.shared.beginBackgroundTask(withName: "yapd") { [weak self] in
-      MainActor.assumeIsolated { self?.letGo() }
+      MainActor.assumeIsolated { self?.letGo(expired: true) }
     }
   }
 
   /// Done for now: off the connection when it's in the background, with the microphone and the Live Activity gone either way.
-  private func letGo() {
+  private func letGo(expired: Bool = false) {
     idle?.cancel()
     idle = nil
     if !foreground {
       connection.disconnect()
       speaker.close()
     }
-    end()
-    if holding != .invalid {
-      UIApplication.shared.endBackgroundTask(holding)
-      holding = .invalid
+    let ending = end()
+    let held = holding
+    holding = .invalid
+    guard held != .invalid else { return }
+    // Awake until the Live Activity has gone, or iOS could suspend it first and leave that on the Lock Screen. Unless iOS wants the time back now.
+    if expired { return UIApplication.shared.endBackgroundTask(held) }
+    Task {
+      await ending?.value
+      UIApplication.shared.endBackgroundTask(held)
     }
   }
 
@@ -320,13 +331,23 @@ final class Talk {
   private func update() {
     guard let activity else { return }
     let phase = phase
-    Task { await activity.update(.init(state: phase, staleDate: nil)) }
+    let before = updating
+    updating = Task {
+      await before?.value
+      await activity.update(.init(state: phase, staleDate: nil))
+    }
   }
 
-  private func end() {
-    guard let activity else { return }
+  @discardableResult
+  private func end() -> Task<Void, Never>? {
+    guard let activity else { return nil }
     self.activity = nil
-    Task { await activity.end(nil, dismissalPolicy: .immediate) }
+    let before = updating
+    updating = nil
+    return Task {
+      await before?.value
+      await activity.end(nil, dismissalPolicy: .immediate)
+    }
   }
 }
 
