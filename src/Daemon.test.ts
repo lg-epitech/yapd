@@ -501,7 +501,7 @@ const assisted = (
           Layer.succeed(Brain.Brain, {
             decide: (situation) => Effect.sync(() => model(situation)),
             // As the model is asked to: what he missed, from what it's given.
-            brief: (brief) => Effect.succeed(`You missed this: ${brief.groups.flatMap(({ rows }) => rows.map(({ said }) => said)).join(" ")}`),
+            brief: (brief) => Effect.succeed({ spoken: `You missed this: ${brief.groups.flatMap(({ rows }) => rows.map(({ said }) => said)).join(" ")}`, read: [] }),
           }),
           Persona.Plain,
         ),

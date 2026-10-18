@@ -1,8 +1,10 @@
 import { describe, expect, test } from "bun:test"
-import { Option, Schema } from "effect"
+import { Effect, Option, Schema } from "effect"
 import type * as Assistant from "./Assistant.ts"
 import * as Brain from "./Brain.ts"
 import type * as Conversation from "./Conversation.ts"
+import type { Kept } from "./Journal.ts"
+import * as Missed from "./Missed.ts"
 import * as Persona from "./Persona.ts"
 import * as Questions from "./Questions.ts"
 import type * as T3Actions from "./T3Actions.ts"
@@ -553,5 +555,40 @@ describe("handed over from an update", () => {
     expect(route(send(""), over("Tell it to rebase.", "hooked"))._tag).toBe("Act")
     // Another thread is acted on, never passed.
     expect(route(send(handle(mina)), over("Tell the Mina one to rebase.", "hooked"))._tag).toBe("Act")
+  })
+})
+
+describe("briefs", () => {
+  const nowhere = { threads: [], away: [] }
+  const kept = (id: number, thread: string, at: number, said: string, detail: Record<string, unknown> = {}): Kept => ({
+    id,
+    at,
+    kind: "update",
+    machine: "Rosie",
+    thread,
+    project: "yapd",
+    said,
+    detail,
+  })
+  const busy = Array.from({ length: 22 }, (_, index) => kept(index + 1, "busy", 1_000 + index, `Step ${index + 1}.`))
+  const asked = kept(30, "asked", 500, "Fee table or the old rates?", { priority: "needs-you", more: "The rates changed on Monday." })
+  const brief: Brain.Brief = { kind: "catchup", groups: Missed.group([...busy, asked], nowhere), left: { threads: 0, rows: 0 } }
+
+  test("the model sees each thread's updates together, oldest first, the newest twenty, with a handle only on what needs him", () => {
+    const prompt = Brain.briefPrompt(brief, nowhere, 10_000, Option.none())
+    const threads = prompt.slice(prompt.indexOf("THREADS, oldest first:"), prompt.indexOf("\n\nLEFT OUT:"))
+    const at = (said: string) => threads.indexOf(`«${said}»`)
+    expect(at("Fee table or the old rates? The rates changed on Monday.")).toBeLessThan(at("Step 3."))
+    expect(threads).toContain("r1, needs him")
+    expect(threads).not.toContain("r2")
+    expect(threads).toContain("the oldest 2 not shown")
+    expect(at("Step 2.")).toBe(-1)
+    expect(at("Step 3.")).toBeLessThan(at("Step 22."))
+  })
+
+  test("what the model writes is said with the rows it names read word for word as they were kept, in place and once", async () => {
+    const said = await Effect.runPromise(Brain.briefed(["The busy one got to step twenty-two.", "The other asks: r1", "r1", "."], brief, nowhere, Effect.succeed))
+    expect(said.spoken).toBe("The busy one got to step twenty-two. The other asks: Fee table or the old rates? The rates changed on Monday.")
+    expect(said.read.map(({ id }) => id)).toEqual([30])
   })
 })
