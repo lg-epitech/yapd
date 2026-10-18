@@ -1,5 +1,4 @@
 import { Effect, Fiber, Option, Schema } from "effect"
-import { hostname } from "node:os"
 import { wake } from "./ClaudeCode.ts"
 import * as Config from "./Config.ts"
 import * as Origin from "./Origin.ts"
@@ -48,7 +47,7 @@ export const hook = (agent: Agent, wait: boolean) =>
     // So new work can start where agents have run. Alongside the rest, and given up on if the disk is slow.
     const noting = yield* Effect.fork(Option.match(stop, { onNone: () => Effect.void, onSome: (stop) => note(agent, stop) }))
     yield* Effect.addFinalizer(() => Fiber.await(noting))
-    const origin = { ...Origin.fromEnv(process.env), host: hostname(), ...(project ? { project } : {}) }
+    const origin = { ...Origin.fromEnv(process.env), host: Origin.host(), ...(project ? { project } : {}) }
     const query = new URLSearchParams({ agent, origin: JSON.stringify(origin) })
     if (waiting) query.set("wait", "1")
     const response = yield* Effect.tryPromise((signal) =>

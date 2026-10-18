@@ -82,6 +82,14 @@ const none: Master = Effect.succeed(Option.none())
 const nowhere: Masters = () => none
 
 /**
+ * A yapd command as it's run on another machine: from /, since Bun would load
+ * a .env in the home directory SSH starts in, ahead of yapd's own, and with
+ * where `bun add -g` and `bun link` put it first on the path, since the one
+ * SSH commands get often leaves it out.
+ */
+export const remotely = (command: string) => `cd / && PATH="$HOME/.bun/bin:$PATH" yapd ${command}`
+
+/**
  * Runs a yapd command on another machine and returns the line it answered
  * with. The command is fixed and what it's given goes over stdin: SSH joins its
  * arguments into a shell command, and what names the machine or fills the
@@ -96,7 +104,7 @@ export const ask = <E>(
   exec: Exec,
   host: string,
   destination: string,
-  command: "relay" | "start" | "catalog" | "t3",
+  command: "relay" | "start" | "catalog" | "t3" | "join",
   stdin: string,
   // `silent` and `failed` end the sentences that start with the machine's name, as `heard.cut` does.
   wording: { readonly patience: Duration.DurationInput; readonly silent: string; readonly failed: string },
@@ -112,7 +120,7 @@ export const ask = <E>(
         "ssh",
         ...Option.match(socket, { onNone: () => [], onSome: (path) => ["-S", path] }),
         // Forwards the user's SSH config sets for the machine would be asked for again with each command, and clash.
-        "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-o", "ClearAllForwardings=yes", "--", destination, `cd / && yapd ${command}`,
+        "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-o", "ClearAllForwardings=yes", "--", destination, remotely(command),
       ],
       stdin,
     ),

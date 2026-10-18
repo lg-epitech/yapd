@@ -1,9 +1,10 @@
-import { Clock, Context, Deferred, Effect, Layer, Logger, Option, PubSub, Schedule, Stream } from "effect"
+import { Clock, Context, Deferred, Effect, Layer, Logger, Option, PubSub, Redacted, Schedule, Stream } from "effect"
 import { hostname } from "node:os"
 import * as Assistant from "./Assistant.ts"
-import { Activity, DeviceAudio } from "./Audio.ts"
+import { Activity, DeviceAudio, Devices } from "./Audio.ts"
 import { answersTo, modeCommand, modeLines, ProviderBrain, remembered as inMind } from "./Brain.ts"
 import * as ClaudeCode from "./ClaudeCode.ts"
+import * as Clients from "./Clients.ts"
 import * as CliLauncher from "./CliLauncher.ts"
 import * as Codex from "./Codex.ts"
 import { ProviderCondenser } from "./Condenser.ts"
@@ -102,6 +103,8 @@ const usage = "5 minutes"
 
 export const serve = Effect.gen(function* () {
   const started = yield* Clock.currentTimeMillis
+  // The machines that use yapd here, each reached through the connection it keeps open to this one.
+  yield* Clients.forward(Clients.joined())
   const preferences = yield* Preferences.path
   // His routines in the file, read each time, from the whole of it, so one he adds is there for the next thing he says: never one called
   // as yapd answers to already, which would never be heard as the routine.
@@ -294,7 +297,11 @@ export const serve = Effect.gen(function* () {
     ...(guess === undefined ? {} : { guess }),
   })
   yield* Effect.logInfo(`Your rules for new work go in ${preferences}`)
-  const show = yield* Show.make(threads.detail)
+  const devices = yield* Devices
+  // Opened on the device in use: on this Mac, or the client he last talked to, when it can.
+  const show = yield* Show.make(threads.detail, (address) =>
+    Effect.flatMap(devices.open(address), (opened) => (opened ? Effect.void : Effect.fail(new Error("Nothing here can open it")))),
+  )
   const assistant = yield* Assistant.make({
     threads,
     journal,
@@ -509,7 +516,8 @@ export const serve = Effect.gen(function* () {
     // its row counts it.
     details: Latest.details({ latest, threads, mutes, journal, listing: served.threads, missed }),
     icon: icons.image,
-  })
+    audio: devices.sockets,
+  }, Option.map(yield* settings.read("token"), Redacted.make))
   // Asked as the user starts talking, so it's there by the time they've finished.
   yield* Effect.forkScoped(Stream.runForEach(dictation.presses, ({ press, turns, began }) => assistant.prepare(press, switcher.turns(press, turns), began)))
   // Each with the press it began with, which keeps what "it" meant then, however long the dictation took. "Mute." is heard at once, ahead
