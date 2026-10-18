@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.4.0](https://github.com/lg-epitech/yapd/compare/v0.3.0...v0.4.0) (2026-10-18)
+
+
+### Features
+
+* **dictation:** send a shortcut's dictation once you stop talking ([c6d76d0](https://github.com/lg-epitech/yapd/commit/c6d76d043882212efad5a6d8ea4dd45cc911cfd4))
+* **dictation:** send a shortcut's dictation once you stop talking, as the phone does ([58275d4](https://github.com/lg-epitech/yapd/commit/58275d43b48cffc2f5061462f1a7ae7f9a598a70))
+* **ios:** drop a dictation from the Dynamic Island ([ae26b75](https://github.com/lg-epitech/yapd/commit/ae26b75399260ece06ebed509935429c89b55b50))
+* **ios:** drop a dictation from the Dynamic Island ([0ea333c](https://github.com/lg-epitech/yapd/commit/0ea333cd615fbaea86acbb918de94f8901e88fd4))
+* **ios:** drop a dictation from the Dynamic Island, as from the Lock Screen ([2e2d834](https://github.com/lg-epitech/yapd/commit/2e2d834074e63ff5963154c315eb510118c58930))
+* **ios:** round buttons alike on the Live Activity, with dropping a dictation at the far right ([b0e7858](https://github.com/lg-epitech/yapd/commit/b0e785817bf9c235edce29c83a26ebfecca9ea01))
+* **ios:** round Live Activity buttons, cancel at the far right ([0b8f1ab](https://github.com/lg-epitech/yapd/commit/0b8f1ab797a133197490c5ecb1cfdd8a46379222))
+* **ios:** round Live Activity buttons, cancel at the far right ([4b643f3](https://github.com/lg-epitech/yapd/commit/4b643f37f6631b98d5238f4772c4196173f9d9e4))
+* **ios:** send a dictation once you stop talking ([0e2616e](https://github.com/lg-epitech/yapd/commit/0e2616e87549c8c4c5095d0df3b66c3311fb7464))
+* send dictations once you stop talking ([b4d5078](https://github.com/lg-epitech/yapd/commit/b4d5078bcb75935835101c02a4a060b7741009da))
+
+
+### Bug Fixes
+
+* **ios:** end every background task once, the expiring one too, while a Live Activity is still going ([3baaabc](https://github.com/lg-epitech/yapd/commit/3baaabc5ead71c0538253aa7c0db30e05af70e2a))
+* **ios:** end the Live Activity before letting go, and any left from before, so none stays behind saying yapd is ready ([91d6b28](https://github.com/lg-epitech/yapd/commit/91d6b28f17a27605c01c1ec5fca8ba4b47faa4cf))
+
 ## [0.3.0](https://github.com/lg-epitech/yapd/compare/v0.2.0...v0.3.0) (2026-10-18)
 
 yapd can now run on an always-on machine and talk to you through your Mac or your iPhone.
