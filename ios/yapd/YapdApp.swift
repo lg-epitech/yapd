@@ -13,6 +13,9 @@ struct YapdApp: App {
   var body: some Scene {
     WindowGroup {
       Home(talk: talk)
+        // Dark, like the arc reactor in the menu bar.
+        .preferredColorScheme(.dark)
+        .tint(.cyan)
         .onOpenURL { talk.open($0) }
         .onChange(of: phase, initial: true) { _, phase in talk.appeared(phase == .active) }
     }
@@ -52,6 +55,8 @@ struct Home: View {
         }
       }
       .padding(32)
+      .frame(maxWidth: .infinity, maxHeight: .infinity)
+      .background(Color.black.ignoresSafeArea())
       .toolbar {
         Button { settings = true } label: { Image(systemName: "gearshape") }
       }
@@ -65,8 +70,9 @@ struct Home: View {
     } label: {
       ZStack {
         Circle()
-          .fill(talk.dictating ? Color.cyan : Color.cyan.opacity(0.15))
+          .fill(talk.dictating ? Color.cyan : Color.cyan.opacity(0.12))
           .overlay(Circle().stroke(Color.cyan, lineWidth: 3))
+          .shadow(color: .cyan.opacity(talk.connected ? 0.6 : 0), radius: talk.dictating ? 40 : 20)
         Image(systemName: talk.dictating ? "paperplane.fill" : talk.playing ? "speaker.wave.2.fill" : "mic.fill")
           .font(.system(size: 64))
           .foregroundStyle(talk.dictating ? Color.black : Color.cyan)
