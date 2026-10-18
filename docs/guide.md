@@ -131,7 +131,7 @@ A session another app drives, like T3 Code, only gets follow-ups through that ap
 
 ## Dictating
 
-Press ctrl+option+cmd+space from any app and talk to yapd, then press it again to send, or Escape to drop it. A short rising sound says it's listening, a higher one that it's sent, a falling one that it's dropped. Take your time: pausing to think doesn't end it, only the shortcut does. What you said goes to [the assistant](#asking-yapd).
+Press ctrl+option+cmd+space from any app and talk to yapd. Once you've been quiet for about two seconds, it's sent, so you needn't press again, though you can, sooner. Escape drops it. A short rising sound says it's listening, a higher one that it's sent, a falling one that it's dropped. A shorter pause to think doesn't end it. To send only when you press again, set `YAPD_SEND_ON_PAUSE=false`; on a [server](#running-yapd-on-a-server), that's for every Mac that connects, and [your phone](#your-phone) has its own setting. What you said goes to [the assistant](#asking-yapd).
 
 If yapd is reading an update when you press it, it stops, and reads it again from the start once you're done, along with anything that came in meanwhile. If you forget about it, it stops listening after five minutes and drops what it heard. It doesn't need any permission beyond the microphone.
 
@@ -413,7 +413,7 @@ bun run phone
 
 The first time, trust the app on the phone in Settings, General, VPN & Device Management. With a free Apple ID it stops opening after a week, until you run that again. Scan the code `yapd pair` printed with the camera, or type in what it printed, and allow the microphone.
 
-Press its button to talk, and again to send, as with the shortcut. To talk without opening it, set the Action button to Controls, then Talk to yapd: press it, talk, and press it again. "Talk to yapd" is in Shortcuts and Control Center too. While you talk, a Live Activity says what yapd is doing, with buttons to send and to drop it. The phone is the device yapd speaks through from your first press until a little after it goes quiet with the app in the background, when it lets go, and yapd goes back to your Mac.
+Press its button to talk, and it sends what you said once you've been quiet for about two seconds, so you needn't press again, though you still can, sooner. To press again to send, as with the shortcut, turn off Send when I stop talking in its settings. To talk without opening it, set the Action button to Controls, then Talk to yapd: hold it, and talk. "Talk to yapd" is in Shortcuts and Control Center too. While you talk, a Live Activity says what yapd is doing, with buttons to send and to drop it. The phone is the device yapd speaks through from your first press until a little after it goes quiet with the app in the background, when it lets go, and yapd goes back to your Mac.
 
 ## Agents on another machine
 

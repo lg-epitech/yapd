@@ -73,6 +73,9 @@ final class Talk {
 
   var paired: Bool { server != nil && Keychain.token != nil }
 
+  /// Whether what's dictated here is sent once you stop talking, so the Action button needn't be held again: on unless turned off.
+  static var sendsOnPause: Bool { UserDefaults.standard.object(forKey: "sendsOnPause") as? Bool ?? true }
+
   init() {
     let connection = connection
     let speaker = speaker
@@ -190,7 +193,7 @@ final class Talk {
       settle()
       return
     }
-    connection.send(["type": "pressed", "key": "shortcut"])
+    connection.send(["type": "pressed", "key": "shortcut", "onPause": Talk.sendsOnPause])
   }
 
   /// Drops what's being dictated, as Escape does on the Mac.

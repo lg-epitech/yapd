@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { Audio, tone, wav } from "./Audio.ts"
-import { defaults } from "./Endpointer.ts"
+import { defaults, Endpointer } from "./Endpointer.ts"
 import * as Floor from "./Floor.ts"
 import { dated } from "./Latency.ts"
 import { Shortcut } from "./Shortcut.ts"
@@ -12,7 +12,8 @@ import { Vad } from "./Vad.ts"
 import { extension, Voice } from "./Voice.ts"
 
 // Dictating new work: the user presses the shortcut, talks for as long as they
-// like, pausing to think, and presses it again to send. Updates wait meanwhile.
+// like, pausing to think, and presses it again to send, or it's sent once they
+// stop talking, unless that's turned off. Updates wait meanwhile.
 // It ends at what they said, or at nothing; what's done with it is up to
 // whoever listens.
 
@@ -60,6 +61,11 @@ const longest = "5 minutes"
 const frameLength = 512
 /** Seconds in each frame. */
 const perFrame = frameLength / 16000
+/**
+ * Frames of silence after speech that send a dictation started to be sent once
+ * he stops talking: about two seconds, longer than he pauses to think mid-sentence.
+ */
+const pause = Math.floor((2 * 16000) / frameLength)
 /** Frames Whisper hears at once, just under its 30 seconds. */
 const whole = Math.floor((29 * 16000) / frameLength)
 /** Frames kept either side of speech, so no word is clipped. */
@@ -203,6 +209,10 @@ export const WhisperDictation = Layer.scoped(
     /** Ends a dictation from this side, unless the shortcut has moved on to the next one. */
     const cancel = (ended: Deferred.Deferred<Ending>) => Effect.suspend(() => (ending === ended ? shortcut.cancel : Effect.void))
 
+    /** Sends a dictation from this side, as he stopped talking, unless the shortcut has moved on to the next one. */
+    const send = (ended: Deferred.Deferred<Ending>) =>
+      Effect.suspend(() => (ending === ended ? Effect.zipRight(Effect.logInfo("Sending the dictation: he stopped talking"), shortcut.send) : Effect.void))
+
     /** Each window on its own, since Whisper only hears 30 seconds. Empty when there was no speech. */
     const transcribe = (frames: ReadonlyArray<Float32Array>, voiced: ReadonlyArray<boolean>) =>
       Effect.gen(function* () {
@@ -234,9 +244,10 @@ export const WhisperDictation = Layer.scoped(
     /**
      * From the first sound until the microphone is off, holding the speaker and
      * microphone, so the next dictation waits for them rather than have this one
-     * turn its microphone off. Nothing without a microphone.
+     * turn its microphone off. Nothing without a microphone. `onPause`, it's
+     * sent once he has spoken and then gone quiet for `pause`.
      */
-    const record = (ended: Deferred.Deferred<Ending>, scope: Scope.Scope) =>
+    const record = (ended: Deferred.Deferred<Ending>, scope: Scope.Scope, onPause: boolean) =>
       Effect.gen(function* () {
         // A device with its microphone open already, like a phone, which opens it as it's pressed, is heard from now, however
         // long the note takes to get there and play: he needn't wait for it. One that opens it to play the note, like the
@@ -251,6 +262,15 @@ export const WhisperDictation = Layer.scoped(
         const detect = yield* Effect.option(vad.make)
         const frames: Array<Float32Array> = []
         const voiced: Array<boolean> = []
+        // Speech, rather than a cough or a click, then silence, frame for frame. Never while everything counts as speech.
+        const endpointer = new Endpointer()
+        let spoke = false
+        let quiet = 0
+        const stopped = (frame: Float32Array, probability: number) => {
+          spoke ||= endpointer.push(frame, probability)?._tag === "Speech"
+          quiet = probability >= defaults.on ? 0 : quiet + 1
+          return spoke && quiet === pause
+        }
         const pending = yield* Queue.unbounded<Option.Option<Float32Array>>()
         yield* Scope.addFinalizer(scope, Queue.shutdown(pending))
         // Detection can lag behind capture. It keeps its own turn after sending,
@@ -262,7 +282,12 @@ export const WhisperDictation = Layer.scoped(
             Option.match(detect, {
               onNone: () => Effect.succeed(1),
               onSome: (detect) => Effect.orElseSucceed(detect(frame), () => 1),
-            }).pipe(Effect.map((probability) => void voiced.push(probability >= defaults.on))),
+            }).pipe(
+              Effect.flatMap((probability) => {
+                voiced.push(probability >= defaults.on)
+                return onPause && stopped(frame, probability) ? send(ended) : Effect.void
+              }),
+            ),
           ),
           Effect.forkIn(scope),
         )
@@ -320,9 +345,9 @@ export const WhisperDictation = Layer.scoped(
      * saying why. One that failed came to nothing too, which is passed on like
      * the rest, so whoever waits on its press knows it's over.
      */
-    const hear = (ended: Deferred.Deferred<Ending>) =>
+    const hear = (ended: Deferred.Deferred<Ending>, onPause: boolean) =>
       Effect.gen(function* () {
-        const recorded = yield* record(ended, yield* Effect.scope)
+        const recorded = yield* record(ended, yield* Effect.scope, onPause)
         const nothing = { ...silence, at: recorded?.at ?? (yield* Clock.currentTimeMillis) }
         if (recorded === undefined) {
           yield* cancel(ended)
@@ -371,12 +396,18 @@ export const WhisperDictation = Layer.scoped(
      * at once, never waiting for those before it, which turning off then
      * drops; those after it still wait for them.
      */
-    const dictate = (press: Press, ended: Deferred.Deferred<Ending>, before: Deferred.Deferred<void> | undefined, done: Deferred.Deferred<void>) =>
+    const dictate = (
+      press: Press,
+      ended: Deferred.Deferred<Ending>,
+      before: Deferred.Deferred<void> | undefined,
+      done: Deferred.Deferred<void>,
+      onPause: boolean,
+    ) =>
       Effect.gen(function* () {
         // While they talk, which is plenty of time.
         yield* Effect.forkIn(transcriber.prepare, scope)
         yield* Floor.take
-        const heard = yield* hear(ended)
+        const heard = yield* hear(ended, onPause)
         const earlier = before === undefined ? Effect.void : Deferred.await(before)
         if (!(yield* ahead(heard.text))) yield* earlier
         yield* PubSub.publish(transcripts, { ...press, heard: heard.text, voiced: heard.voiced, at: heard.at, drops })
@@ -404,7 +435,7 @@ export const WhisperDictation = Layer.scoped(
             ending = ended
             last = done
             yield* PubSub.publish(presses, { ...press, drops })
-            return yield* FiberSet.run(dictations, dictate(press, ended, before, done))
+            return yield* FiberSet.run(dictations, dictate(press, ended, before, done, event.onPause === true))
           }
           if (ending !== undefined) yield* Deferred.succeed(ending, { end: event._tag, at: yield* Clock.currentTimeMillis })
           ending = undefined

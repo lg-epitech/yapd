@@ -41,6 +41,30 @@ describe("Shortcut", () => {
     ])
   })
 
+  test("sends from this side only while dictating, and says whether a press from a phone starts one to send on a pause", async () => {
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const sent: Array<object> = []
+        const shortcut = yield* Shortcut.make({ key: "space", modifiers: ["ctrl"] }, (message) => sent.push(message), true)
+        const fiber = yield* Effect.fork(Stream.runCollect(Stream.take(shortcut.service.events, 3)))
+        yield* Effect.yieldNow()
+        yield* shortcut.service.send
+        yield* shortcut.direct("shortcut", true)
+        yield* shortcut.service.send
+        yield* shortcut.service.send
+        yield* shortcut.direct("shortcut")
+        const events = yield* Fiber.join(fiber).pipe(Effect.timeout("1 second"))
+        return { sent, events: [...events] }
+      }),
+    )
+    expect(result.events).toEqual([{ _tag: "Started", onPause: true }, { _tag: "Sent" }, { _tag: "Started", onPause: false }])
+    expect(result.sent).toEqual([
+      { type: "escape", on: true },
+      { type: "escape", on: false },
+      { type: "escape", on: true },
+    ])
+  })
+
   test("holds no keys and starts nothing until it's on", async () => {
     const result = await Effect.runPromise(
       Effect.gen(function* () {
