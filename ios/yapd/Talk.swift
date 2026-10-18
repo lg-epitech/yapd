@@ -281,16 +281,26 @@ final class Talk {
   }
 
   @ObservationIgnored private var holding: UIBackgroundTaskIdentifier = .invalid
+  /// Background tasks not yet ended: the one held, and any kept after letting go until its Live Activity has gone.
+  @ObservationIgnored private var kept: Set<UIBackgroundTaskIdentifier> = []
 
   private func hold() {
     guard holding == .invalid else { return }
     holding = UIApplication.shared.beginBackgroundTask(withName: "yapd") { [weak self] in
-      MainActor.assumeIsolated { self?.letGo(expired: true) }
+      MainActor.assumeIsolated { self?.expired() }
     }
+    if holding != .invalid { kept.insert(holding) }
+  }
+
+  /// The app's time in the background is up, which it is for every task at once: it lets go, and they all end now, as iOS requires.
+  private func expired() {
+    letGo()
+    for task in kept { UIApplication.shared.endBackgroundTask(task) }
+    kept = []
   }
 
   /// Done for now: off the connection when it's in the background, with the microphone and the Live Activity gone either way.
-  private func letGo(expired: Bool = false) {
+  private func letGo() {
     idle?.cancel()
     idle = nil
     if !foreground {
@@ -301,10 +311,10 @@ final class Talk {
     let held = holding
     holding = .invalid
     guard held != .invalid else { return }
-    // Awake until the Live Activity has gone, or iOS could suspend it first and leave that on the Lock Screen. Unless iOS wants the time back now.
-    if expired { return UIApplication.shared.endBackgroundTask(held) }
+    // Awake until the Live Activity has gone, or iOS could suspend it first and leave that on the Lock Screen.
     Task {
       await ending?.value
+      guard kept.remove(held) != nil else { return }
       UIApplication.shared.endBackgroundTask(held)
     }
   }
