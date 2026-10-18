@@ -403,6 +403,16 @@ yapd pair
 
 That makes a token, has yapd listen on the server's tailnet address for whatever bears it, and prints a `yapd://pair` link and a QR code for the phone, and the address and token to type in instead. `yapd pair --new` makes another, and turns the old one away.
 
+The iPhone app is in `ios/`, and isn't on the App Store. To put it on your phone from a clone, sign in to Xcode with your Apple ID (Settings, Accounts: a free one works), connect the phone with a cable, trust the Mac, turn on Developer Mode on the phone, then:
+
+```sh
+bun run phone
+```
+
+The first time, trust the app on the phone in Settings, General, VPN & Device Management. With a free Apple ID it stops opening after a week, until you run that again. Scan the code `yapd pair` printed with the camera, or type in what it printed, and allow the microphone.
+
+Press its button to talk, and again to send, as with the shortcut. To talk without opening it, set the Action button to Controls, then Talk to yapd: press it, talk, and press it again. "Talk to yapd" is in Shortcuts and Control Center too. While you talk, a Live Activity says what yapd is doing, with buttons to send and to drop it. The phone is the device yapd speaks through from your first press until a little after it goes quiet with the app in the background, when it lets go, and yapd goes back to your Mac.
+
 ## Agents on another machine
 
 yapd speaks on one Mac, but the agents can run anywhere, like on a Linux server you SSH into. Set yapd up there too. Only the hooks go in, since that machine never speaks:

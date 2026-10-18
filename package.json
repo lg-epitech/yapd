@@ -35,6 +35,7 @@
     "start": "bun src/main.ts serve",
     "check": "tsc",
     "test": "bun test",
+    "phone": "bun scripts/phone.ts",
     "app": "xcodebuild -project app/yapd.xcodeproj -configuration Release -quiet install DSTROOT=\"$HOME\" && (pkill -x yapd && sleep 1 || true) && open \"$HOME/Applications/yapd.app\""
   },
   "dependencies": {

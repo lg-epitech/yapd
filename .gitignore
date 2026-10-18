@@ -3,3 +3,4 @@ node_modules/
 preferences.md
 app/build/
 xcuserdata/
+ios/build/
