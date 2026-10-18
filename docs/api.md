@@ -2,9 +2,11 @@
 
 yapd serves a small HTTP API on the port its hooks use, `127.0.0.1:4747` unless `YAPD_PORT` says otherwise. The [menu bar app](guide.md#menu-bar) only uses this API, so your own UI can do everything it does: a status bar module on Linux, a Stream Deck button, a script.
 
-It only listens on localhost. From another machine, forward the port over SSH, like `ssh -N -L 4747:127.0.0.1:4747 mac`. A machine whose hooks already reach yapd through a [reverse tunnel](guide.md#agents-on-another-machine) can use the API at the same address.
+It listens on localhost. A [client](guide.md#running-yapd-on-a-server) has the server's port at the same address, through its connection to it. From another machine, forward the port over SSH, like `ssh -N -L 4747:127.0.0.1:4747 server`.
 
-There's no authentication: anything that can reach the port can use it, as hooks do. Requests have to be addressed to `127.0.0.1`, `localhost` or `[::1]`, so a web page can't get in through a domain name of its own that points here, and a page from anywhere else can't read the responses, since yapd sends no CORS headers. Anything a browser marks as sent by a page, with an `Origin` header or a `Sec-Fetch-Site` other than `none`, is turned away too, so no page can have yapd act for it by posting blind; apps, scripts and `curl` send neither.
+From this machine there's no authentication: anything that can reach the port can use it, as hooks do. Requests have to be addressed to `127.0.0.1`, `localhost` or `[::1]`, so a web page can't get in through a domain name of its own that points here, and a page from anywhere else can't read the responses, since yapd sends no CORS headers. Anything a browser marks as sent by a page, with an `Origin` header or a `Sec-Fetch-Site` other than `none`, is turned away too, so no page can have yapd act for it by posting blind; apps, scripts and `curl` send neither.
+
+Once a phone is [paired](guide.md#your-phone), yapd also listens on this machine's tailnet address, at the same port, and takes the whole API there from whatever sends the token `yapd pair` gave out, as `Authorization: Bearer <token>`. Anything else there, and anything addressed to another name here without it, gets `403`.
 
 ## State
 
@@ -418,8 +420,54 @@ By voice: "read me its subagents" and "stop reading its subagents" over an updat
 
 It answers `400` when a query can't be read.
 
+## Audio
+
+`GET /audio` takes a WebSocket from a device that plays and listens for yapd, like the [phone app](guide.md#your-phone) or a [client](guide.md#running-yapd-on-a-server)'s audio helper. yapd says everything through the device you used last, the one you last pressed the shortcut or the button on, or the first to connect while you haven't pressed any. Something it started saying stays on the device it started on until it ends.
+
+It's the audio helper's own protocol, `src/Audio.swift`: JSON messages in text frames, and binary frames that start with a byte saying what they hold.
+
+The device starts with who it is, and says nothing counts until it has:
+
+```json
+{ "type": "hello", "permission": "authorized", "client": { "id": "iphone-6f1c", "name": "iPhone", "hotkeys": false, "opens": true } }
+```
+
+- `permission` is whether it may use its microphone: `authorized`, `denied` or `undetermined`. `{"type": "permission", "permission": ...}` says it again when it changes.
+- `id` stays the same each time it connects, so it's known again: another connection with the same `id` takes the place of the one before. `hotkeys` says it takes the shortcut's keys, like a Mac's helper, and `opens` that it opens addresses when asked.
+
+yapd tells it:
+
+| Message | |
+| --- | --- |
+| `{"type": "play", "id", "file", "from"}` | Play the file sent with that `file` id, from `from` seconds in, in place of whatever it's playing, which it doesn't say ended. A `file` it doesn't have, like `""`, gets `failed`. |
+| `{"type": "stop"}` | Stop playing, and say where it got to. |
+| `{"type": "volume", "value"}` | Set what's playing to that level, from 0 to 1. Each play starts at 1. |
+| `{"type": "rest"}` | Stop playing without a word, and close the microphone, until the next `play`. |
+| `{"type": "forget", "file"}` | That file won't be played again. yapd keeps at most sixteen sent. |
+| `{"type": "escape", "on"}` | Whether you're dictating, from the press that starts it until it's sent or dropped. |
+| `{"type": "shortcut", "key", "modifiers"}` | Only to a device with `hotkeys`: take these keys, or none when there's no `key`. |
+| `{"type": "open", "url"}` | Only to a device that `opens`: open this address, only ever `https`. |
+
+A file comes as a binary frame: the byte `2`, a big-endian 32-bit length, a JSON header of that length, `{"file": "<id>"}`, then the file, a WAV of 16-bit mono. It comes before the `play` that names it, and sometimes well before, as soon as yapd knows it'll be played.
+
+The device tells yapd:
+
+| Message | |
+| --- | --- |
+| `{"type": "active", "listening"}` | Whether its microphone is open now, which it opens with the first `play` after a `rest`. While it's open, its echo cancellation learns yapd's voice afresh. |
+| `{"type": "playing", "id", "duration"}` | It started playing that, `duration` seconds long. yapd waits fifteen seconds for this before it gives up on a play. |
+| `{"type": "finished", "id"}` | It played it to the end. |
+| `{"type": "stopped", "id", "at"}` | It stopped at `at` seconds, as told. Without an `id`, nothing was playing. yapd waits five seconds for this, then drops the connection. |
+| `{"type": "failed", "id", "message"}` | It couldn't play it. |
+| `{"type": "rested"}` | It closed its microphone of its own accord. |
+| `{"type": "pressed", "key"}` | You pressed `shortcut`, to start dictating or to send it, or `escape`, to drop it. A phone's button is `shortcut`. |
+| `{"type": "shortcut", "registered", "message"}` | From a device with `hotkeys`: whether it took the keys, and why not. |
+| `{"type": "error", "message"}` | Something went wrong, for yapd's log. |
+
+While its microphone is open, it sends what it hears as binary frames: the byte `3` and 512 samples of 16 kHz mono as 16-bit little-endian integers, 32 ms each. The byte `1` and the same samples as 32-bit floats is what the Mac's helper sends, and works too. Echo cancellation is the device's to do, as the helper does with macOS's voice processing.
+
 ## Errors
 
-Besides those, `400` means the body couldn't be read, `403` that the request was addressed to another host or came from a web page, and `500` that something went wrong in yapd, which its log says more about. `GET /health` answers `ok` while yapd runs.
+Besides those, `400` means the body couldn't be read, `403` that the request was addressed to another host or came from a web page without the token, and `500` that something went wrong in yapd, which its log says more about. `GET /health` answers `ok` while yapd runs.
 
 `POST /events` is for the hooks, and isn't part of this API.

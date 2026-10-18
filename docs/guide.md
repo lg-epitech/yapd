@@ -2,7 +2,7 @@
 
 Everything the [README](../README.md) skips: how each part works, and every setting.
 
-Needs a Mac with Apple silicon, [Bun](https://bun.sh), Xcode's command line tools (`xcode-select --install`) and any of the [available providers](#providers). The agents can also run [on other machines](#agents-on-another-machine), Linux included. Most of what yapd does with your threads goes through [T3 Code](#t3-code).
+Needs a Mac with Apple silicon, [Bun](https://bun.sh), Xcode's command line tools (`xcode-select --install`) and any of the [available providers](#providers). The agents can also run [on other machines](#agents-on-another-machine), Linux included, and yapd itself can [run on a server](#running-yapd-on-a-server), Linux too, and speak through your Mac or your phone. Most of what yapd does with your threads goes through [T3 Code](#t3-code).
 
 The voice is [Kokoro](https://huggingface.co/hexgrad/Kokoro-82M), which runs locally, on your Mac's GPU when it can, and downloads on first start. It only speaks English, so yapd translates updates written in other languages, and has any other words that slip through translated before it says them. It also keeps to what can be said aloud: it says "the wallet address" or "its ID" rather than reading one out.
 
@@ -364,6 +364,44 @@ Several at once, to archive, settle or snooze them, up to six: "archive all the 
 A thread at work is never archived without your yes, since archiving it stops what it's doing: "The billing importer is still working, and archiving it stops what it's doing. Archive it anyway?" One that's busy, or waiting on you, can't be settled, and yapd says so. A title that isn't your words as heard, or a thread yapd isn't sure you meant, is asked about first.
 
 "Scratch that" right after takes a tidy back as far as T3 Code lets it: a snooze or a settle that pinning cleared is put back, but what archiving stopped stays stopped, and unsettling marks a thread active rather than as T3 Code would have it. Tidying never deletes a thread, and needs a [T3 Code token](#t3-code).
+
+## Running yapd on a server
+
+yapd can run on a machine that's always on, like a Linux box at home, and talk to you through whichever of your machines you're at, or your phone. The server does all the work: the models, the voice, the listening and the threads. The others only play what it says and send it what they hear, so they can sleep, close or go off the network without taking yapd with them.
+
+On the server:
+
+```sh
+bun add -g @launatic/yapd
+yapd setup server
+```
+
+That's [setup](#setup) as on a Mac, with systemd on Linux. Its log is `journalctl --user -u yapd`. To keep it running while you're logged out, `sudo loginctl enable-linger $USER`, which setup reminds you of. Your settings, rules and the T3 Code token for the server's own T3 Code go in its `~/.yapd`, and so does `YAPD_SHORTCUT`, which every client takes.
+
+Then on each machine that uses it, say a Mac:
+
+```sh
+bun add -g @launatic/yapd
+yapd setup client me@server
+```
+
+`me@server` is how you SSH there, with a key that needs no password. The client asks the server to take it in, under the name you gave it with `YAPD_NAME` or its hostname, and keeps one SSH connection open to it, which brings the server's port to this machine's `127.0.0.1:4747`. So the hooks here and the [menu bar app](#menu-bar) reach yapd as if it ran here. On a Mac, the client also runs the audio helper, so yapd speaks and listens here and the shortcut works. Its log is `~/Library/Logs/yapd-client.log`, or `journalctl --user -u yapd-client` on Linux, where it doesn't play or listen yet.
+
+That same connection carries the server back to this machine's SSH, whatever network it's on, so the server reaches the threads here, sends follow-ups and starts work here as it does for [agents on another machine](#agents-on-another-machine), without you listing it in `YAPD_REMOTES`. That needs the SSH server on: on a Mac, Remote Login in System Settings, General, Sharing. Setup adds the server's key to `~/.ssh/authorized_keys`, allowed only from this machine itself, which is where its connection arrives. The server runs `yapd` here by its `~/.bun/bin` or the `PATH` SSH commands get.
+
+yapd speaks through the device you used last, the one you last pressed the shortcut or the button on, and otherwise the one that connected first. What it started saying finishes there. When nothing is connected, what comes in is summed up and kept, as when it's [off](#turning-yapd-off), for when you ask to be caught up.
+
+On a server without a GPU it can use, the voice renders on the CPU. A line plays once it's all rendered, unless the CPU renders it a few times faster than it's spoken, as a server's many cores often do: then its first sentences play while the rest renders, as on a Mac.
+
+### Your phone
+
+A phone reaches the server over [Tailscale](https://tailscale.com), with no SSH. On the server:
+
+```sh
+yapd pair
+```
+
+That makes a token, has yapd listen on the server's tailnet address for whatever bears it, and prints a `yapd://pair` link and a QR code for the phone, and the address and token to type in instead. `yapd pair --new` makes another, and turns the old one away.
 
 ## Agents on another machine
 
