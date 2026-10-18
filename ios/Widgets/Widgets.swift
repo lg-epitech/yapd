@@ -24,7 +24,7 @@ struct TalkControl: ControlWidget {
   }
 }
 
-/// What it says while the phone talks to yapd, with a button to send and one to drop it.
+/// What it says while the phone talks to yapd, with a button to send and one to drop it, on the Lock Screen and in the Dynamic Island.
 struct TalkActivity: Widget {
   var body: some WidgetConfiguration {
     ActivityConfiguration(for: TalkAttributes.self) { context in
@@ -56,8 +56,19 @@ struct TalkActivity: Widget {
           Text(words(context.state.state))
         }
         DynamicIslandExpandedRegion(.trailing) {
-          Button(intent: TalkIntent()) { Text(context.state.state == "listening" ? "Send" : "Talk") }
-            .tint(.cyan)
+          if context.state.state == "listening" {
+            HStack {
+              Button(intent: CancelIntent()) { Image(systemName: "xmark") }
+                .tint(.gray)
+              Button(intent: TalkIntent()) { Text("Send") }
+                .tint(.cyan)
+            }
+            // Two buttons may not fit beside the camera.
+            .dynamicIsland(verticalPlacement: .belowIfTooWide)
+          } else {
+            Button(intent: TalkIntent()) { Text("Talk") }
+              .tint(.cyan)
+          }
         }
       } compactLeading: {
         mark(context.state.state).frame(width: 20, height: 20)

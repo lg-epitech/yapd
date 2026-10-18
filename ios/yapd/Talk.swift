@@ -62,6 +62,8 @@ final class Talk {
   @ObservationIgnored private let speaker = Speaker()
   @ObservationIgnored private let connection = Connection()
   @ObservationIgnored private var activity: Activity<TalkAttributes>?
+  /// The last change to the Live Activity, which the next waits for, so an older state can't land after a newer one.
+  @ObservationIgnored private var updating: Task<Void, Never>?
   @ObservationIgnored private var idle: Task<Void, Never>?
   /// The same every time, so yapd knows it again.
   @ObservationIgnored private let id: String = {
@@ -77,6 +79,10 @@ final class Talk {
   static var sendsOnPause: Bool { UserDefaults.standard.object(forKey: "sendsOnPause") as? Bool ?? true }
 
   init() {
+    // One left from an app iOS ended while it showed would stay on the Lock Screen, saying what it did then.
+    for left in Activity<TalkAttributes>.activities {
+      Task { await left.end(nil, dismissalPolicy: .immediate) }
+    }
     let connection = connection
     let speaker = speaker
     speaker.tell = { connection.send($0) }
@@ -275,12 +281,22 @@ final class Talk {
   }
 
   @ObservationIgnored private var holding: UIBackgroundTaskIdentifier = .invalid
+  /// Background tasks not yet ended: the one held, and any kept after letting go until its Live Activity has gone.
+  @ObservationIgnored private var kept: Set<UIBackgroundTaskIdentifier> = []
 
   private func hold() {
     guard holding == .invalid else { return }
     holding = UIApplication.shared.beginBackgroundTask(withName: "yapd") { [weak self] in
-      MainActor.assumeIsolated { self?.letGo() }
+      MainActor.assumeIsolated { self?.expired() }
     }
+    if holding != .invalid { kept.insert(holding) }
+  }
+
+  /// The app's time in the background is up, which it is for every task at once: it lets go, and they all end now, as iOS requires.
+  private func expired() {
+    letGo()
+    for task in kept { UIApplication.shared.endBackgroundTask(task) }
+    kept = []
   }
 
   /// Done for now: off the connection when it's in the background, with the microphone and the Live Activity gone either way.
@@ -291,10 +307,15 @@ final class Talk {
       connection.disconnect()
       speaker.close()
     }
-    end()
-    if holding != .invalid {
-      UIApplication.shared.endBackgroundTask(holding)
-      holding = .invalid
+    let ending = end()
+    let held = holding
+    holding = .invalid
+    guard held != .invalid else { return }
+    // Awake until the Live Activity has gone, or iOS could suspend it first and leave that on the Lock Screen.
+    Task {
+      await ending?.value
+      guard kept.remove(held) != nil else { return }
+      UIApplication.shared.endBackgroundTask(held)
     }
   }
 
@@ -320,13 +341,23 @@ final class Talk {
   private func update() {
     guard let activity else { return }
     let phase = phase
-    Task { await activity.update(.init(state: phase, staleDate: nil)) }
+    let before = updating
+    updating = Task {
+      await before?.value
+      await activity.update(.init(state: phase, staleDate: nil))
+    }
   }
 
-  private func end() {
-    guard let activity else { return }
+  @discardableResult
+  private func end() -> Task<Void, Never>? {
+    guard let activity else { return nil }
     self.activity = nil
-    Task { await activity.end(nil, dismissalPolicy: .immediate) }
+    let before = updating
+    updating = nil
+    return Task {
+      await before?.value
+      await activity.end(nil, dismissalPolicy: .immediate)
+    }
   }
 }
 
