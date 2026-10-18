@@ -1,5 +1,7 @@
-import { Clock, Data, Effect, FiberSet, Option, Schema, type Scope, Stream } from "effect"
-import type { Doing } from "./Audio.ts"
+import { Clock, Data, Effect, FiberSet, Option, Redacted, Schedule, Schema, type Scope, Stream } from "effect"
+import { timingSafeEqual } from "node:crypto"
+import { networkInterfaces } from "node:os"
+import type { Doing, Sockets } from "./Audio.ts"
 import type * as Icons from "./Icons.ts"
 import { type Kind, kinds } from "./Journal.ts"
 import * as Mutes from "./Mutes.ts"
@@ -295,6 +297,8 @@ export interface Api {
    * none.
    */
   readonly cancelReminder: (id: number) => Effect.Effect<"done" | "fired" | "cancelled" | "unknown">
+  /** Clients' speakers and microphones, over `/audio`: none when nothing can join. */
+  readonly audio?: Option.Option<Sockets>
 }
 
 const decodeChange = Schema.decodeUnknownOption(
@@ -363,6 +367,34 @@ const decoded = Option.liftThrowable(decodeURIComponent)
 /** Names for this machine, so a web page can't reach the API through a DNS name of its own that points here. */
 const local = new Set(["127.0.0.1", "localhost", "[::1]"])
 
+/** Whether a request came from this machine. Through an SSH forward it does too, which only someone who can log in here opens. */
+const loopback = (address: string | undefined) => address === "127.0.0.1" || address === "::1" || address === "::ffff:127.0.0.1"
+
+/** Whether it carries the token `yapd pair` gave out, compared in constant time, as a bearer token. */
+const bearing = (request: Request, token: Option.Option<Redacted.Redacted>) => {
+  if (Option.isNone(token)) return false
+  const given = /^Bearer (.+)$/.exec(request.headers.get("authorization") ?? "")?.[1]
+  if (given === undefined) return false
+  const [a, b] = [Buffer.from(given), Buffer.from(Redacted.value(token.value))]
+  return a.length === b.length && timingSafeEqual(a, b)
+}
+
+/**
+ * This machine's addresses on its tailnet, which Tailscale gives out from
+ * 100.64.0.0/10, and fd7a:115c:a1e0::/48 for IPv6, read each time since it
+ * may come up after yapd.
+ */
+export const tailnet = (interfaces = networkInterfaces()): ReadonlyArray<string> =>
+  Object.values(interfaces)
+    .flatMap((addresses) => addresses ?? [])
+    .filter(({ internal }) => !internal)
+    .map(({ address }) => address)
+    .filter((address) => {
+      const v4 = /^100\.(\d+)\.\d+\.\d+$/.exec(address)
+      if (v4 !== null) return Number(v4[1]) >= 64 && Number(v4[1]) <= 127
+      return address.toLowerCase().startsWith("fd7a:115c:a1e0:")
+    })
+
 /**
  * Whether a web page sent it, which browsers always say, while yapd's hooks,
  * its app and scripts never do: a page could otherwise have yapd act on its
@@ -376,19 +408,31 @@ const fromPage = (request: Request) => {
 const failed = (what: string) => (error: unknown) =>
   Effect.logWarning(`Could not ${what}`, error).pipe(Effect.as(new Response(null, { status: 500 })))
 
-/** Takes hook events, and serves the API on localhost only. */
-export const serve = (port: number, api: Api) =>
+/**
+ * Takes hook events, and serves the API on localhost. With `token`, given out
+ * by `yapd pair`, it also listens on this machine's tailnet, for those who
+ * bear it, like a phone. Clients' speakers and microphones join on `/audio`.
+ */
+export const serve = (port: number, api: Api, token: Option.Option<Redacted.Redacted> = Option.none()) =>
   Effect.gen(function* () {
     const requests = yield* FiberSet.make<Response>()
     const runPromise = yield* FiberSet.runtimePromise(requests)()
     let closing = false
     const current = Effect.map(Stream.runHead(api.state), Option.getOrThrow)
 
+    /**
+     * Whether it may use the API: bearing the token, which no page can know
+     * unless he gave it one, or sent from this machine to it, by anything but
+     * a web page.
+     */
+    const allowed = (request: Request, server: Bun.Server<undefined>) =>
+      bearing(request, token) ||
+      (loopback(server.requestIP(request)?.address) && local.has(new URL(request.url).hostname) && !fromPage(request))
+
     const receive = (request: Request, server: Bun.Server<undefined>) =>
       Effect.gen(function* () {
         const url = new URL(request.url)
-        if (!local.has(url.hostname)) return new Response(null, { status: 403 })
-        if (fromPage(request)) return new Response(null, { status: 403 })
+        if (!allowed(request, server)) return new Response(null, { status: 403 })
         const route = `${request.method} ${url.pathname}`
         if (route === "GET /health") return new Response("ok")
         if (route === "POST /events") return yield* event(request, url, server)
@@ -619,20 +663,62 @@ export const serve = (port: number, api: Api) =>
         ),
       )
 
-    const server = yield* Effect.acquireRelease(
+    const sockets = Option.getOrUndefined(api.audio ?? Option.none())
+    const fetch = (request: Request, server: Bun.Server<undefined>) => {
+      if (closing) return new Response(null, { status: 503 })
+      // Right away rather than in a fiber, since the upgrade has to come before anything answers.
+      if (new URL(request.url).pathname === "/audio") {
+        if (!allowed(request, server)) return new Response(null, { status: 403 })
+        if (sockets === undefined) return new Response("Nothing can join yapd's audio here.", { status: 404 })
+        return server.upgrade(request, { data: undefined }) ? undefined : new Response("Connect a WebSocket.", { status: 400 })
+      }
+      return runPromise(receive(request, server))
+    }
+    const websocket: Bun.WebSocketHandler<undefined> = {
+      open: (socket) => sockets?.open(socket),
+      message: (socket, data) => sockets?.message(socket, typeof data === "string" ? data : new Uint8Array(data)),
+      close: (socket) => sockets?.close(socket),
+      // Audio is sent whole, however long it takes.
+      maxPayloadLength: 64 * 1024 * 1024,
+      idleTimeout: 0,
+      sendPings: true,
+    }
+    const listen = (hostname: string) =>
       Effect.try({
-        try: () =>
-          Bun.serve({
-            hostname: "127.0.0.1", port,
-            fetch: (request, server) => closing ? new Response(null, { status: 503 }) : runPromise(receive(request, server)),
-          }),
+        try: () => Bun.serve<undefined>({ hostname, port, fetch, websocket }),
         catch: (cause) => new ServeError({ cause }),
-      }),
-      (server) => Effect.sync(() => { closing = true }).pipe(
+      })
+    const stop = (server: Bun.Server<undefined>) => Effect.promise(() => server.stop(true))
+    const server = yield* Effect.acquireRelease(listen("127.0.0.1"), (server) =>
+      Effect.sync(() => {
+        closing = true
+      }).pipe(
         Effect.zipRight(FiberSet.clear(requests)),
-        Effect.zipRight(Effect.promise(() => server.stop(true))),
+        Effect.zipRight(Effect.suspend(() => Effect.forEach([...tailnets.values()], stop, { discard: true }))),
+        Effect.zipRight(stop(server)),
       ),
     )
     yield* Effect.logInfo(`Listening on http://127.0.0.1:${server.port}`)
+
+    /** Where it listens on the tailnet, by address, as Tailscale comes and goes. */
+    const tailnets = new Map<string, Bun.Server<undefined>>()
+    if (Option.isSome(token)) {
+      const follow = Effect.gen(function* () {
+        const addresses = tailnet()
+        for (const [address, listening] of tailnets) {
+          if (addresses.includes(address)) continue
+          tailnets.delete(address)
+          yield* stop(listening)
+        }
+        for (const address of addresses) {
+          if (tailnets.has(address) || closing) continue
+          const listening = yield* Effect.option(listen(address))
+          if (Option.isNone(listening)) continue
+          tailnets.set(address, listening.value)
+          yield* Effect.logInfo(`Listening on your tailnet at ${address.includes(":") ? `[${address}]` : address}:${port}, for what bears its token`)
+        }
+      })
+      yield* follow.pipe(Effect.repeat(Schedule.spaced("30 seconds")), Effect.forkScoped)
+    }
     return server
   })

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { Deferred, Effect, Exit, Option, Scope, Stream, SubscriptionRef } from "effect"
+import { Deferred, Effect, Exit, Option, Redacted, Scope, Stream, SubscriptionRef } from "effect"
 import * as Server from "./Server.ts"
 
 const payload = { hook_event_name: "Stop", session_id: "test", cwd: "/tmp", last_assistant_message: "Done." }
@@ -252,5 +252,32 @@ describe("Server", () => {
       expect(changed.status).toBe(200)
       expect(none.status).toBe(404)
     })))
+  })
+
+  test("addressed by another name, only what bears the token gets in, and without one nothing does", async () => {
+    await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
+      const paired = yield* Server.serve(0, hooks(() => Effect.succeed(undefined)), Option.some(Redacted.make("s3cret")))
+      const health = (port: number | undefined, headers: Record<string, string>) =>
+        Effect.promise(() => fetch(`http://127.0.0.1:${port}/health`, { headers: { host: "rig.tailnet.ts.net", ...headers } }).then(({ status }) => status))
+      expect(yield* health(paired.port, {})).toBe(403)
+      expect(yield* health(paired.port, { authorization: "Bearer nope" })).toBe(403)
+      expect(yield* health(paired.port, { authorization: "Bearer s3cret" })).toBe(200)
+      // A page of his own that he gave it to gets in too, while one without it never does.
+      expect(yield* health(paired.port, { authorization: "Bearer s3cret", origin: "https://mine.example" })).toBe(200)
+      expect(yield* health(paired.port, { origin: "https://evil.example" })).toBe(403)
+      const unpaired = yield* Server.serve(0, hooks(() => Effect.succeed(undefined)))
+      expect(yield* health(unpaired.port, { authorization: "Bearer s3cret" })).toBe(403)
+    })))
+  })
+
+  test("listens on the tailnet only at Tailscale's own addresses", () => {
+    const at = (address: string, internal = false) => ({ address, internal, netmask: "", family: address.includes(":") ? ("IPv6" as const) : ("IPv4" as const), mac: "", cidr: null })
+    expect(
+      Server.tailnet({
+        lo0: [at("127.0.0.1", true)],
+        en0: [at("192.168.1.20"), at("100.20.3.4")],
+        utun4: [at("100.74.185.79"), at("fd7a:115c:a1e0::9b01:b94f")],
+      } as never),
+    ).toEqual(["100.74.185.79", "fd7a:115c:a1e0::9b01:b94f"])
   })
 })

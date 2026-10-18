@@ -72,7 +72,7 @@ const runMain = (effect: Effect.Effect<void, unknown>) => {
 const [command, argument] = process.argv.slice(2)
 
 /** Commands that read the user's settings. Hooks don't, and start wherever the agent runs. */
-const settled = ["serve", "setup", "doctor", "install", "uninstall", "relay", "start", "catalog", "mind", "t3"]
+const settled = ["serve", "setup", "doctor", "install", "uninstall", "relay", "start", "catalog", "mind", "t3", "client", "join", "pair"]
 
 /** The environment a bun started with `env` in this folder ends up with, .env files and all. */
 const probe = (env: Record<string, string | undefined>): Record<string, string | undefined> =>
@@ -131,32 +131,103 @@ const doctor = Effect.gen(function* () {
 })
 
 const mac = process.platform === "darwin"
-// Intel Macs could run it before, so they can still remove the service.
-if ((command === "serve" || command === "install" || (command === "uninstall" && !mac)) && !(mac && process.arch === "arm64")) {
+/** Where yapd itself runs, rather than only its hooks and a client: a Mac with Apple silicon, or Linux. */
+const serves = (mac && process.arch === "arm64") || process.platform === "linux"
+/** A machine set up to use yapd on another, by `yapd setup client`. */
+const client = (process.env.YAPD_SERVER?.trim() ?? "") !== ""
+
+/** The clients that joined yapd here, alongside the machines in YAPD_REMOTES, read as it starts. */
+const withClients = <A, E>(effect: Effect.Effect<A, E>) =>
+  Effect.flatMap(Effect.promise(() => import("./Clients.ts")), (Clients) =>
+    Effect.suspend(() => {
+      process.env.YAPD_REMOTES = Clients.remotes(process.env.YAPD_REMOTES ?? "")
+      return effect
+    }),
+  )
+
+/** What a server says it's for, once it's set up. */
+const served = Console.log(
+  "Other machines use yapd here with yapd setup client and how to SSH here, like yapd setup client me@this-machine. A phone pairs with yapd pair.",
+)
+
+if ((command === "serve" || (command === "install" && !client)) && !serves) {
   console.error(
-    `yapd only speaks on Macs with Apple silicon. Here it runs hooks and relays follow-ups, which need no service.${
-      mac ? " To remove one installed before, run `yapd uninstall`." : ""
+    `yapd runs on Macs with Apple silicon and on Linux. Here it runs hooks and relays follow-ups, and can use yapd on another machine with yapd setup client.${
+      mac ? " To remove a service installed before, run `yapd uninstall`." : ""
     }`,
   )
   process.exit(1)
+} else if (command === "serve" && client) {
+  console.error(`This machine uses yapd on ${process.env.YAPD_SERVER}, so it runs yapd client. Take YAPD_SERVER out of its settings to run yapd here.`)
+  process.exit(1)
 } else if (command === "serve") {
-  runMain(Effect.flatMap(Effect.promise(() => import("./Serve.ts")), ({ serve }) => serve))
+  runMain(withClients(Effect.flatMap(Effect.promise(() => import("./Serve.ts")), ({ serve }) => serve)))
+} else if (command === "setup" && argument === "client") {
+  const server = process.argv[4]
+  if (server === undefined) {
+    console.error("usage: yapd setup client <how to SSH to the server, like me@server>")
+    process.exit(1)
+  }
+  runMain(
+    Effect.flatMap(Effect.promise(() => import("./Client.ts")), (Client) =>
+      Client.setup(server, Service.bun(), Service.main).pipe(
+        Effect.catchTag("ClientError", ({ reason }) => Effect.sync(() => {
+          console.error(reason)
+          process.exitCode = 1
+        })),
+      ),
+    ).pipe(Effect.zipRight(Effect.suspend(() => (process.exitCode === 1 ? Effect.void : doctor)))),
+  )
 } else if (command === "setup") {
   runMain(
     Effect.gen(function* () {
+      if (argument !== undefined && argument !== "server") {
+        console.error("usage: yapd setup | yapd setup server | yapd setup client <server>")
+        process.exitCode = 1
+        return
+      }
       yield* Setup.setup(Service.bun(), Service.main)
-      if (mac && process.arch === "arm64") yield* Service.install
-      else yield* Console.log("Here yapd runs hooks and relays follow-ups. It speaks on a Mac with Apple silicon, where setup also starts it.")
+      // On Linux it's asked for, since a server there may only be running agents for a Mac that reaches it.
+      if ((mac && process.arch === "arm64") || (argument === "server" && serves)) {
+        yield* Service.install("server")
+        yield* withClients(doctor)
+        if (argument === "server") yield* served
+        return
+      }
+      yield* Console.log(
+        serves
+          ? "Here yapd runs hooks and relays follow-ups. yapd setup server runs yapd itself here, for your other machines, and yapd setup client uses it on another."
+          : "Here yapd runs hooks and relays follow-ups. It runs on a Mac with Apple silicon or on Linux, and yapd setup client uses it from here.",
+      )
       yield* doctor
     }),
   )
 } else if (command === "doctor") {
-  runMain(doctor)
+  runMain(withClients(doctor))
 } else if (command === "install") {
   // The hooks too, since they carry settings like the port.
-  runMain(Effect.zipRight(Setup.refresh(Service.bun(), Service.main), Service.install))
+  runMain(
+    Effect.gen(function* () {
+      yield* Setup.refresh(Service.bun(), Service.main)
+      if (!client && !mac && !Service.installed("server")) {
+        return yield* Console.log("Here yapd only runs hooks, which are up to date. yapd setup server runs yapd itself here.")
+      }
+      yield* Service.install(client ? "client" : "server")
+    }),
+  )
 } else if (command === "uninstall") {
   runMain(Service.uninstall)
+} else if (command === "client") {
+  runMain(Effect.flatMap(Effect.promise(() => import("./Client.ts")), ({ client }) => client))
+} else if (command === "join") {
+  // Not for the user to run: it's how a client asks this machine to take it in, over SSH.
+  runMain(
+    Effect.flatMap(Effect.promise(() => import("./Clients.ts")), (Clients) =>
+      Effect.flatMap(Effect.promise(() => Bun.stdin.text()), Clients.serveJoin),
+    ),
+  )
+} else if (command === "pair") {
+  runMain(Effect.flatMap(Effect.promise(() => import("./Clients.ts")), (Clients) => Clients.pair(argument === "--new")))
 } else if (command === "hook" && (argument === "claude" || argument === "codex")) {
   runMain(
     hook(argument, process.argv.includes("--wait")).pipe(
@@ -173,7 +244,9 @@ if ((command === "serve" || command === "install" || (command === "uninstall" &&
 } else if (command === "t3") {
   runMain(t3)
 } else {
-  console.error("usage: yapd setup | yapd doctor | yapd serve | yapd install | yapd uninstall | yapd hook <claude|codex> [--wait] | yapd relay | yapd start [machine] | yapd catalog [machine] | yapd t3")
+  console.error(
+    "usage: yapd setup [server] | yapd setup client <server> | yapd pair [--new] | yapd doctor | yapd serve | yapd client | yapd install | yapd uninstall | yapd hook <claude|codex> [--wait] | yapd relay | yapd start [machine] | yapd catalog [machine] | yapd t3",
+  )
   // Not 2: Claude Code treats exit code 2 from a Stop hook as "keep going".
   process.exit(1)
 }

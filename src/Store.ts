@@ -161,6 +161,12 @@ export const migrations: ReadonlyArray<string> = [
   ) strict;
   create unique index memories_routine on memories (called) where kind = 'routine' and forgotten_at is null;
   alter table reminders add column routine text;`,
+  // The machines that use yapd here as their server, each by the name its
+  // hooks give, through the SSH connection it keeps open to this one. That
+  // connection forwards `port` here back to its own SSH, logged in to as
+  // `user`, whose host key is `key`: what yapd reaches it by for its threads,
+  // follow-ups and new work, whatever network it's on.
+  "create table clients (name text primary key, user text not null, port integer not null unique, key text not null, at integer not null) strict;",
 ]
 
 export class Store extends Context.Tag("yapd/Store")<

@@ -1,5 +1,6 @@
 import { Console, Effect, Option, Schema } from "effect"
 import { existsSync } from "node:fs"
+import { homedir } from "node:os"
 import { basename, dirname, join } from "node:path"
 import * as CodexServer from "./CodexServer.ts"
 import * as Config from "./Config.ts"
@@ -7,6 +8,7 @@ import * as Helper from "./Helper.ts"
 import * as Home from "./Home.ts"
 import { run } from "./Process.ts"
 import * as Provider from "./Provider.ts"
+import * as Remote from "./Remote.ts"
 import * as Service from "./Service.ts"
 import * as Setup from "./Setup.ts"
 import * as T3CodeServer from "./T3CodeServer.ts"
@@ -98,19 +100,33 @@ export const hooks = (agent: Setup.Agent, command: ReturnType<typeof Setup.comma
     return findings.length === 0 ? [ok(`${name}'s hooks, in ${file}`)] : findings
   }).pipe(Effect.catchAll((error) => Effect.succeed([fail(error.message)])))
 
-/** Whether yapd answers where hooks send to: here on the Mac, or through the forwarded port elsewhere. */
-const daemon = Effect.gen(function* () {
-  const port = yield* Config.port
-  const answered = yield* Effect.promise(() =>
-    fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(2000) }).then((response) => response.ok, () => false),
-  )
-  if (answered) return [ok(mac ? `yapd is answering on port ${port}` : `Hooks reach yapd through port ${port}`)]
-  return [
-    mac
-      ? fail(`yapd isn't answering on port ${port}. Its log is ${Service.logPath}.`)
-      : warn(`Hooks can't reach yapd at 127.0.0.1:${port}. Forward that port from the Mac that speaks, as ${guide}#agents-on-another-machine says.`),
-  ]
-})
+/**
+ * What yapd does here: runs itself, as on a Mac or a Linux server; uses yapd
+ * on another machine; or only runs hooks, for a Mac that reaches this one.
+ */
+export type Role = "server" | "client" | "hooks"
+
+const role = (): Role => (Option.isSome(Option.fromNullable(process.env.YAPD_SERVER?.trim() || undefined)) ? "client" : mac || Service.installed("server") ? "server" : "hooks")
+
+/** Whether yapd answers where hooks send to: here, through the connection to its server, or through a port forwarded from the Mac. */
+const daemon = (role: Role) =>
+  Effect.gen(function* () {
+    const port = yield* Config.port
+    const answered = yield* Effect.promise(() =>
+      fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(2000) }).then((response) => response.ok, () => false),
+    )
+    const server = Option.getOrElse(yield* Config.server, () => "its server")
+    if (answered) {
+      return [ok(role === "server" ? `yapd is answering on port ${port}` : role === "client" ? `yapd on ${server} answers here, on port ${port}` : `Hooks reach yapd through port ${port}`)]
+    }
+    return [
+      role === "server"
+        ? fail(`yapd isn't answering on port ${port}. Its log is ${Service.log("server")}.`)
+        : role === "client"
+          ? fail(`yapd on ${server} isn't answering here, on port ${port}. ${Service.installed("client") ? `The client's log is ${Service.log("client")}.` : "yapd install starts the client."}`)
+          : warn(`Hooks can't reach yapd at 127.0.0.1:${port}. Forward that port from the Mac that speaks, as ${guide}#agents-on-another-machine says, or use yapd on another machine with yapd setup client.`),
+    ]
+  })
 
 /** What launchd runs, as `yapd install` wrote it. */
 const Plist = Schema.parseJson(
@@ -124,15 +140,26 @@ const Plist = Schema.parseJson(
 const cli = (name: Provider.Name) =>
   Provider.providers[name].command({ prompt: "", model: undefined, effort: undefined, tier: undefined, schema: { json: "{}", path: "" } }).argv[0]!
 
+/** What systemd runs, as `yapd install` wrote it: what's run, and the PATH it's run with. */
+const unit = (text: string) => {
+  const unquote = (value: string) => value.replace(/^"(.*)"$/, "$1").replaceAll('\\"', '"').replaceAll("\\\\", "\\").replaceAll("%%", "%")
+  const exec = /^ExecStart=(.*)$/m.exec(text)?.[1] ?? ""
+  const argv = [...exec.matchAll(/"((?:[^"\\]|\\.)*)"|(\S+)/g)].map((match) => unquote(match[0]))
+  const path = [...text.matchAll(/^Environment=(.*)$/gm)].map((match) => unquote(match[1]!)).find((value) => value.startsWith("PATH="))?.slice(5)
+  return { ProgramArguments: argv, EnvironmentVariables: path === undefined ? undefined : { PATH: path } }
+}
+
 /** The service, and what it finds on the PATH it was installed with. */
 const service = (main: string) =>
   Effect.gen(function* () {
-    if (!existsSync(Service.plistPath)) return [fail("The service isn't installed. yapd install starts yapd, and at every login.")]
-    const plist = yield* run(["plutil", "-convert", "json", "-o", "-", Service.plistPath]).pipe(
-      Effect.flatMap(Schema.decodeUnknown(Plist)),
-      Effect.option,
-    )
-    if (Option.isNone(plist)) return [fail(`I couldn't read ${Service.plistPath}. yapd install writes it again.`)]
+    if (!Service.installed("server")) return [fail("The service isn't installed. yapd install starts yapd, and at every login.")]
+    const plist = mac
+      ? yield* run(["plutil", "-convert", "json", "-o", "-", Service.plistPath]).pipe(
+          Effect.flatMap(Schema.decodeUnknown(Plist)),
+          Effect.option,
+        )
+      : yield* Effect.tryPromise(() => Bun.file(Service.unitPath("server")).text()).pipe(Effect.map(unit), Effect.option)
+    if (Option.isNone(plist)) return [fail(`I couldn't read ${mac ? Service.plistPath : Service.unitPath("server")}. yapd install writes it again.`)]
     const { ProgramArguments: argv, EnvironmentVariables: environment } = plist.value
     const findings: Array<Finding> = []
     if (argv[1] !== main) findings.push(warn(`The service runs ${argv[1]}, not this yapd. yapd install switches it.`))
@@ -198,7 +225,7 @@ const remotes = Effect.gen(function* () {
   return yield* Effect.forEach(
     machines,
     ([host, destination]) =>
-      run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "--", destination, "cd / && yapd"]).pipe(
+      run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "--", destination, Remote.remotely("")]).pipe(
         Effect.timeout("10 seconds"),
         Effect.as(warn(`yapd on ${host} answered oddly. Updating it there may help.`)),
         Effect.catchAll((error) =>
@@ -219,12 +246,24 @@ const remotes = Effect.gen(function* () {
   )
 })
 
-/** What SSH commands from the Mac need here, to send follow-ups on. */
+/** What SSH commands from the machine yapd runs on need here, to send follow-ups on: yapd on the PATH they get, or in ~/.bun/bin. */
 const reachable = Effect.sync(() => [
-  Bun.which("yapd") === null
-    ? warn("yapd isn't on the PATH, so the Mac can't send follow-ups here. Add ~/.bun/bin to PATH in ~/.zshenv, or at the top of ~/.bashrc.")
-    : ok("yapd is on the PATH, for follow-ups from the Mac"),
+  Bun.which("yapd") === null && Bun.which("yapd", { PATH: join(homedir(), ".bun", "bin") }) === null
+    ? warn("yapd isn't on the PATH, so the machine yapd runs on can't send follow-ups here. Add ~/.bun/bin to PATH in ~/.zshenv, or at the top of ~/.bashrc.")
+    : ok("yapd is on the PATH, for follow-ups from the machine yapd runs on"),
 ])
+
+/** What a client needs: its service, and its SSH server, which yapd on its server reaches back through. */
+const client = Effect.gen(function* () {
+  const { sshd } = yield* Effect.promise(() => import("./Client.ts"))
+  const server = Option.getOrElse(yield* Config.server, () => "its server")
+  return [
+    Service.installed("client") ? ok(`The client runs as a service, connected to ${server}`) : fail("The client isn't installed. yapd install starts it, and at every login."),
+    (yield* sshd)
+      ? ok(`This machine's SSH server is on, for ${server} to reach back here`)
+      : warn(`This machine's SSH server is off, so ${server} can't reach its threads here. On a Mac, turn on Remote Login in System Settings, General, Sharing.`),
+  ]
+})
 
 const marks: Record<Status, string> = { ok: "✓", warn: "!", fail: "✗" }
 
@@ -232,14 +271,16 @@ const marks: Record<Status, string> = { ok: "✓", warn: "!", fail: "✗" }
 export const doctor = (bun: string, main: string) =>
   Effect.gen(function* () {
     const command = Setup.command(bun, main, Setup.environment())
+    const here = role()
     const checks = [
       Effect.sync(() => settings(dirname(dirname(main)))),
       hooks("claude", command, main),
       hooks("codex", command, main),
-      daemon,
-      ...(mac ? [service(main), helper, models] : [reachable]),
+      daemon(here),
+      ...(here === "server" ? [service(main), ...(mac ? [helper] : []), models, remotes] : []),
+      ...(here === "client" ? [client, reachable, ...(mac ? [helper] : [])] : []),
+      ...(here === "hooks" ? [reachable] : []),
       t3code,
-      remotes,
     ]
     const findings = (yield* Effect.all(checks, { concurrency: "unbounded" })).flat()
     for (const { status, text } of findings) yield* Console.log(`${marks[status]} ${text}`)
