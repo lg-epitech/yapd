@@ -1,0 +1,377 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		7B0000000000000000000020 /* Widgets.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 7B0000000000000000000011 /* Widgets.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		7B0000000000000000000021 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 7B0000000000000000000007 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 7B0000000000000000000016;
+			remoteInfo = Widgets;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		7B0000000000000000000023 /* Embed Foundation Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				7B0000000000000000000020 /* Widgets.appex in Embed Foundation Extensions */,
+			);
+			name = "Embed Foundation Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
+/* Begin PBXFileReference section */
+		7B0000000000000000000001 /* yapd.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = yapd.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		7B0000000000000000000011 /* Widgets.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = Widgets.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXFileSystemSynchronizedRootGroup section */
+		7B0000000000000000000002 /* yapd */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = yapd;
+			sourceTree = "<group>";
+		};
+		7B0000000000000000000012 /* Shared */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = Shared;
+			sourceTree = "<group>";
+		};
+		7B0000000000000000000013 /* Widgets */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = Widgets;
+			sourceTree = "<group>";
+		};
+/* End PBXFileSystemSynchronizedRootGroup section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		7B0000000000000000000003 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		7B0000000000000000000014 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		7B0000000000000000000004 = {
+			isa = PBXGroup;
+			children = (
+				7B0000000000000000000002 /* yapd */,
+				7B0000000000000000000012 /* Shared */,
+				7B0000000000000000000013 /* Widgets */,
+				7B0000000000000000000005 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		7B0000000000000000000005 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				7B0000000000000000000001 /* yapd.app */,
+				7B0000000000000000000011 /* Widgets.appex */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		7B0000000000000000000006 /* yapd */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 7B000000000000000000000B /* Build configuration list for PBXNativeTarget "yapd" */;
+			buildPhases = (
+				7B0000000000000000000008 /* Sources */,
+				7B0000000000000000000003 /* Frameworks */,
+				7B0000000000000000000009 /* Resources */,
+				7B0000000000000000000023 /* Embed Foundation Extensions */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				7B0000000000000000000022 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				7B0000000000000000000002 /* yapd */,
+				7B0000000000000000000012 /* Shared */,
+			);
+			name = yapd;
+			productName = yapd;
+			productReference = 7B0000000000000000000001 /* yapd.app */;
+			productType = "com.apple.product-type.application";
+		};
+		7B0000000000000000000016 /* Widgets */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 7B0000000000000000000019 /* Build configuration list for PBXNativeTarget "Widgets" */;
+			buildPhases = (
+				7B0000000000000000000017 /* Sources */,
+				7B0000000000000000000014 /* Frameworks */,
+				7B0000000000000000000018 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				7B0000000000000000000012 /* Shared */,
+				7B0000000000000000000013 /* Widgets */,
+			);
+			name = Widgets;
+			productName = Widgets;
+			productReference = 7B0000000000000000000011 /* Widgets.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		7B0000000000000000000007 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 2700;
+				LastUpgradeCheck = 2700;
+			};
+			buildConfigurationList = 7B000000000000000000000A /* Build configuration list for PBXProject "yapd" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = 7B0000000000000000000004;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 7B0000000000000000000005 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				7B0000000000000000000006 /* yapd */,
+				7B0000000000000000000016 /* Widgets */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		7B0000000000000000000009 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		7B0000000000000000000018 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		7B0000000000000000000008 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		7B0000000000000000000017 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		7B0000000000000000000022 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 7B0000000000000000000016 /* Widgets */;
+			targetProxy = 7B0000000000000000000021 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		7B000000000000000000000C /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_TESTABILITY = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				YAPD_BUNDLE_ID = dev.yapd.phone;
+			};
+			name = Debug;
+		};
+		7B000000000000000000000D /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				VALIDATE_PRODUCT = YES;
+				YAPD_BUNDLE_ID = dev.yapd.phone;
+			};
+			name = Release;
+		};
+		7B000000000000000000000E /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "yapd-Info.plist";
+				INFOPLIST_KEY_CFBundleDisplayName = yapd;
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "yapd hears what you tell it, and listens while it talks, so you can interrupt it.";
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations = UIInterfaceOrientationPortrait;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(YAPD_BUNDLE_ID)";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "YAPD_APP $(inherited)";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Debug;
+		};
+		7B000000000000000000000F /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "yapd-Info.plist";
+				INFOPLIST_KEY_CFBundleDisplayName = yapd;
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "yapd hears what you tell it, and listens while it talks, so you can interrupt it.";
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations = UIInterfaceOrientationPortrait;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(YAPD_BUNDLE_ID)";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = YAPD_APP;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Release;
+		};
+		7B000000000000000000001A /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "Widgets-Info.plist";
+				INFOPLIST_KEY_CFBundleDisplayName = yapd;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(YAPD_BUNDLE_ID).widgets";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Debug;
+		};
+		7B000000000000000000001B /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "Widgets-Info.plist";
+				INFOPLIST_KEY_CFBundleDisplayName = yapd;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(YAPD_BUNDLE_ID).widgets";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		7B000000000000000000000A /* Build configuration list for PBXProject "yapd" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				7B000000000000000000000C /* Debug */,
+				7B000000000000000000000D /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		7B000000000000000000000B /* Build configuration list for PBXNativeTarget "yapd" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				7B000000000000000000000E /* Debug */,
+				7B000000000000000000000F /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		7B0000000000000000000019 /* Build configuration list for PBXNativeTarget "Widgets" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				7B000000000000000000001A /* Debug */,
+				7B000000000000000000001B /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 7B0000000000000000000007 /* Project object */;
+}
