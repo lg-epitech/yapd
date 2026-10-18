@@ -4,7 +4,6 @@ import { copyFile, mkdir, rename, rm, stat, writeFile } from "node:fs/promises"
 import { homedir } from "node:os"
 import { dirname, join } from "node:path"
 import * as Home from "./Home.ts"
-import * as Origin from "./Origin.ts"
 
 // `yapd setup`: the hooks that tell yapd when an agent's turn ends, written
 // into each agent's own config, then the service on a Mac that speaks.
@@ -60,14 +59,13 @@ export const command =
     ].join(" ")
 
 /**
- * The settings hooks need, when they're set: the port yapd listens on, where
- * its home is, and on a client of yapd on another machine, what that one
- * calls this machine.
+ * The settings hooks need, when they're set: the port yapd listens on, and
+ * where its home is. What a client is called they read from its settings,
+ * so setting one up leaves their commands as they were.
  */
 export const environment = (): Record<string, string> => ({
   ...(process.env.YAPD_PORT === undefined ? {} : { YAPD_PORT: process.env.YAPD_PORT }),
   ...(process.env.YAPD_HOME === undefined ? {} : { YAPD_HOME: Home.home }),
-  ...(process.env.YAPD_SERVER?.trim() ? { [Origin.machine]: Origin.clientName() } : {}),
 })
 
 /**

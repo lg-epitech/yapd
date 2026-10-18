@@ -383,9 +383,9 @@ export const settle = (name: string, value: string, file = Home.settings) => {
 
 /**
  * `yapd setup client <server>`: has the server take this machine in, lets it
- * back in over SSH, keeps which server it is in the settings, sets up the
- * hooks to name this machine as the server knows it, and runs `yapd client`
- * as a service in place of yapd's own.
+ * back in over SSH, keeps which server it is in the settings, where the hooks
+ * read what this machine is called, sets them up, and runs `yapd client` as a
+ * service in place of yapd's own.
  */
 export const setup = (destination: string, bun: string, main: string) =>
   Effect.gen(function* () {
@@ -396,7 +396,7 @@ export const setup = (destination: string, bun: string, main: string) =>
     const joined = yield* join(destination, asking.right)
     yield* letIn(joined.keys, destination)
     yield* Effect.sync(() => settle("YAPD_SERVER", destination))
-    // So the hooks and the service written next carry it, as they would once the settings are read.
+    // So the service written next is the client's, as it would be once the settings are read.
     process.env.YAPD_SERVER = destination
     yield* Console.log(`This machine uses yapd on ${destination} now, as YAPD_SERVER in ${Home.settings}`)
     yield* Setup.setup(bun, main)
