@@ -158,7 +158,8 @@ final class Talk {
     if !dictating { speaker.open() }
     guard await connection.connect(to: server, token: token) else {
       trouble = "I can't reach yapd at \(server.host ?? "your server"). Is Tailscale on?"
-      // Nothing's listening for what it records.
+      // Nothing's listening for what it records, nor will be.
+      connection.disconnect()
       speaker.close()
       update()
       settle()
@@ -183,15 +184,43 @@ final class Talk {
     _ = await connection.connect(to: server, token: token)
   }
 
-  /// In the background with nothing going on, it lets go before long, so yapd speaks on the Mac again.
+  /**
+   * In the background with nothing going on, it lets go before long, so yapd
+   * speaks on the Mac again: kept awake meanwhile, since once its audio rests
+   * iOS would otherwise suspend it still connected, and yapd would go on
+   * speaking to a phone that's asleep. Should iOS end that early, it lets go then.
+   */
   private func settle() {
     idle?.cancel()
+    hold()
     idle = Task { [weak self] in
       try? await Task.sleep(for: .seconds(20))
       guard let self, !Task.isCancelled else { return }
       if self.dictating || self.playing { return self.settle() }
-      if !self.foreground { self.connection.disconnect() }
-      self.end()
+      self.letGo()
+    }
+  }
+
+  @ObservationIgnored private var holding: UIBackgroundTaskIdentifier = .invalid
+
+  private func hold() {
+    guard holding == .invalid else { return }
+    holding = UIApplication.shared.beginBackgroundTask(withName: "yapd") { [weak self] in
+      MainActor.assumeIsolated { self?.letGo() }
+    }
+  }
+
+  /// Done for now: off the connection when it's in the background, with the microphone and the Live Activity gone either way.
+  private func letGo() {
+    idle?.cancel()
+    if !foreground {
+      connection.disconnect()
+      speaker.close()
+    }
+    end()
+    if holding != .invalid {
+      UIApplication.shared.endBackgroundTask(holding)
+      holding = .invalid
     }
   }
 
@@ -202,8 +231,16 @@ final class Talk {
   }
 
   private func begin() {
-    guard activity == nil, ActivityAuthorizationInfo().areActivitiesEnabled else { return }
-    activity = try? Activity.request(attributes: TalkAttributes(), content: .init(state: phase, staleDate: nil))
+    guard activity == nil else { return }
+    guard ActivityAuthorizationInfo().areActivitiesEnabled else {
+      trouble = "Turn on Live Activities for yapd in Settings, or the Action button can't record."
+      return
+    }
+    do {
+      activity = try Activity.request(attributes: TalkAttributes(), content: .init(state: phase, staleDate: nil))
+    } catch {
+      trouble = "I couldn't show that I'm listening: \(error.localizedDescription)"
+    }
   }
 
   private func update() {

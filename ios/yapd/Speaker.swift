@@ -226,11 +226,12 @@ final class Speaker {
     tapped = true
   }
 
-  /// Stops the engine, which turns the microphone off until the next line.
+  /// Stops the engine, which turns the microphone off until the next line, and lets other apps' audio back up.
   private func rest() {
     stop(silently: true)
     active = false
     halt()
+    try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
   }
 
   private func halt() {
