@@ -3590,8 +3590,9 @@ export const make = (options: {
 
     /**
      * Catches him up on what he hasn't heard in `scope`, with the threads on
-     * `desk`, in one brief from the model: what needs him first, then eight
-     * threads at most, the rest left for "more". After a catch-up, `about`,
+     * `desk`, in one brief from the model, a thread at a time, as each one's
+     * latest update leaves it: eight threads at most, what needs him first,
+     * the rest left for "more". After a catch-up, `about`,
      * more of it is what that one left out that he still hasn't heard, or,
      * with none, the detail of what it told him. What it told him of counts
      * as heard only once he's heard it to the end. With nothing to tell, he's
@@ -3637,51 +3638,36 @@ export const make = (options: {
         const plain = (line: string): Outcome => ({ say: line, subject: { _tag: "Answer", said: line, about: Option.none(), catchingUp: true }, kind: "answer" })
         if (groups.length === 0) return plain(scope.named === undefined ? (given.nothing ?? lines.caughtUp) : lines.nothingFrom(scope.named))
         const ids = (all: ReadonlyArray<Missed.Group>) => all.flatMap(({ rows }) => rows.map(({ id }) => id))
-        // What needs him, a question in an agent's last words, a failure or a limit, is read to him first as it was kept, question, options and
-        // all, never summed up, and then what he's to hear whatever he muted, like the answer to what he asked a thread or a turn yapd couldn't
-        // sum up, which a brief could leave out: a few at most, the rest left for more, unheard. Not again for more of what he just heard.
-        const needing = groups
-          .flatMap(({ rows }) => rows.filter((kept) => Missed.audible(kept) && (kept.said ?? "").trim() !== "" && (kind !== "detail" || kept.heardAt === undefined)))
-          .toSorted((one, other) => Number(Missed.needs(other)) - Number(Missed.needs(one)) || one.at - other.at || one.id - other.id)
-        const read = needing.slice(0, inFull)
-        // Read word for word, what holds one of his routines' steps, like an offer of one that came due while yapd was off, is told the model
-        // by the routine's name alone; the brief is only ever shown it so.
-        const routines = [...new Set(read.flatMap(routinesIn))]
-        const unread = new Set(needing.slice(inFull).map(({ id }) => id))
-        const reading = new Set(read.map(({ id }) => id))
-        const others = groups.flatMap((group) => Option.toArray(Option.fromNullable(Missed.only(group, ({ id }) => !reading.has(id) && !unread.has(id)))))
-        const shown = others.slice(0, briefed)
-        const rest = [...others.slice(briefed), ...groups.flatMap((group) => Option.toArray(Option.fromNullable(Missed.only(group, ({ id }) => unread.has(id)))))]
+        // Each thread with all it said, oldest first, so the model tells of it as its latest update leaves it, reading word for word what
+        // still needs him, a question in an agent's last words, a failure or a limit, or the answer to what he asked a thread, and leaving
+        // out what a later update overtook: eight threads at most, what needs him first, the rest left for more.
+        const shown = groups.slice(0, briefed)
+        const rest = groups.slice(briefed)
         const leftOut = ids(rest)
-        const left = { threads: new Set(rest.map(({ machine, thread }) => `${machine ?? ""}\n${thread ?? ""}`)).size, rows: leftOut.length }
+        const left = { threads: rest.length, rows: leftOut.length }
         const off = shown.some((group) => group.off > 0) ? missed.off : undefined
-        const brief =
-          shown.length === 0
-            ? Either.right(left.rows === 0 ? "" : lines.more)
-            : yield* brain
-                .brief(
-                  {
-                    kind,
-                    groups: shown,
-                    left,
-                    ...(read.length === 0 ? {} : { read: read.length }),
-                    ...(scope.named === undefined ? {} : { scope: scope.named }),
-                    ...(off === undefined ? {} : { off }),
-                  },
-                  desk,
-                  now,
-                )
-                .pipe(Effect.either)
+        const brief = yield* brain
+          .brief({ kind, groups: shown, left, ...(scope.named === undefined ? {} : { scope: scope.named }), ...(off === undefined ? {} : { off }) }, desk, now)
+          .pipe(Effect.either)
+        // Without the model, only what needs him that nothing newer of its thread came after is read, word for word, a few at most.
+        const standing = shown
+          .flatMap(({ rows }) => Option.toArray(Option.fromNullable(rows.at(-1))))
+          .filter((kept) => Missed.audible(kept) && (kept.said ?? "").trim() !== "" && (kind !== "detail" || kept.heardAt === undefined))
+          .slice(0, inFull)
         if (Either.isLeft(brief)) {
           yield* Effect.logWarning("Could not sum up what you missed", brief.left)
-          if (read.length === 0) return plain(lines.unbriefed)
+          if (standing.length === 0) return plain(lines.unbriefed)
         }
         // Told everything, the digest doesn't bring it up again.
         if (whole(scope) && Either.isRight(brief)) yield* options.modes?.briefed() ?? Effect.void
-        const told = Either.isRight(brief) ? [...read.map(({ id }) => id), ...ids(shown)] : read.map(({ id }) => id)
+        const read = Either.isRight(brief) ? brief.right.read : standing
+        // Read word for word, what holds one of his routines' steps, like an offer of one that came due while yapd was off, is told the model
+        // by the routine's name alone; the brief is only ever shown it so.
+        const routines = [...new Set(read.flatMap(routinesIn))]
+        const told = Either.isRight(brief) ? ids(shown) : read.map(({ id }) => id)
         const covered = new Set(told)
         const coveredGroups = groups.flatMap((group) => Option.toArray(Option.fromNullable(Missed.only(group, ({ id }) => covered.has(id)))))
-        const say = `${[...read.map(Missed.full), Either.isRight(brief) ? brief.right.trim() : lines.unbriefedRest].filter((part) => part !== "").join(" ")}${comingUp(coming.length, said)}`
+        const say = `${Either.isRight(brief) ? brief.right.spoken : [...read.map(Missed.full), lines.unbriefedRest].join(" ")}${comingUp(coming.length, said)}`
         // "It" is the thread it told of, when it told of one the desk has.
         const [only] = coveredGroups
         const about =
@@ -3691,7 +3677,7 @@ export const make = (options: {
         const catchup: Catchup = {
           scope,
           covered: told,
-          leftOut: Either.isRight(brief) ? leftOut : [...leftOut, ...ids(shown)],
+          leftOut: Either.isRight(brief) ? leftOut : [...leftOut, ...ids(shown).filter((id) => !covered.has(id))],
           left: left.threads,
           told: coveredGroups.map((group) => ({
             name: Brain.missedName(group),
@@ -5749,11 +5735,12 @@ export const make = (options: {
           const brief = yield* brain.brief({ kind: "digest", groups: Missed.group(held, on), left: { threads: 0, rows: 0 } }, on, now).pipe(Effect.either)
           // Left unheard, for catching up.
           if (Either.isLeft(brief)) return yield* Effect.logWarning("Could not sum up what I held", brief.left)
-          const spoken = brief.right
+          const { spoken } = brief.right
           const covered = held.map(({ id }) => id)
+          const routines = [...new Set(brief.right.read.flatMap(routinesIn))]
           /** Kept once it starts being said, so words he never heard, as when yapd is turned off first, are never what he was told. */
           let entry: Option.Option<number> | undefined
-          const subject: Subject = { _tag: "Answer", said: spoken, about: Option.none(), missed: covered }
+          const subject: Subject = { _tag: "Answer", said: spoken, about: Option.none(), missed: covered, ...(routines.length === 0 ? {} : { routines }) }
           const oldest = Math.min(...held.map(({ at }) => at))
           /** Focus or quiet began while it was summed up or waited its turn: what it covers is held for when it ends. */
           const holding = options.modes?.holding ?? Effect.succeedNone

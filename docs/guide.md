@@ -293,7 +293,7 @@ Turn it back on from the menu, or press the shortcut and say "unmute" or "turn o
 
 ## Catching up
 
-yapd keeps every update it sums up, and knows which you heard to the end. Ask it to catch you up, however you put it, "catch me up", "what did I miss on the web app?" or "anything from the server since lunch?", and the model decides that's what you want and what about. yapd first reads you what needs you as it was kept, a failure or an agent's question with its options, and the answer to what you asked a thread. Then it briefs you on the rest in about ninety words and eight threads at most. "More" gets the threads it left out, or the detail of the ones it told you of.
+yapd keeps every update it sums up, and knows which you heard to the end. Ask it to catch you up, however you put it, "catch me up", "what did I miss on the web app?" or "anything from the server since lunch?", and the model decides that's what you want and what about. It tells you a thread at a time, eight threads at most, each from where its latest update leaves it, so a question since answered or a failure since fixed is left out. What still needs you, a failure or an agent's question with its options, and the answer to what you asked a thread, is read as it was kept, within its thread. The rest it sums up in about ninety words. "More" gets the threads it left out, or the detail of the ones it told you of.
 
 What it told you counts as heard only once you've heard it to the end. Muted threads are left out unless you ask about one. Nothing it does reaches an agent.
 

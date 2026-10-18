@@ -230,8 +230,11 @@ const assistant = (
     /** Whether yapd can keep things in mind for him, kept in the same database, and the routines his preferences have. */
     readonly memories?: boolean
     readonly routines?: ReadonlyArray<Preferences.Routine>
-    /** What the model briefs him with on what was held or what he missed, from what it's given, or none when it can't be asked. */
-    readonly briefs?: (held: ReadonlyArray<Journal.Kept>, brief: Brain.Brief) => string | undefined
+    /**
+     * What the model briefs him with on what was held or what he missed, from what it's given, or none when it can't be asked: its
+     * words, or what it writes, its words and the handles of rows to read word for word.
+     */
+    readonly briefs?: (held: ReadonlyArray<Journal.Kept>, brief: Brain.Brief) => string | ReadonlyArray<string> | undefined
   } = {},
 ) =>
   Effect.gen(function* () {
@@ -395,12 +398,16 @@ const assistant = (
                 const decided = model(situation)
                 return decided === undefined ? Effect.fail(new Brain.BrainError({ cause: "The model is down." })) : Effect.succeed(decided)
               }).pipe(Effect.delay(`${given.thinking ?? 0} seconds`)),
-            brief: (brief) =>
+            brief: (brief, desk) =>
               Effect.suspend(() => {
                 // What it tells of, oldest first, as it was held.
                 const held = brief.groups.flatMap(({ rows }) => rows).toSorted((one, other) => one.at - other.at || one.id - other.id)
                 const spoken = given.briefs?.(held, brief)
-                return spoken === undefined ? Effect.fail(new Brain.BrainError({ cause: "The model is down." })) : Effect.succeed(spoken)
+                return spoken === undefined
+                  ? Effect.fail(new Brain.BrainError({ cause: "The model is down." }))
+                  : typeof spoken === "string"
+                    ? Effect.succeed({ spoken, read: [] })
+                    : Brain.briefed(spoken, brief, desk, Effect.succeed)
               }),
           }),
           persona,
@@ -789,6 +796,54 @@ describe("Assistant", () => {
     expect(result.cutOff).toEqual(["yapd. The loader fix is ready."])
     expect(result.told).toEqual(["yapd. The loader fix is ready."])
     expect(result.after).toEqual([])
+  })
+
+  describe("a catch-up told a thread at a time", () => {
+    const hours = (n: number) => now - n * 60 * 60_000
+    /** A question from the Tezos migration that its later update overtook, and one from the Mina tickets that still stands. */
+    const missed = (journal: Journal.Journal["Type"]) =>
+      Effect.gen(function* () {
+        const off = { held: "off" }
+        yield* journal.write({ at: hours(3), kind: "update", machine: "Rosie", thread: tezos.id, project: "integration", said: "Fee table or the old rates?", detail: { ...off, priority: "needs-you" } })
+        yield* journal.write({ at: hours(2), kind: "update", machine: "Rosie", thread: mina.id, project: "connectors", said: "The build failed. Retry it?", detail: { ...off, priority: "needs-you" } })
+        yield* journal.write({ at: hours(1), kind: "update", machine: "Rosie", thread: tezos.id, project: "integration", said: "Went with the fee table. The migration is done.", detail: off })
+      })
+    const unheard = (journal: Journal.Journal["Type"]) => Effect.map(journal.unheard(0, 12), (rows) => rows.map(({ said }) => said).toSorted())
+
+    test("gives the model each thread's updates together, oldest first, and reads word for word only what it says still stands", async () => {
+      const result = await run(
+        Effect.gen(function* () {
+          const given: Array<Brain.Brief> = []
+          const { dictate, spoken, journal } = yield* assistant(() => Brain.decision({ act: "catchup" }), {
+            briefs: (_, brief) => {
+              given.push(brief)
+              // The Mina question is the second row that needs him, as the threads go, oldest first.
+              return ["The Tezos migration went with the fee table and is done.", "The Mina tickets hit a failing build: r2"]
+            },
+          })
+          yield* missed(journal)
+          yield* dictate("What did I miss?")
+          return { threads: given[0]?.groups.map(({ rows }) => rows.map(({ said }) => said)), said: spoken().at(-1) }
+        }),
+      )
+      expect(result.threads).toEqual([["Fee table or the old rates?", "Went with the fee table. The migration is done."], ["The build failed. Retry it?"]])
+      expect(result.said).toBe("The Tezos migration went with the fee table and is done. The Mina tickets hit a failing build: The build failed. Retry it?")
+    })
+
+    test("with the model down, reads only what needs him that nothing newer of its thread came after, and leaves the rest unheard", async () => {
+      const result = await run(
+        Effect.gen(function* () {
+          const { dictate, play, spoken, journal } = yield* assistant(() => Brain.decision({ act: "catchup" }), { briefs: () => undefined })
+          yield* missed(journal)
+          yield* dictate("What did I miss?")
+          const said = spoken().at(-1)
+          yield* play()
+          return { said, after: yield* unheard(journal) }
+        }),
+      )
+      expect(result.said?.startsWith("The build failed. Retry it? I couldn't sum up the rest just now")).toBe(true)
+      expect(result.after).toEqual(["Fee table or the old rates?", "Went with the fee table. The migration is done."])
+    })
   })
 
   test("a write at medium confidence about a thread that isn't the focus asks once, naming both", async () => {
