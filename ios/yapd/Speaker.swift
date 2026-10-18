@@ -105,6 +105,13 @@ final class Speaker {
     }
   }
 
+  /// Without echo cancellation, for trying it in the simulator, where it cancels everything the Mac plays: debug builds only.
+  #if DEBUG
+    static let raw = ProcessInfo.processInfo.environment["YAPD_RAW_MICROPHONE"] != nil
+  #else
+    static let raw = false
+  #endif
+
   static var permission: String {
     switch AVAudioApplication.shared.recordPermission {
     case .granted: "authorized"
@@ -182,7 +189,7 @@ final class Speaker {
   private func session() throws {
     let session = AVAudioSession.sharedInstance()
     // Voice chat is what turns on the echo cancellation, and the speaker rather than the earpiece, unless headphones are in.
-    try session.setCategory(.playAndRecord, mode: .voiceChat, options: [.defaultToSpeaker, .allowBluetoothHFP, .duckOthers])
+    try session.setCategory(.playAndRecord, mode: Speaker.raw ? .default : .voiceChat, options: [.defaultToSpeaker, .allowBluetoothHFP, .duckOthers])
     try session.setActive(true)
   }
 
@@ -217,7 +224,7 @@ final class Speaker {
     let input = engine.inputNode
     let usable = { (format: AVAudioFormat) in format.channelCount > 0 && format.sampleRate > 0 }
     guard usable(input.inputFormat(forBus: 0)) else { throw POSIXError(.ENODEV) }
-    if !input.isVoiceProcessingEnabled { try input.setVoiceProcessingEnabled(true) }
+    if !input.isVoiceProcessingEnabled && !Speaker.raw { try input.setVoiceProcessingEnabled(true) }
     guard !tapped else { return }
     let format = input.outputFormat(forBus: 0)
     guard usable(format) else { throw POSIXError(.ENODEV) }

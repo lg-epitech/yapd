@@ -92,6 +92,9 @@ final class Talk {
         if message["type"] as? String == "rest" { DispatchQueue.main.async { self?.settle() } }
       }
     }
+    #if DEBUG
+      trying()
+    #endif
     connection.changed = { [weak self] connected in
       guard let self else { return }
       self.connected = connected
@@ -255,3 +258,29 @@ final class Talk {
     Task { await activity.end(nil, dismissalPolicy: .immediate) }
   }
 }
+
+#if DEBUG
+  extension Talk {
+    /**
+     * For trying it without a finger, in a debug build only: paired from
+     * YAPD_PAIR, a `yapd://pair` link, given as it's launched, then pressed
+     * by writing "talk" or "drop" to `yapd-command` in its Documents.
+     */
+    fileprivate func trying() {
+      if let link = ProcessInfo.processInfo.environment["YAPD_PAIR"], let url = URL(string: link) { open(url) }
+      let file = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent("yapd-command")
+      Task { [weak self] in
+        while true {
+          try? await Task.sleep(for: .milliseconds(300))
+          guard let self, let command = try? String(contentsOf: file, encoding: .utf8) else { continue }
+          try? FileManager.default.removeItem(at: file)
+          switch command.trimmingCharacters(in: .whitespacesAndNewlines) {
+          case "talk": await self.press()
+          case "drop": self.cancel()
+          default: break
+          }
+        }
+      }
+    }
+  }
+#endif

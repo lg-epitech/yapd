@@ -833,6 +833,7 @@ export const router = <E = never, R = never>(local?: (owner: Owner, cues: Cues, 
     const { activity, report } = yield* reporter
     const runtime = yield* Effect.runtime<never>()
     const runSync = Runtime.runSync(runtime)
+    const runFork = Runtime.runFork(runtime)
     const dir = yield* Effect.acquireRelease(
       Effect.tryPromise({
         try: () => mkdtemp(join(tmpdir(), "yapd-cues-")),
@@ -869,7 +870,7 @@ export const router = <E = never, R = never>(local?: (owner: Owner, cues: Cues, 
     // Taken once yapd knows whether it's on, which it may have been turned off before it stopped.
     const shortcut = Option.isSome(keys) ? yield* Shortcut.make(keys.value, broadcast, false) : undefined
     const changed = () => report(joined.some(({ speaker }) => speaker.speaking()), joined.some(({ speaker }) => speaker.listening()))
-    const owner = (id: string, hotkeys: boolean): Owner => ({
+    const owner = (id: string, hotkeys: boolean, name = id): Owner => ({
       greeted: () => {
         if (shortcut !== undefined && hotkeys) runSync(shortcut.greeted)
       },
@@ -877,6 +878,7 @@ export const router = <E = never, R = never>(local?: (owner: Owner, cues: Cues, 
         if (shortcut !== undefined) runSync(shortcut.registered(ok, message))
       },
       pressed: (key) => {
+        if (id !== "local") runFork(Effect.logInfo(`${name} pressed ${key === "shortcut" ? "the shortcut" : "Escape"}`))
         used.set(id, now())
         if (shortcut !== undefined) runSync(hotkeys ? shortcut.pressed(key) : shortcut.direct(key))
       },
@@ -918,7 +920,8 @@ export const router = <E = never, R = never>(local?: (owner: Owner, cues: Cues, 
       client.device?.detach(client.link)
       const at = joined.findIndex(({ speaker }) => speaker === client.speaker)
       if (at >= 0) joined.splice(at, 1)
-      if (client.scope !== undefined) runSync(Scope.close(client.scope, Exit.void))
+      // Closing it waits for what its device had running, which can't be done here, in the socket's own callback.
+      if (client.scope !== undefined) runFork(Scope.close(client.scope, Exit.void))
       changed()
     }
     /** A client that said hello, which takes the place of one it had connected as before. */
@@ -931,7 +934,7 @@ export const router = <E = never, R = never>(local?: (owner: Owner, cues: Cues, 
       }
       const scope = runSync(Scope.make())
       const made = runSync(
-        device(owner(hello.id, hello.hotkeys === true), cues, {
+        device(owner(hello.id, hello.hotkeys === true, hello.name), cues, {
           patience: remote,
           gone: `${hello.name} went away`,
           name: hello.name,

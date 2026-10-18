@@ -272,8 +272,12 @@ describe("Devices", () => {
         if (Option.isNone(microphone)) return expect(Option.isSome(microphone)).toBe(true)
         phone.frame(0.25)
         expect((yield* Queue.take(microphone.value))[0]).toBeCloseTo(0.25, 3)
-        // Gone while it played, what it played never finishes.
+        // Gone while it played and someone listened, what it played never finishes, and nothing waits on it here, in the socket's callback.
+        const listening = yield* Effect.fork(Queue.take(microphone.value))
+        yield* settle
         phone.leave()
+        yield* settle
+        expect(yield* Fiber.await(listening)).toMatchObject({ _tag: "Failure" })
         expect(Either.isLeft(yield* Effect.either(playback.finished))).toBe(true)
         expect(yield* Queue.isShutdown(microphone.value)).toBe(true)
       }),
