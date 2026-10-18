@@ -93,13 +93,21 @@ final class Talk {
       }
     }
     connection.changed = { [weak self] connected in
-      self?.connected = connected
+      guard let self else { return }
+      self.connected = connected
       if !connected {
-        self?.dictating = false
+        self.dictating = false
         speaker.close()
+        // On screen, it stays connected, trying again until yapd is back.
+        if self.foreground {
+          Task {
+            try? await Task.sleep(for: .seconds(3))
+            if self.foreground, !self.connected { await self.connect() }
+          }
+        }
       }
-      self?.update()
-      self?.settle()
+      self.update()
+      self.settle()
     }
   }
 
@@ -150,6 +158,8 @@ final class Talk {
     if !dictating { speaker.open() }
     guard await connection.connect(to: server, token: token) else {
       trouble = "I can't reach yapd at \(server.host ?? "your server"). Is Tailscale on?"
+      // Nothing's listening for what it records.
+      speaker.close()
       update()
       settle()
       return
