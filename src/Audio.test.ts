@@ -122,11 +122,14 @@ const client = (sockets: NonNullable<Option.Option.Value<Devices["Type"]["socket
   const closed = () => socket.shut
   sockets.open(socket)
   const say = (message: object) => sockets.message(socket, JSON.stringify(message))
+  /** As a Mac's client would say it, taking the shortcut's keys. */
+  const mac = () => say({ type: "hello", permission: "authorized", client: { id, name: id, hotkeys: true } })
   return {
     sent,
     closed,
     say,
     hello: () => say({ type: "hello", permission: "authorized", client: { id, name: id } }),
+    mac,
     frame: (value: number) => sockets.message(socket, Wire.pcm16(new Float32Array(Wire.samples).fill(value))),
     leave: () => sockets.close(socket),
     /** What it was told, as JSON, of a type. */
@@ -344,6 +347,29 @@ describe("Devices", () => {
         expect(second.told("play")).toHaveLength(2)
         expect(second.sent.filter((data) => data instanceof Uint8Array)).toHaveLength(1)
         yield* drop(again)
+      }),
+    ))
+
+  test("until something's pressed, a Mac is in use before a phone that connected first, and a press on the phone takes over", () =>
+    run(
+      Effect.gen(function* () {
+        const context = yield* router()
+        const sockets = Option.getOrThrow(Context.get(context, Devices).sockets)
+        const audio = Context.get(context, Audio)
+        const path = yield* sound
+        const phone = client(sockets, "phone")
+        phone.hello()
+        const rosie = client(sockets, "rosie")
+        rosie.mac()
+        const first = yield* Effect.fork(Effect.scoped(audio.play(path)))
+        yield* settle
+        expect([rosie.told("play").length, phone.told("play").length]).toEqual([1, 0])
+        yield* drop(first)
+        phone.say({ type: "pressed", key: "shortcut" })
+        const next = yield* Effect.fork(Effect.scoped(audio.play(path)))
+        yield* settle
+        expect(phone.told("play")).toHaveLength(1)
+        yield* drop(next)
       }),
     ))
 })

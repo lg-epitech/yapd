@@ -853,11 +853,20 @@ export const router = <E = never, R = never>(local?: (owner: Owner, cues: Cues, 
     /** When each was last pressed on, by its id, kept while it's away, so it's the one in use again once it's back. */
     const used = new Map<string, number>()
     const now = () => runSync(Clock.currentTimeMillis)
+    /**
+     * The one pressed on last; of those not pressed on since yapd started, a
+     * Mac, with the shortcut, before a phone, which only takes over once it's
+     * pressed, whichever reconnected first after a restart; then the first there.
+     */
     const inUse = (): Speaker | undefined => {
       let best: { readonly speaker: Speaker; readonly used: number; readonly at: number } | undefined
       for (const { speaker, at } of joined) {
         const last = used.get(speaker.id) ?? Number.NEGATIVE_INFINITY
-        if (best === undefined || last > best.used || (last === best.used && at < best.at)) best = { speaker, used: last, at }
+        const better =
+          best === undefined ||
+          last > best.used ||
+          (last === best.used && speaker.hotkeys !== best.speaker.hotkeys ? speaker.hotkeys : last === best.used && at < best.at)
+        if (better) best = { speaker, used: last, at }
       }
       return best?.speaker
     }
