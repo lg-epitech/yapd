@@ -24,7 +24,7 @@ struct TalkControl: ControlWidget {
   }
 }
 
-/// What it says while the phone talks to yapd, with a button to send and one to drop it, on the Lock Screen and in the Dynamic Island.
+/// What it says while the phone talks to yapd, with a round button to send and one to drop it, on the Lock Screen and in the Dynamic Island.
 struct TalkActivity: Widget {
   var body: some WidgetConfiguration {
     ActivityConfiguration(for: TalkAttributes.self) { context in
@@ -34,15 +34,7 @@ struct TalkActivity: Widget {
         Text(words(context.state.state))
           .font(.headline)
         Spacer()
-        if context.state.state == "listening" {
-          Button(intent: CancelIntent()) { Image(systemName: "xmark") }
-            .tint(.gray)
-          Button(intent: TalkIntent()) { Text("Send") }
-            .tint(.cyan)
-        } else {
-          Button(intent: TalkIntent()) { Image(systemName: "mic.fill") }
-            .tint(.cyan)
-        }
+        buttons(context.state.state, size: 44)
       }
       .padding()
       .activityBackgroundTint(.black.opacity(0.8))
@@ -56,19 +48,9 @@ struct TalkActivity: Widget {
           Text(words(context.state.state))
         }
         DynamicIslandExpandedRegion(.trailing) {
-          if context.state.state == "listening" {
-            HStack {
-              Button(intent: CancelIntent()) { Image(systemName: "xmark") }
-                .tint(.gray)
-              Button(intent: TalkIntent()) { Text("Send") }
-                .tint(.cyan)
-            }
+          buttons(context.state.state, size: 36)
             // Two buttons may not fit beside the camera.
             .dynamicIsland(verticalPlacement: .belowIfTooWide)
-          } else {
-            Button(intent: TalkIntent()) { Text("Talk") }
-              .tint(.cyan)
-          }
         }
       } compactLeading: {
         mark(context.state.state).frame(width: 20, height: 20)
@@ -78,6 +60,31 @@ struct TalkActivity: Widget {
         mark(context.state.state).frame(width: 20, height: 20)
       }
     }
+  }
+
+  /// Send, then drop it, at the far right, while it listens; otherwise the microphone, to talk.
+  private func buttons(_ state: String, size: CGFloat) -> some View {
+    HStack(spacing: 10) {
+      if state == "listening" {
+        round("arrow.up", "Send", size: size, intent: TalkIntent())
+        round("xmark", "Drop it", size: size, intent: CancelIntent())
+      } else {
+        round("mic.fill", "Talk to yapd", size: size, intent: TalkIntent())
+      }
+    }
+  }
+
+  /// One of its buttons, all alike: a cyan symbol on a round cyan glow.
+  private func round(_ symbol: String, _ label: String, size: CGFloat, intent: some AppIntent) -> some View {
+    Button(intent: intent) {
+      Image(systemName: symbol)
+        .font(.system(size: size * 0.4, weight: .semibold))
+        .foregroundStyle(.cyan)
+        .frame(width: size, height: size)
+        .background(.cyan.opacity(0.25), in: .circle)
+    }
+    .buttonStyle(.plain)
+    .accessibilityLabel(label)
   }
 
   /// The arc reactor, faded while it reaches yapd, glowing while it listens.
