@@ -238,8 +238,12 @@ export const WhisperDictation = Layer.scoped(
      */
     const record = (ended: Deferred.Deferred<Ending>, scope: Scope.Scope) =>
       Effect.gen(function* () {
+        // A device with its microphone open already, like a phone, which opens it as it's pressed, is heard from now, however
+        // long the note takes to get there and play: he needn't wait for it. One that opens it to play the note, like the
+        // Mac's helper, is heard once it has.
+        const already = yield* audio.microphone
         yield* cue("started")
-        const microphone = yield* audio.microphone
+        const microphone = Option.isSome(already) ? already : yield* audio.microphone
         if (Option.isNone(microphone)) return undefined
         yield* Effect.logInfo("Dictating")
 
