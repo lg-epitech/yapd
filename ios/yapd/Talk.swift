@@ -83,12 +83,18 @@ final class Talk {
       self?.listening = listening
       self?.update()
     }
-    connection.file = { speaker.keep($0, $1) }
+    connection.file = { [weak self] id, bytes in
+      speaker.keep(id, bytes)
+      // Something's about to be said.
+      DispatchQueue.main.async { self?.stirred() }
+    }
     connection.hello = { [id] in
       ["type": "hello", "permission": Speaker.permission, "client": ["id": id, "name": UIDevice.current.name, "hotkeys": false, "opens": true]]
     }
     connection.opened = { speaker.announce() }
     connection.heard = { [weak self] message in
+      // yapd is at work, so it isn't time to let go: it may have more to say, like the answer after "one moment".
+      DispatchQueue.main.async { self?.stirred() }
       switch message["type"] as? String {
       case "escape":
         let on = message["on"] as? Bool ?? false
@@ -98,7 +104,6 @@ final class Talk {
         DispatchQueue.main.async { UIApplication.shared.open(url) }
       default:
         speaker.handle(message)
-        if message["type"] as? String == "rest" { DispatchQueue.main.async { self?.settle() } }
       }
     }
     #if DEBUG
@@ -256,9 +261,14 @@ final class Talk {
     idle = Task { [weak self] in
       try? await Task.sleep(for: .seconds(20))
       guard let self, !Task.isCancelled else { return }
-      if self.dictating || self.playing { return self.settle() }
+      if self.dictating || self.playing || self.listening { return self.settle() }
       self.letGo()
     }
+  }
+
+  /// yapd said something, so the time to let go counts from now.
+  private func stirred() {
+    settle()
   }
 
   @ObservationIgnored private var holding: UIBackgroundTaskIdentifier = .invalid
@@ -273,6 +283,7 @@ final class Talk {
   /// Done for now: off the connection when it's in the background, with the microphone and the Live Activity gone either way.
   private func letGo() {
     idle?.cancel()
+    idle = nil
     if !foreground {
       connection.disconnect()
       speaker.close()
