@@ -45,13 +45,14 @@ const phones = async () => {
       devices?: ReadonlyArray<{
         identifier: string
         deviceProperties?: { name?: string }
-        hardwareProperties?: { platform?: string; udid?: string }
+        hardwareProperties?: { platform?: string; udid?: string; reality?: string }
         connectionProperties?: { pairingState?: string; tunnelState?: string }
       }>
     }
   }
   return (listed.result?.devices ?? [])
-    .filter((device) => device.hardwareProperties?.platform === "iOS" && device.connectionProperties?.pairingState === "paired")
+    // A real one: devicectl lists simulators too.
+    .filter((device) => device.hardwareProperties?.platform === "iOS" && device.hardwareProperties.reality !== "simulated" && device.connectionProperties?.pairingState === "paired")
     .map((device) => ({ id: device.identifier, name: device.deviceProperties?.name ?? device.identifier, connected: device.connectionProperties?.tunnelState !== "unavailable" }))
 }
 
