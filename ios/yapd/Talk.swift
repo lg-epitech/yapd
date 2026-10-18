@@ -34,6 +34,13 @@ enum Keychain {
   }
 }
 
+/// What the phone shows of yapd's state, from /state.
+struct Status: Decodable {
+  let on: Bool
+  let mode: String?
+  let waiting: Int?
+}
+
 @MainActor @Observable
 final class Talk {
   static let shared = Talk()
@@ -47,6 +54,8 @@ final class Talk {
   private(set) var listening = false
   /// What went wrong last, said on the screen until the next press.
   private(set) var trouble: String?
+  /// yapd's own state, as the menu bar shows it, followed while the app is on screen: none until it's heard from.
+  private(set) var status: Status?
   /// Whether the app is on screen, which keeps it connected.
   private var foreground = false
 
@@ -105,7 +114,7 @@ final class Talk {
         if self.foreground {
           Task {
             try? await Task.sleep(for: .seconds(3))
-            if self.foreground, !self.connected { await self.connect() }
+            await self.connect()
           }
         }
       }
@@ -124,7 +133,12 @@ final class Talk {
     self.server = url
     trouble = nil
     Task { await asked() }
-    if foreground { Task { await connect() } }
+    if foreground {
+      watching?.cancel()
+      watching = nil
+      watch()
+      Task { await connect() }
+    }
     return true
   }
 
@@ -137,6 +151,9 @@ final class Talk {
   }
 
   func unpair() {
+    watching?.cancel()
+    watching = nil
+    status = nil
     connection.disconnect()
     UserDefaults.standard.removeObject(forKey: "server")
     Keychain.token = nil
@@ -178,13 +195,53 @@ final class Talk {
 
   func appeared(_ foreground: Bool) {
     self.foreground = foreground
-    if foreground { Task { await connect() } } else { settle() }
+    if foreground {
+      Task { await connect() }
+      watch()
+    } else {
+      watching?.cancel()
+      watching = nil
+      settle()
+    }
   }
 
+  @ObservationIgnored private var watching: Task<Void, Never>?
+
+  /// Follows /state/stream while the app is on screen, for whether yapd is on, its mode and who waits on him.
+  private func watch() {
+    guard watching == nil, let server, let token = Keychain.token else { return }
+    watching = Task { [weak self] in
+      while !Task.isCancelled {
+        var request = URLRequest(url: server.appendingPathComponent("state/stream"))
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        // It says something only when something changes.
+        request.timeoutInterval = 3600
+        do {
+          let (bytes, response) = try await URLSession.shared.bytes(for: request)
+          guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw URLError(.badServerResponse) }
+          for try await line in bytes.lines {
+            guard line.hasPrefix("data: "), let status = try? JSONDecoder().decode(Status.self, from: Data(line.dropFirst(6).utf8)) else { continue }
+            self?.status = status
+          }
+        } catch {}
+        self?.status = nil
+        try? await Task.sleep(for: .seconds(3))
+      }
+    }
+  }
+
+  @ObservationIgnored private var connecting = false
+
+  /// On screen, it keeps trying every few seconds until yapd answers, one try at a time.
   private func connect() async {
-    guard let server, let token = Keychain.token else { return }
+    guard !connecting else { return }
+    connecting = true
+    defer { connecting = false }
     idle?.cancel()
-    _ = await connection.connect(to: server, token: token)
+    while foreground, !connected, let server, let token = Keychain.token {
+      if await connection.connect(to: server, token: token) { return }
+      try? await Task.sleep(for: .seconds(3))
+    }
   }
 
   /**

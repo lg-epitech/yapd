@@ -17,7 +17,8 @@ struct YapdApp: App {
         .preferredColorScheme(.dark)
         .tint(.cyan)
         .onOpenURL { talk.open($0) }
-        .onChange(of: phase, initial: true) { _, phase in talk.appeared(phase == .active) }
+        // Inactive is still on screen, like under Control Center: only the background lets go.
+        .onChange(of: phase, initial: true) { _, phase in talk.appeared(phase != .background) }
     }
   }
 }
@@ -68,16 +69,22 @@ struct Home: View {
     Button {
       Task { await talk.press() }
     } label: {
-      ZStack {
-        Circle()
-          .fill(talk.dictating ? Color.cyan : Color.cyan.opacity(0.12))
-          .overlay(Circle().stroke(Color.cyan, lineWidth: 3))
-          .shadow(color: .cyan.opacity(talk.connected ? 0.6 : 0), radius: talk.dictating ? 40 : 20)
-        Image(systemName: talk.dictating ? "paperplane.fill" : talk.playing ? "speaker.wave.2.fill" : "mic.fill")
-          .font(.system(size: 64))
-          .foregroundStyle(talk.dictating ? Color.black : Color.cyan)
+      // The arc reactor, as the menu bar draws it: faded while yapd can't be reached, dark while it's off, glowing as it
+      // listens, its coils turning as it speaks, with a moon in focus or quiet and a dot while a thread waits on him.
+      TimelineView(.animation(paused: !talk.dictating && !talk.playing)) { timeline in
+        let time = timeline.date.timeIntervalSinceReferenceDate
+        let pulse = talk.dictating ? (sin(time * 3) + 1) / 2 : 0
+        Reactor(
+          powered: talk.status?.on ?? true,
+          moon: talk.status?.mode == "focus" || talk.status?.mode == "quiet",
+          dot: (talk.status?.waiting ?? 0) > 0,
+          turned: talk.playing ? (time * 40).truncatingRemainder(dividingBy: 360) : 0
+        )
+        .opacity(talk.connected ? 1 : 0.35)
+        .shadow(color: .cyan.opacity(talk.connected ? 0.5 + pulse * 0.4 : 0), radius: talk.dictating ? 24 + pulse * 24 : 16)
+        .scaleEffect(1 + pulse * 0.04)
       }
-      .frame(width: 200, height: 200)
+      .frame(width: 220, height: 220)
     }
     .buttonStyle(.plain)
     .accessibilityLabel(talk.dictating ? "Send" : "Talk to yapd")
@@ -85,6 +92,7 @@ struct Home: View {
 
   private var status: String {
     if !talk.connected { return "Not connected" }
+    if talk.status?.on == false && !talk.dictating { return "Off. Press and say \"turn on\"." }
     if talk.dictating { return "Listening. Press again to send." }
     if talk.playing { return "Speaking" }
     return "Ready"

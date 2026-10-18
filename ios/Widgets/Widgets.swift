@@ -29,9 +29,8 @@ struct TalkActivity: Widget {
   var body: some WidgetConfiguration {
     ActivityConfiguration(for: TalkAttributes.self) { context in
       HStack(spacing: 16) {
-        Image(systemName: symbol(context.state.state))
-          .font(.title2)
-          .foregroundStyle(.cyan)
+        mark(context.state.state)
+          .frame(width: 30, height: 30)
         Text(words(context.state.state))
           .font(.headline)
         Spacer()
@@ -51,7 +50,7 @@ struct TalkActivity: Widget {
     } dynamicIsland: { context in
       DynamicIsland {
         DynamicIslandExpandedRegion(.leading) {
-          Image(systemName: symbol(context.state.state)).foregroundStyle(.cyan)
+          mark(context.state.state).frame(width: 28, height: 28)
         }
         DynamicIslandExpandedRegion(.center) {
           Text(words(context.state.state))
@@ -61,22 +60,20 @@ struct TalkActivity: Widget {
             .tint(.cyan)
         }
       } compactLeading: {
-        Image(systemName: symbol(context.state.state)).foregroundStyle(.cyan)
+        mark(context.state.state).frame(width: 20, height: 20)
       } compactTrailing: {
         Text(context.state.state == "listening" ? "Listening" : "")
       } minimal: {
-        Image(systemName: symbol(context.state.state)).foregroundStyle(.cyan)
+        mark(context.state.state).frame(width: 20, height: 20)
       }
     }
   }
 
-  private func symbol(_ state: String) -> String {
-    switch state {
-    case "listening": "mic.fill"
-    case "speaking": "speaker.wave.2.fill"
-    case "connecting": "antenna.radiowaves.left.and.right"
-    default: "waveform"
-    }
+  /// The arc reactor, faded while it reaches yapd, glowing while it listens.
+  private func mark(_ state: String) -> some View {
+    Reactor()
+      .opacity(state == "connecting" ? 0.35 : 1)
+      .shadow(color: .cyan.opacity(state == "listening" ? 0.9 : 0.4), radius: state == "listening" ? 6 : 3)
   }
 
   private func words(_ state: String) -> String {
