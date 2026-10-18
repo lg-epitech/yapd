@@ -9,6 +9,7 @@ import * as Wire from "./Wire.ts"
 interface Command {
   readonly type: string
   readonly id?: string
+  readonly on?: boolean
 }
 
 /** The real socket protocol, with playback and microphone frames supplied by the test. */
@@ -88,6 +89,7 @@ const device = (delayPlaying = false) =>
         playing = undefined
       }),
       next,
+      commands,
       order,
       disconnect: Effect.sync(() => connection?.terminate()),
       frame: (value: number) => Effect.sync(() => frame(value)),
@@ -109,18 +111,20 @@ const run = <A, E>(effect: Effect.Effect<A, E, Scope.Scope>, shortcut = "none") 
 /** A client on `/audio`, like a phone: what it was sent, and saying things to yapd as it would. */
 const client = (sockets: NonNullable<Option.Option.Value<Devices["Type"]["sockets"]>>, id = "phone") => {
   const sent: Array<string | Uint8Array> = []
-  let closed = false
-  const socket: ClientSocket = {
-    send: (data) => void sent.push(data),
-    close: () => {
-      closed = true
+  // A method that needs its socket, as Bun's do.
+  const socket = {
+    shut: false as boolean,
+    send: (data: string | Uint8Array) => void sent.push(data),
+    close() {
+      this.shut = true
     },
-  }
+  } satisfies ClientSocket & { shut: boolean }
+  const closed = () => socket.shut
   sockets.open(socket)
   const say = (message: object) => sockets.message(socket, JSON.stringify(message))
   return {
     sent,
-    closed: () => closed,
+    closed,
     say,
     hello: () => say({ type: "hello", permission: "authorized", client: { id, name: id } }),
     frame: (value: number) => sockets.message(socket, Wire.pcm16(new Float32Array(Wire.samples).fill(value))),
@@ -297,7 +301,11 @@ describe("Devices", () => {
         const playing = yield* Effect.fork(Effect.scoped(fake.audio.play(path)))
         yield* settle
         expect(phone.told("play")).toHaveLength(1)
+        fake.order.length = 0
+        // It never says it stopped, so it's let go of, and the dictation on it with it, which lets go of Escape on the Mac too.
         yield* drop(playing)
+        expect(phone.closed()).toBe(true)
+        yield* Queue.take(fake.commands).pipe(Effect.repeat({ until: (command) => command.type === "escape" && command.on === false }))
         phone.leave()
         fake.order.length = 0
         yield* Effect.scoped(Effect.zipRight(Effect.fork(fake.audio.play("/tmp/after.wav")), fake.next("play")))

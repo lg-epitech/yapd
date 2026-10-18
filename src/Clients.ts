@@ -318,19 +318,30 @@ const fresh = () => Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toSt
  */
 export const pair = (again: boolean) =>
   Effect.gen(function* () {
+    const name = yield* tailnetName
+    const address = Server.tailnet().find((address) => !address.includes(":"))
+    if (Option.isNone(name) || address === undefined) {
+      return yield* Console.error("This machine isn't on a tailnet that I can see. Start Tailscale, then run yapd pair again.")
+    }
     const settings = yield* Settings.make(Store.file)
     const had = again ? Option.none<string>() : yield* settings.read("token")
     const token = Option.getOrElse(had, fresh)
     if (Option.isNone(had)) yield* settings.write("token", token)
-    const name = yield* tailnetName
-    if (Option.isNone(name)) return yield* Console.error("This machine isn't on a tailnet that I can see. Start Tailscale, then run yapd pair again.")
-    const server = `http://${name.value}:${yield* Config.port}`
+    const port = yield* Config.port
+    const server = `http://${name.value}:${port}`
     const link = `yapd://pair?${new URLSearchParams({ server, token })}`
     yield* Console.log(`On your phone, with Tailscale on, scan this or open the link:\n\n${link}\n`)
     const code = yield* run(["qrencode", "-t", "ansiutf8", link]).pipe(Effect.option)
     if (Option.isSome(code)) yield* Console.log(code.value)
     yield* Console.log(`Or type it in: the server is ${server} and the token is ${token}`)
-    if (Option.isNone(had)) {
+    // Restarted to take the token in, unless yapd already answers on the tailnet to it.
+    const answers = yield* Effect.promise(() =>
+      fetch(`http://${address}:${port}/health`, { headers: { authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(2000) }).then(
+        (response) => response.ok,
+        () => false,
+      ),
+    )
+    if (!answers) {
       yield* Service.restart
       yield* Console.log(again ? "That token replaces the one before." : "yapd now listens on your tailnet, for what bears that token.")
     }

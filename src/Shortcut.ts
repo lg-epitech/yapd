@@ -182,10 +182,15 @@ export const make = (keys: Keys, send: (message: object) => void, initially: boo
        * nothing to wait for it to register: only while the keys are taken.
        */
       direct: (key: Key) => Effect.suspend(() => (on ? step(key) : Effect.void)),
-      /** The helper quit, letting go of Escape and whatever was being dictated. */
+      /**
+       * The device dictated on went away, letting go of whatever was being
+       * dictated, and of Escape, which any other device still holding it for
+       * that dictation lets go of too.
+       */
       quit: Effect.suspend(() => {
         if (!dictating) return Effect.void
         dictating = false
+        send({ type: "escape", on: false })
         return publish(cancelled)
       }),
     }

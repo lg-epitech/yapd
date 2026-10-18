@@ -815,7 +815,7 @@ const clientLink = (socket: ClientSocket): Link => {
       }
       socket.send(JSON.stringify(message))
     },
-    terminate: () => (socket.terminate ?? socket.close)(),
+    terminate: () => (socket.terminate === undefined ? socket.close() : socket.terminate()),
     prefetch: (path) => void ship(path),
   }
 }

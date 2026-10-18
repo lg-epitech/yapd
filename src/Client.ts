@@ -141,7 +141,7 @@ const openable = (url: string) => {
  * on the port the connection brings here. The connection to the server only
  * stands while the helper does, so the server never plays to one that's gone.
  */
-const bridge = (port: number) =>
+const bridge = (port: number, microphone: boolean) =>
   Effect.gen(function* () {
     yield* Helper.build
     const runtime = yield* Effect.runtime<never>()
@@ -311,7 +311,7 @@ const bridge = (port: number) =>
     )
     // Started again whenever it quits, since the shortcut needs it.
     yield* Effect.gen(function* () {
-      yield* Helper.launch(path, true)
+      yield* Helper.launch(path, microphone)
       for (let waited = 0; !up; waited++) {
         if (waited === 50) return yield* new ClientError({ reason: "The audio helper didn't start" })
         yield* Effect.sleep("200 millis")
@@ -333,8 +333,9 @@ export const client = Effect.gen(function* () {
   const port = yield* Config.port
   if (!(yield* sshd)) yield* Effect.logWarning(`This machine's SSH server is off, so ${destination.value} can't reach back here for its threads. On a Mac, turn on Remote Login in System Settings, General, Sharing.`)
   yield* Effect.forkScoped(link(destination.value, port))
-  if (process.platform === "darwin" && (yield* Config.listen)) {
-    yield* Effect.forkScoped(bridge(port).pipe(Effect.catchAll((error) => Effect.logWarning("yapd can't speak or listen here", error))))
+  // YAPD_LISTEN=false still plays here, as yapd does on a Mac, with the microphone closed.
+  if (process.platform === "darwin") {
+    yield* Effect.forkScoped(bridge(port, yield* Config.listen).pipe(Effect.catchAll((error) => Effect.logWarning("yapd can't speak or listen here", error))))
   }
   return yield* Effect.never
 }).pipe(Effect.scoped, Effect.provide(Logger.pretty))
