@@ -22,17 +22,31 @@ import * as Store from "./Store.ts"
 // it's on. A phone has no SSH, so it's given a token, `yapd pair`, and
 // reaches yapd over the tailnet.
 
+/** Whether it's a time zone, as Intl names them, like America/Toronto. */
+const zoned = (zone: string) => {
+  try {
+    new Intl.DateTimeFormat("en", { timeZone: zone })
+    return /^[A-Za-z_]+(?:\/[A-Za-z0-9_+-]+)*$/.test(zone)
+  } catch {
+    return false
+  }
+}
+
 /** What `yapd join` is told: what the machine is called, who to log in as there, and its SSH host key. */
 export const Request = Schema.Struct({
   name: Schema.String.pipe(Schema.pattern(/^[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?$/)),
   user: Schema.String.pipe(Schema.pattern(/^[A-Za-z_][A-Za-z0-9_.-]{0,63}$/)),
   key: Schema.String.pipe(Schema.pattern(/^(?:ssh-ed25519|ecdsa-sha2-nistp(?:256|384|521)|ssh-rsa) [A-Za-z0-9+/]+={0,3}$/)),
+  /** Its time zone, which the first to join gives a server that has none set, since its user is where that machine is. */
+  zone: Schema.optional(Schema.String.pipe(Schema.filter(zoned))),
 })
 export type Request = typeof Request.Type
 
 /** What it answers: the socket here it forwards back to its SSH, yapd's port here, and this machine's keys to let in. */
 export const Answer = Schema.Struct({
   socket: Schema.optional(Schema.String),
+  /** The time zone yapd here tells the time in. */
+  zone: Schema.optional(Schema.String),
   server: Schema.optional(Schema.Number),
   keys: Schema.optional(Schema.Array(Schema.String)),
   reason: Schema.optional(Schema.String),
@@ -116,7 +130,11 @@ export const join = (input: string) =>
   Effect.gen(function* () {
     const asked = yield* decodeRequest(input).pipe(Effect.option)
     if (Option.isNone(asked)) return { answer: Answer.make({ reason: "yapd here and on the client don't match. Update both." }), changed: false }
-    const { name, user, key } = asked.value
+    const { name, user, key, zone } = asked.value
+    // yapd here tells the time as its user would, who's where the machines they use are, unless they've said otherwise.
+    const own = Intl.DateTimeFormat().resolvedOptions().timeZone
+    const zoning = zone !== undefined && zone !== own && !Home.has("TZ")
+    if (zoning) Home.set("TZ", zone)
     const store = yield* Store.make(Store.file)
     const kept = yield* store.transaction((database): { readonly row?: Row; readonly changed: boolean } => {
       const had = database.query<Row, [string]>("select name, user, port, key from clients where name = ?").get(name)
@@ -140,8 +158,8 @@ export const join = (input: string) =>
       await rm(path, { force: true })
     })
     return {
-      answer: Answer.make({ socket: path, server: yield* Config.port, keys: yield* ownKeys }),
-      changed: kept.changed,
+      answer: Answer.make({ socket: path, server: yield* Config.port, keys: yield* ownKeys, zone: zoning ? zone : own }),
+      changed: kept.changed || zoning,
     }
   }).pipe(Effect.scoped)
 

@@ -4,15 +4,16 @@ import { mkdtemp } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import * as Client from "./Client.ts"
+import * as Home from "./Home.ts"
 
 describe("Client", () => {
   test("the server it uses goes in the settings in place of the one before, or at the end, leaving the rest as they were", async () => {
     const file = join(await mkdtemp(join(tmpdir(), "yapd-client-")), ".env")
     await Bun.write(file, "# yapd's settings\nYAPD_STYLE=\"Call me sir.\"\nexport YAPD_SERVER=old@box\nYAPD_NAME=Rosie")
-    Client.settle("YAPD_SERVER", "laurent@rig", file)
+    Home.set("YAPD_SERVER", "laurent@rig", file)
     expect(readFileSync(file, "utf8")).toBe("# yapd's settings\nYAPD_STYLE=\"Call me sir.\"\nYAPD_SERVER=laurent@rig\nYAPD_NAME=Rosie")
     await Bun.write(file, "YAPD_NAME=Rosie")
-    Client.settle("YAPD_SERVER", "laurent@rig", file)
+    Home.set("YAPD_SERVER", "laurent@rig", file)
     expect(readFileSync(file, "utf8")).toBe("YAPD_NAME=Rosie\nYAPD_SERVER=laurent@rig\n")
   })
 

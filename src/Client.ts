@@ -67,9 +67,9 @@ export const join = (destination: string, request: Clients.Request) =>
     (reason) => new ClientError({ reason }),
   ).pipe(
     Effect.flatMap((answer) => decodeAnswer(answer).pipe(Effect.mapError(() => new ClientError({ reason: `yapd on ${destination} needs updating.` })))),
-    Effect.flatMap(({ socket, server, keys, reason }) =>
+    Effect.flatMap(({ socket, server, keys, zone, reason }) =>
       socket !== undefined && server !== undefined
-        ? Effect.succeed({ socket, server, keys: keys ?? [] })
+        ? Effect.succeed({ socket, server, keys: keys ?? [], zone })
         : Effect.fail(new ClientError({ reason: reason ?? `yapd on ${destination} answered in a way I don't understand.` })),
     ),
   )
@@ -78,7 +78,7 @@ export const join = (destination: string, request: Clients.Request) =>
 export const request = (): Either.Either<Clients.Request, string> => {
   const key = hostKey()
   if (key === undefined) return Either.left("This machine has no SSH host key, so its server can't reach back here. Turn on its SSH server.")
-  return Either.right({ name: Origin.clientName(), user: userInfo().username, key })
+  return Either.right({ name: Origin.clientName(), user: userInfo().username, key, zone: Intl.DateTimeFormat().resolvedOptions().timeZone })
 }
 
 /**
@@ -372,15 +372,6 @@ const letIn = (keys: ReadonlyArray<string>, destination: string) =>
     yield* Console.log(`${destination} can now log in here over SSH, only through its connection to this machine, in ${file}`)
   })
 
-/** Sets `name` to `value` in yapd's settings, in place of where it was, or at the end. */
-export const settle = (name: string, value: string, file = Home.settings) => {
-  const had = existsSync(file) ? readFileSync(file, "utf8") : ""
-  const line = `${name}=${value}`
-  const pattern = new RegExp(`^\\s*(?:export\\s+)?${name}=.*$`, "m")
-  const next = pattern.test(had) ? had.replace(pattern, line) : `${had}${had === "" || had.endsWith("\n") ? "" : "\n"}${line}\n`
-  writeFileSync(file, next, { mode: 0o600 })
-}
-
 /**
  * `yapd setup client <server>`: has the server take this machine in, lets it
  * back in over SSH, keeps which server it is in the settings, where the hooks
@@ -394,8 +385,13 @@ export const setup = (destination: string, bun: string, main: string) =>
     if (Either.isLeft(asking)) return yield* new ClientError({ reason: asking.left })
     yield* Console.log(`Asking ${destination} to take this machine in, as ${asking.right.name}`)
     const joined = yield* join(destination, asking.right)
+    if (joined.zone !== undefined && joined.zone !== asking.right.zone) {
+      yield* Console.log(`${destination} tells the time as ${joined.zone}, while this machine is on ${asking.right.zone}. TZ in its ~/.yapd/.env changes that.`)
+    } else if (joined.zone !== undefined) {
+      yield* Console.log(`${destination} tells the time as ${joined.zone}, as this machine does.`)
+    }
     yield* letIn(joined.keys, destination)
-    yield* Effect.sync(() => settle("YAPD_SERVER", destination))
+    yield* Effect.sync(() => Home.set("YAPD_SERVER", destination))
     // So the service written next is the client's, as it would be once the settings are read.
     process.env.YAPD_SERVER = destination
     yield* Console.log(`This machine uses yapd on ${destination} now, as YAPD_SERVER in ${Home.settings}`)

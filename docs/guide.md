@@ -389,6 +389,8 @@ yapd setup client me@server
 
 That same connection carries the server back to this machine's SSH, whatever network it's on, so the server reaches the threads here, sends follow-ups and starts work here as it does for [agents on another machine](#agents-on-another-machine), without you listing it in `YAPD_REMOTES`. That needs the SSH server on: on a Mac, Remote Login in System Settings, General, Sharing. Setup adds the server's key to `~/.ssh/authorized_keys`, allowed only from this machine itself, which is where its connection arrives. The server runs `yapd` here by its `~/.bun/bin` or the `PATH` SSH commands get.
 
+yapd tells the time by the server's clock, in the time zone of the first machine that joined it, unless `TZ` in its settings says otherwise, so "remind me at three" and "goodnight" mean where you are.
+
 yapd speaks through the device you used last, the one you last pressed the shortcut or the button on, and otherwise the one that connected first. What it started saying finishes there. When nothing is connected, what comes in is summed up and kept, as when it's [off](#turning-yapd-off), for when you ask to be caught up.
 
 On a server without a GPU it can use, the voice renders on the CPU. A line plays once it's all rendered, unless the CPU renders it a few times faster than it's spoken, as a server's many cores often do: then its first sentences play while the rest renders, as on a Mac.

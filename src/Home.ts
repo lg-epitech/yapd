@@ -1,4 +1,4 @@
-import { copyFileSync, existsSync, mkdirSync, renameSync, rmSync } from "node:fs"
+import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs"
 import { homedir } from "node:os"
 import { join, resolve } from "node:path"
 
@@ -41,4 +41,16 @@ export const adopt = (folder: string, into = home) => {
     move(from, to)
     console.error(`Moved ${from} to ${to}, where yapd reads it from now on`)
   }
+}
+
+const line = (name: string) => new RegExp(`^\\s*(?:export\\s+)?${name}\\s*=.*$`, "m")
+
+/** Whether the settings set `name` at all. */
+export const has = (name: string, file = settings) => existsSync(file) && line(name).test(readFileSync(file, "utf8"))
+
+/** Sets `name` to `value` in the settings, in place of where it was, or at the end, leaving the rest as it was. */
+export const set = (name: string, value: string, file = settings) => {
+  const had = existsSync(file) ? readFileSync(file, "utf8") : ""
+  const next = line(name).test(had) ? had.replace(line(name), `${name}=${value}`) : `${had}${had === "" || had.endsWith("\n") ? "" : "\n"}${name}=${value}\n`
+  writeFileSync(file, next, { mode: 0o600 })
 }
