@@ -66,7 +66,8 @@ const dictation = (
                   volume: () => Effect.void,
                 }
               }),
-            microphone: Effect.map(PubSub.subscribe(microphone), Option.some),
+            // Only while it's open, as the helper's: playing opens it.
+            microphone: Effect.suspend(() => (open ? Effect.map(PubSub.subscribe(microphone), Option.some) : Effect.succeedNone)),
             echo: () => Effect.succeed(false),
             rest: Effect.sync(() => {
               playing++

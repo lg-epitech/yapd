@@ -137,6 +137,13 @@ export const claudePermissions = optional("YAPD_CLAUDE_PERMISSIONS")
  */
 export const codexSandbox = optional("YAPD_CODEX_SANDBOX")
 
+/**
+ * The machine this one uses yapd on, as an SSH destination like
+ * `me@server`, on a machine that only has yapd's hooks and its speaker and
+ * microphone: set by `yapd setup client`.
+ */
+export const server = optional("YAPD_SERVER")
+
 /** Machines whose hooks reach this daemon, like `rig` or `rig=me@rig.example.com`, so follow-ups can go back over SSH. */
 export const remotes = Config.string("YAPD_REMOTES").pipe(
   Config.withDefault(""),

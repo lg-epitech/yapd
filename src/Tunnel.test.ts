@@ -154,7 +154,7 @@ describe("Tunnel", () => {
         expect(after.server.origin).toBe("http://127.0.0.1:50002")
         expect(Redacted.value(after.token)).toBe("token-2")
         expect(rig.tries).toEqual([0, 5000, 6000, 8000])
-        expect(rig.calls.filter((line) => line.endsWith("cd / && yapd t3"))).toHaveLength(2)
+        expect(rig.calls.filter((line) => line.endsWith(" yapd t3"))).toHaveLength(2)
         expect(yield* tunnel.master).toEqual(Option.some(`${folder}/ssh-rig.sock`))
 
         // T3 Code there restarted on another port, with a new token: a fresh connection forwards there, and nothing else listens.

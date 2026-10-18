@@ -58,7 +58,11 @@ export const command =
       ...[bun, "--no-env-file", main, "hook", agent, ...(wait ? ["--wait"] : [])].map(quote),
     ].join(" ")
 
-/** The settings hooks need, when they're set: the port yapd listens on, and where its home is. */
+/**
+ * The settings hooks need, when they're set: the port yapd listens on, and
+ * where its home is. What a client is called they read from its settings,
+ * so setting one up leaves their commands as they were.
+ */
 export const environment = (): Record<string, string> => ({
   ...(process.env.YAPD_PORT === undefined ? {} : { YAPD_PORT: process.env.YAPD_PORT }),
   ...(process.env.YAPD_HOME === undefined ? {} : { YAPD_HOME: Home.home }),

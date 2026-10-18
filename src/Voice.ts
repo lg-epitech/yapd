@@ -530,12 +530,16 @@ export const kokoro = (command: ReadonlyArray<string>, voice: string, effect: st
     }
     /** Where the process says it runs: on the GPU, or on the CPU when it found none, or moved there once the GPU failed. */
     let running: Device | undefined
+    /** How many seconds of speech the latest whole line took a second to render, on the CPU. */
+    let pace: number | undefined
     /**
      * On the CPU, the rest of a line can take longer to render than its first
      * part takes to play, which would leave it pausing midway: lines there
-     * render whole, and play once they have, as they always did.
+     * render whole, and play once they have, as they always did. Unless it
+     * renders several times faster than it speaks, like on a server's many
+     * cores, where the rest is mostly there by the time it's played on into.
      */
-    const slow = () => device === "CPU" || running === "CPU"
+    const slow = () => (device === "CPU" || running === "CPU") && !(pace !== undefined && pace >= brisk)
 
     const start = Effect.gen(function* () {
       const ready = Deferred.unsafeMake<void, KokoroError>(FiberId.none)
@@ -683,11 +687,19 @@ export const kokoro = (command: ReadonlyArray<string>, voice: string, effect: st
                     },
                   }),
             })
+            const asked = now()
             yield* tell(child, { type: "render", id, text, path, ...(first === undefined ? {} : { first }) })
             let abandoned = false
             const remove = (files: ReadonlyArray<string | undefined>) =>
               Effect.promise(() => Promise.all(files.map((file) => (file === undefined ? undefined : rm(file, { force: true })))))
             const turn = yield* Deferred.await(finished).pipe(
+              // How fast it renders, by lines long enough for that to be more than its start-up.
+              Effect.tap((duration) =>
+                Effect.sync(() => {
+                  const took = (now() - asked) / 1000
+                  if (duration >= 2 && took > 0) pace = duration / took
+                }),
+              ),
               // The process may only hear it was given up on once it's done, busy as it is rendering, so its files are removed here.
               Effect.tap(() => (abandoned ? remove([path, first]) : Effect.void)),
               Effect.timeout("60 seconds"),
@@ -743,6 +755,9 @@ export const withFallback = (
     }),
   }
 }
+
+/** How many times faster than it speaks Kokoro renders on the CPU before a line's first part plays while the rest renders. */
+const brisk = 3
 
 /** Lines this short are kept once rendered: acknowledgements, questions, notices. */
 const brief = 160

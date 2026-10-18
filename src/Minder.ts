@@ -1,12 +1,11 @@
 import { Data, Effect, Option, Schedule, Stream } from "effect"
 import { closeSync, openSync } from "node:fs"
 import { appendFile } from "node:fs/promises"
-import { hostname } from "node:os"
 import { join } from "node:path"
 import * as Cli from "./Cli.ts"
 import * as Config from "./Config.ts"
 import { home } from "./Home.ts"
-import { launched, type Origin } from "./Origin.ts"
+import { host, launched, type Origin } from "./Origin.ts"
 import { detached, ProcessError, stop } from "./Process.ts"
 import * as Project from "./Project.ts"
 import * as Sessions from "./Sessions.ts"
@@ -75,7 +74,7 @@ const tell = (session: Sessions.Session, message: string) =>
   Effect.gen(function* () {
     const port = yield* Config.port
     const project = yield* Project.name(session.directory)
-    const origin: Origin = { host: hostname(), project, launched: true }
+    const origin: Origin = { host: host(), project, launched: true }
     const query = new URLSearchParams({ agent: session.agent, origin: JSON.stringify(origin) })
     yield* Effect.tryPromise((signal) =>
       fetch(`http://127.0.0.1:${port}/events?${query}`, {

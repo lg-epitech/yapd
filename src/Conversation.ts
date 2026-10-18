@@ -821,6 +821,8 @@ export const make = (options: {
         const scope = yield* Effect.scope
         const part = yield* audio.play(first.path, 0)
         const began = yield* Clock.currentTimeMillis
+        // A device that's sent what it plays gets the whole once it's rendered, so it's there by the time it's played on into.
+        if (audio.prefetch !== undefined) yield* first.render.whole.pipe(Effect.zipRight(audio.prefetch(path)), Effect.ignore, Effect.forkScoped)
         const paced = (part.duration * text.split(/\s+/).length) / Math.max(1, Option.getOrElse(yield* first.render.words, () => 1))
         const whole = first.render.whole.pipe(
           Effect.timeoutFail({ duration: slowest, onTimeout: () => new AudioError({ message: "The rest of the line didn't render in time" }) }),

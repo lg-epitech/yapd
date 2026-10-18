@@ -51,6 +51,10 @@ Put your habits in `~/.yapd/preferences.md` in plain words, like "Fable on high 
 
 yapd talks on your Mac, but the agents can run anywhere, Linux included. Install it on the server too and forward port 4747 back to the Mac. Updates come in, your replies go back out, and its T3 Code threads show up beside yours. [Here's how](docs/guide.md#agents-on-another-machine).
 
+## On a server
+
+yapd can also run on an always-on machine, Linux included, and talk to you through your Mac or your phone: `yapd setup server` there, and `yapd setup client me@server` on the Mac. The server does the work, and the Mac only plays and listens, so it can close without taking yapd with it. [Here's how](docs/guide.md#running-yapd-on-a-server).
+
 ## Providers
 
 yapd doesn't bring its own model. It borrows a coding agent CLI you're already signed in to: Codex by default, or Claude Code, Grok Build, Antigravity, OpenCode, Cursor or Gemini CLI. Pick one with `YAPD_PROVIDER`, and a faster model for working out what you say with `YAPD_BRAIN_MODEL`. [The details](docs/guide.md#providers).
