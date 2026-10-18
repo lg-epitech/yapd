@@ -413,7 +413,7 @@ bun run phone
 
 The first time, trust the app on the phone in Settings, General, VPN & Device Management. With a free Apple ID it stops opening after a week, until you run that again. Scan the code `yapd pair` printed with the camera, or type in what it printed, and allow the microphone.
 
-Press its button to talk, and it sends what you said once you've been quiet for about two seconds, so you needn't press again, though you still can, sooner. To press again to send, as with the shortcut, turn off Send when I stop talking in its settings. To talk without opening it, set the Action button to Controls, then Talk to yapd: hold it, and talk. "Talk to yapd" is in Shortcuts and Control Center too. While you talk, a Live Activity says what yapd is doing, with buttons to send and to drop it. The phone is the device yapd speaks through from your first press until a little after it goes quiet with the app in the background, when it lets go, and yapd goes back to your Mac.
+Press its button to talk, and it sends what you said once you've been quiet for about two seconds, so you needn't press again, though you still can, sooner. To press again to send, as with the shortcut, turn off Send when I stop talking in its settings. To talk without opening it, set the Action button to Controls, then Talk to yapd: hold it, and talk. "Talk to yapd" is in Shortcuts and Control Center too. While you talk, a Live Activity on the Lock Screen and in the Dynamic Island says what yapd is doing, with buttons to send and to drop it. The phone is the device yapd speaks through from your first press until a little after it goes quiet with the app in the background, when it lets go, and yapd goes back to your Mac.
 
 ## Agents on another machine
 
