@@ -12,8 +12,8 @@ import { Vad } from "./Vad.ts"
 import { extension, Voice } from "./Voice.ts"
 
 // Dictating new work: the user presses the shortcut, talks for as long as they
-// like, pausing to think, and presses it again to send, or, from a phone set to,
-// it's sent once they stop talking. Updates wait meanwhile.
+// like, pausing to think, and presses it again to send, or it's sent once they
+// stop talking, unless that's turned off. Updates wait meanwhile.
 // It ends at what they said, or at nothing; what's done with it is up to
 // whoever listens.
 

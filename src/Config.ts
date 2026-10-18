@@ -112,6 +112,13 @@ export const shortcut = Config.string("YAPD_SHORTCUT").pipe(
 )
 
 /**
+ * Whether a dictation is sent once the user has spoken and then been quiet for
+ * about two seconds, rather than only when they press again. For the shortcut on
+ * every Mac: the phone says so itself, with its own setting.
+ */
+export const sendOnPause = Config.boolean("YAPD_SEND_ON_PAUSE").pipe(Config.withDefault(true))
+
+/**
  * Folders that hold the user's projects, like `~/projects,~/work`. Every git
  * repository directly inside one can have work started in it from the command line.
  */

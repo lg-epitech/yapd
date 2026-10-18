@@ -131,7 +131,7 @@ A session another app drives, like T3 Code, only gets follow-ups through that ap
 
 ## Dictating
 
-Press ctrl+option+cmd+space from any app and talk to yapd, then press it again to send, or Escape to drop it. A short rising sound says it's listening, a higher one that it's sent, a falling one that it's dropped. Take your time: pausing to think doesn't end it, only the shortcut does. What you said goes to [the assistant](#asking-yapd).
+Press ctrl+option+cmd+space from any app and talk to yapd. Once you've been quiet for about two seconds, it's sent, so you needn't press again, though you can, sooner. Escape drops it. A short rising sound says it's listening, a higher one that it's sent, a falling one that it's dropped. A shorter pause to think doesn't end it. To send only when you press again, set `YAPD_SEND_ON_PAUSE=false`; on a [server](#running-yapd-on-a-server), that's for every Mac that connects, and [your phone](#your-phone) has its own setting. What you said goes to [the assistant](#asking-yapd).
 
 If yapd is reading an update when you press it, it stops, and reads it again from the start once you're done, along with anything that came in meanwhile. If you forget about it, it stops listening after five minutes and drops what it heard. It doesn't need any permission beyond the microphone.
 
