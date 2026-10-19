@@ -320,18 +320,17 @@ export const menu = (options: {
   readonly mention: (ref: Threads.Ref, said: string) => Effect.Effect<void>
   /** Where what's said again of a row is noted as heard, so a digest or "what did I miss?" doesn't tell of it again. */
   readonly journal?: Pick<Journal["Type"], "markHeard">
-  /** What makes of what he says right after what's said again of a row a follow-up about its thread. Without it, only "Mute." is listened for. */
+  /** What makes of what he says over or right after what's said again of a row a follow-up about its thread. Without it, what he says only stops it. */
   readonly following?: (ref: Threads.Ref, line: string) => Conversation.Answer["followUp"]
   /** His reminders, to tell one that was told from an offer, which was asked: without them, a reminder said again is never followed up. */
   readonly reminders?: Pick<Reminders.Reminders, "get">
 }) => {
   const { latest, threads, mutes, controls, daemon, mention, journal, following, reminders } = options
   /**
-   * Whether a row, said again, can be followed up from its end about its
-   * thread, as it could as it was first said: an update, a failure, a limit
-   * it hit, or a reminder about it that wasn't an offer. Over anything else,
-   * like what it waits on him for, which may ask for a secret, only "Mute."
-   * is listened for.
+   * Whether a row, said again, can be followed up about its thread, as it
+   * could as it was first said: an update, a failure, a limit it hit, or a
+   * reminder about it that wasn't an offer. What he says over anything else,
+   * like what it waits on him for, which may ask for a secret, only stops it.
    */
   const answerable = (shown: Shown) =>
     Effect.gen(function* () {
@@ -383,11 +382,12 @@ export const menu = (options: {
      * Says a thread's latest update again, by its key, all of it, its "more"
      * too: as an update, when it's one he heard, so a reply to it still gets
      * there, otherwise what was kept of it, as an answer that makes "it" the
-     * thread, which he can follow up from its end when it could be followed
-     * up as it was first said. A session's row, or
-     * a thread yapd can't reach now, as when it was archived or its machine
-     * can't be seen, isn't said again then: "it" would be something nothing
-     * he says can act on.
+     * thread. He asked to hear it, so talking over it stops it, as over any
+     * answer he asked for: what he says is a follow-up when it could be
+     * followed up as it was first said, and otherwise nothing comes of it. A
+     * session's row, or a thread yapd can't reach now, as when it was
+     * archived or its machine can't be seen, isn't said again then: "it"
+     * would be something nothing he says can act on.
      */
     replayThread: (key: string) =>
       Effect.gen(function* () {
@@ -426,7 +426,7 @@ export const menu = (options: {
             ...(journal === undefined || Option.isNone(entry)
               ? {}
               : { heard: Effect.flatMap(Clock.currentTimeMillis, (at) => journal.markHeard([entry.value.id], at)) }),
-            ...(following === undefined || !listens ? {} : { followUp: following(ref, spoken), window: Conversation.answering, after: true }),
+            ...(following !== undefined && listens ? { followUp: following(ref, spoken), window: Conversation.answering } : { followUp: stops, window: Conversation.linger }),
           },
           turns,
         )
@@ -434,6 +434,9 @@ export const menu = (options: {
       }),
   }
 }
+
+/** What he says over a row said again that can't be followed up: it stops it, and nothing else comes of it. */
+const stops: Conversation.Answer["followUp"] = () => Effect.succeedSome(Effect.void)
 
 /** How many of what was told of a thread, or sent to it for him, a panel beside its row shows. */
 const panel = 5
