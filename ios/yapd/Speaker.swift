@@ -323,11 +323,15 @@ final class Speaker {
     tapped = true
   }
 
-  /// Stops the engine, which turns the microphone off until the next line, and lets other apps' audio back up.
+  /**
+   * Stops the engine, which turns the microphone off until the next line, and
+   * lets other apps' audio back up. A press yapd hasn't answered yet stays
+   * pending, since this may have been sent before it: yapd starting that
+   * dictation opens the microphone again, and not starting it lets it go.
+   */
   private func rest() {
     stop(silently: true)
     active = false
-    pressed = false
     halt()
     try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
   }
