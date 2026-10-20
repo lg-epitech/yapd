@@ -16,10 +16,10 @@ struct TalkIntent: AudioRecordingIntent, LiveActivityIntent {
   }
 }
 
-/// Drops what's being dictated.
+/// Drops what's being dictated, or else stops what yapd is saying.
 struct CancelIntent: LiveActivityIntent {
   static let title: LocalizedStringResource = "Drop it"
-  static let description = IntentDescription("Drops what you're dictating to yapd.")
+  static let description = IntentDescription("Drops what you're dictating to yapd, or stops what it's saying.")
 
   func perform() async throws -> some IntentResult {
     #if YAPD_APP

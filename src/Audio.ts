@@ -238,7 +238,7 @@ const Event = Schema.Union(
   Schema.Struct({ type: Schema.Literal("failed"), id: Schema.String, message: Schema.String }),
   Schema.Struct({ type: Schema.Literal("error"), message: Schema.String }),
   Schema.Struct({ type: Schema.Literal("shortcut"), registered: Schema.Boolean, message: Schema.optional(Schema.String) }),
-  Schema.Struct({ type: Schema.Literal("pressed"), key: Schema.Literal("shortcut", "escape"), onPause: Schema.optional(Schema.Boolean) }),
+  Schema.Struct({ type: Schema.Literal("pressed"), key: Schema.Literal("shortcut", "escape", "stop"), onPause: Schema.optional(Schema.Boolean) }),
 )
 const decodeEvent = Schema.decodeUnknownOption(Schema.parseJson(Event))
 
@@ -490,6 +490,19 @@ export const device = (
       runSync(PubSub.publish(frames, samples))
     }
 
+    /**
+     * He pressed stop on it, like on a phone, whose microphone is off while
+     * yapd speaks: what it's saying ends now, broken off, as when its link
+     * goes, so it's never taken as heard to the end.
+     */
+    const hush = () => {
+      if (current === undefined) return
+      const playback = current
+      runFork(Effect.logInfo(`${options.name ?? "The audio helper"} stopped what yapd was saying`))
+      send({ type: "stop" })
+      settle(playback, new AudioError({ message: "Stopped by a press" }), 0)
+    }
+
     const handle = (text: string) => {
       const event = decodeEvent(text)
       if (Option.isNone(event)) return
@@ -578,6 +591,7 @@ export const device = (
           owner.registered(event.value.registered, event.value.message)
           return
         case "pressed":
+          if (event.value.key === "stop") return hush()
           owner.pressed(event.value.key, event.value.onPause)
       }
     }
