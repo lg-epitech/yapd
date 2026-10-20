@@ -202,6 +202,7 @@ final class Talk {
     }
     // Sent only when pressed again, never on a pause, which someone else talking nearby would put off or fill.
     connection.send(["type": "pressed", "key": "shortcut", "onPause": false])
+    speaker.sent()
   }
 
   /// Drops what's being dictated, as Escape does on the Mac, or else stops what yapd is saying.

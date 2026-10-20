@@ -91,9 +91,13 @@ final class Speaker {
   private var touched = false
   private var tapped = false
   private var listening = false
-  /// From a press that starts a dictation until yapd answers it, and while yapd says he's dictating: the microphone is open only then.
+  /// From a press that starts a dictation until yapd answers it, and while yapd says he's dictating on this phone: the microphone is open only then.
   private var pressed = false
   private var dictation = false
+  /// Presses so far, so an unanswered one closing the microphone leaves a later one's alone.
+  private var presses = 0
+  /// How long a press waits for yapd to start dictating, which it does at once unless it's off.
+  private static let unanswered: TimeInterval = 5
   /// What yapd sent to play, by its id, in a folder of its own.
   private var files: [String: URL] = [:]
   private let folder: URL
@@ -161,21 +165,35 @@ final class Speaker {
   func open() {
     queue.async {
       self.pressed = true
+      self.presses += 1
       self.openMicrophone()
     }
   }
 
+  /// The press reached yapd: should it start no dictation, as while yapd is off, the microphone closes again before long.
+  func sent() {
+    queue.async {
+      let press = self.presses
+      self.queue.asyncAfter(deadline: .now() + Speaker.unanswered) {
+        guard self.presses == press, self.pressed, !self.dictation else { return }
+        self.pressed = false
+        self.closeMicrophone()
+      }
+    }
+  }
+
   /**
-   * Whether he's dictating, as yapd says, from the press that starts it until
-   * it's sent or dropped. The microphone stays open all that while, and opens
-   * again with the next line should yapd rest it, as it does once it has
-   * stopped what it was saying. Once it's over, yapd rests it.
+   * Whether he's dictating, as yapd says to every device, from the press that
+   * starts it until it's sent or dropped. For a dictation pressed for here, the
+   * microphone stays open all that while, and opens again with the next line
+   * should yapd rest it, as it does once it has stopped what it was saying.
+   * One started on a Mac leaves it closed. Once it's over, yapd rests it.
    */
   func dictating(_ on: Bool) {
     queue.async {
+      self.dictation = on && (self.pressed || self.dictation)
       self.pressed = false
-      self.dictation = on
-      if on { self.openMicrophone() }
+      if self.dictation { self.openMicrophone() }
     }
   }
 
@@ -236,6 +254,19 @@ final class Speaker {
     } catch {
       tell(["type": "error", "message": "Could not start the audio: \(error)"])
     }
+  }
+
+  /// Closes the microphone, with nothing dictated: carrying on with what it plays without it, or resting, as yapd hears.
+  private func closeMicrophone() {
+    guard engine.isRunning, touched else { return }
+    guard playing == nil else {
+      do { try restart() } catch { tell(["type": "error", "message": "Could not restart audio: \(error)"]) }
+      return
+    }
+    active = false
+    halt()
+    tell(["type": "rested"])
+    try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
   }
 
   private func session(_ hearing: Bool) throws {
