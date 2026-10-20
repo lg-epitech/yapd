@@ -36,6 +36,8 @@ struct Home: View {
           Text(status).font(.headline).foregroundStyle(.secondary)
           if talk.dictating {
             Button("Drop it", role: .cancel) { talk.cancel() }
+          } else if talk.playing {
+            Button("Stop", role: .cancel) { talk.cancel() }
           }
         } else {
           Text("Pair with yapd").font(.title2.bold())
@@ -93,7 +95,7 @@ struct Home: View {
   private var status: String {
     if !talk.connected { return "Not connected" }
     if talk.status?.on == false && !talk.dictating { return "Off. Press and say \"turn on\"." }
-    if talk.dictating { return Talk.sendsOnPause ? "Listening. I'll send it when you stop." : "Listening. Press again to send." }
+    if talk.dictating { return "Listening. Press again to send." }
     if talk.playing { return "Speaking" }
     return "Ready"
   }
@@ -105,7 +107,6 @@ struct Pairing: View {
   @State private var server = Talk.shared.server?.absoluteString ?? ""
   @State private var token = ""
   @State private var invalid = false
-  @AppStorage("sendsOnPause") private var sendsOnPause = true
 
   var body: some View {
     NavigationStack {
@@ -121,11 +122,6 @@ struct Pairing: View {
         }
         if invalid {
           Text("That isn't an address and a token.").foregroundStyle(.red)
-        }
-        Section {
-          Toggle("Send when I stop talking", isOn: $sendsOnPause)
-        } footer: {
-          Text("Sent after about two seconds of quiet, so you needn't press again. You still can, sooner.")
         }
         if talk.paired {
           Section {

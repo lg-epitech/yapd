@@ -3,8 +3,10 @@ import AVFoundation
 import Security
 import UIKit
 
-// The phone as one of yapd's devices: press to talk, as the Mac's shortcut
-// does, and hear what yapd says back. yapd says everything through the
+// The phone as one of yapd's devices: press to talk, and again to send, as
+// the Mac's shortcut does, and hear what yapd says back, which only a press
+// stops, to talk or to stop it: its microphone is off while yapd speaks, so
+// nobody around talks over it. yapd says everything through the
 // device you last pressed on, so while the phone is connected and was the
 // last pressed, updates come out of it too. Once nothing has happened for a
 // while with the app in the background, it disconnects, so yapd goes back to
@@ -75,9 +77,6 @@ final class Talk {
 
   var paired: Bool { server != nil && Keychain.token != nil }
 
-  /// Whether what's dictated here is sent once you stop talking, so the Action button needn't be held again: on unless turned off.
-  static var sendsOnPause: Bool { UserDefaults.standard.object(forKey: "sendsOnPause") as? Bool ?? true }
-
   init() {
     // One left from an app iOS ended while it showed would stay on the Lock Screen, saying what it did then.
     for left in Activity<TalkAttributes>.activities {
@@ -107,6 +106,8 @@ final class Talk {
       switch message["type"] as? String {
       case "escape":
         let on = message["on"] as? Bool ?? false
+        // In order with what it's told to play, since a dictation's microphone opens with its first sound.
+        speaker.dictating(on)
         DispatchQueue.main.async { self?.dictating = on; self?.update() }
       case "open":
         guard let address = message["url"] as? String, let url = URL(string: address), url.scheme == "https" else { return }
@@ -179,7 +180,7 @@ final class Talk {
     if AVAudioApplication.shared.recordPermission == .undetermined { _ = await AVAudioApplication.requestRecordPermission() }
   }
 
-  /// The button, the Action button or the Live Activity's: starts dictating, or sends what was said, as the Mac's shortcut does.
+  /// The button, the Action button or the Live Activity's: starts dictating, stopping whatever yapd says, or sends what was said, as the Mac's shortcut does.
   func press() async {
     guard let server, let token = Keychain.token else {
       trouble = "Pair with yapd first: run yapd pair on your server."
@@ -199,12 +200,14 @@ final class Talk {
       settle()
       return
     }
-    connection.send(["type": "pressed", "key": "shortcut", "onPause": Talk.sendsOnPause])
+    // Sent only when pressed again, never on a pause, which someone else talking nearby would put off or fill.
+    connection.send(["type": "pressed", "key": "shortcut", "onPause": false])
+    speaker.sent()
   }
 
-  /// Drops what's being dictated, as Escape does on the Mac.
+  /// Drops what's being dictated, as Escape does on the Mac, or else stops what yapd is saying.
   func cancel() {
-    connection.send(["type": "pressed", "key": "escape"])
+    connection.send(["type": "pressed", "key": dictating ? "escape" : "stop"])
   }
 
   func appeared(_ foreground: Bool) {

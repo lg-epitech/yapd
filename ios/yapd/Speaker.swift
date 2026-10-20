@@ -2,9 +2,11 @@ import AVFoundation
 import UIKit
 
 // The phone's speaker and microphone for yapd, as the Mac's audio helper
-// (src/Audio.swift) is for the Mac: it plays what yapd sends and listens
-// through one voice-processing engine, so its own voice is cancelled out of
-// what it hears. It speaks the helper's protocol, over /audio (docs/api.md).
+// (src/Audio.swift) is for the Mac: it plays what yapd sends, and while you
+// dictate, listens through one voice-processing engine, so its own voice is
+// cancelled out of what it hears. Its microphone is only ever open for a
+// dictation, never while yapd just speaks, so nobody around talks over it.
+// It speaks the helper's protocol, over /audio (docs/api.md).
 
 /// Turns microphone buffers into 32 ms frames of 16 kHz mono, what yapd's voice detector takes. Only the tap's thread touches it.
 final class Capture {
@@ -77,14 +79,25 @@ final class Speaker {
   /// Whether it plays or listens, for the screen and the Live Activity, on the main thread.
   var changed: (_ playing: Bool, _ listening: Bool) -> Void = { _, _ in }
 
-  private let engine = AVAudioEngine()
-  private let player = AVAudioPlayerNode()
+  /// Made again to play without the microphone, since one whose input has been touched records whenever it runs.
+  private var engine = AVAudioEngine()
+  private var player = AVAudioPlayerNode()
+  private var changes: NSObjectProtocol?
   private var playing: Playing?
   private var generation = 0
   /// Whether yapd wants the engine running, which an interruption or a route change doesn't alter.
   private var active = false
+  /// Whether this engine has touched its input node, so it records whenever it runs.
+  private var touched = false
   private var tapped = false
   private var listening = false
+  /// From a press that starts a dictation until yapd answers it, and while yapd says he's dictating on this phone: the microphone is open only then.
+  private var pressed = false
+  private var dictation = false
+  /// Presses so far, so an unanswered one closing the microphone leaves a later one's alone.
+  private var presses = 0
+  /// How long a press waits for yapd to start dictating, which it does at once unless it's off.
+  private static let unanswered: TimeInterval = 5
   /// What yapd sent to play, by its id, in a folder of its own.
   private var files: [String: URL] = [:]
   private let folder: URL
@@ -92,12 +105,7 @@ final class Speaker {
   init() {
     folder = FileManager.default.temporaryDirectory.appendingPathComponent("yapd-\(UUID().uuidString)", isDirectory: true)
     try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-    engine.attach(player)
-    // Connecting the mixer also creates the output node, which the engine needs before it can start.
-    engine.connect(player, to: engine.mainMixerNode, format: AVAudioFormat(standardFormatWithSampleRate: 24000, channels: 1))
-    NotificationCenter.default.addObserver(forName: .AVAudioEngineConfigurationChange, object: engine, queue: nil) {
-      [weak self] _ in self?.queue.async { self?.recover() }
-    }
+    build()
     NotificationCenter.default.addObserver(forName: AVAudioSession.interruptionNotification, object: nil, queue: nil) {
       [weak self] note in
       let type = (note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt).flatMap(AVAudioSession.InterruptionType.init(rawValue:))
@@ -153,14 +161,39 @@ final class Speaker {
     }
   }
 
-  /// Opens the microphone now, as a press does, before yapd's first sound, so it's recording while the press is still being handled.
+  /// Opens the microphone now, as a press that starts a dictation does, before yapd's first sound, so it's recording while the press is still being handled.
   func open() {
     queue.async {
-      do {
-        try self.activate()
-      } catch {
-        self.tell(["type": "error", "message": "Could not start the audio: \(error)"])
+      self.pressed = true
+      self.presses += 1
+      self.openMicrophone()
+    }
+  }
+
+  /// The press reached yapd: should it start no dictation, as while yapd is off, the microphone closes again before long.
+  func sent() {
+    queue.async {
+      let press = self.presses
+      self.queue.asyncAfter(deadline: .now() + Speaker.unanswered) {
+        guard self.presses == press, self.pressed, !self.dictation else { return }
+        self.pressed = false
+        self.closeMicrophone()
       }
+    }
+  }
+
+  /**
+   * Whether he's dictating, as yapd says to every device, from the press that
+   * starts it until it's sent or dropped. For a dictation pressed for here, the
+   * microphone stays open all that while, and opens again with the next line
+   * should yapd rest it, as it does once it has stopped what it was saying.
+   * One started on a Mac leaves it closed. Once it's over, yapd rests it.
+   */
+  func dictating(_ on: Bool) {
+    queue.async {
+      self.dictation = on && (self.pressed || self.dictation)
+      self.pressed = false
+      if self.dictation { self.openMicrophone() }
     }
   }
 
@@ -176,6 +209,8 @@ final class Speaker {
     queue.async {
       self.stop(silently: true)
       self.active = false
+      self.pressed = false
+      self.dictation = false
       self.halt()
       for url in self.files.values { try? FileManager.default.removeItem(at: url) }
       self.files = [:]
@@ -186,25 +221,79 @@ final class Speaker {
   /// Whether it's playing, or its engine is running, which keeps the app awake.
   var busy: Bool { queue.sync { playing != nil || engine.isRunning } }
 
-  private func session() throws {
+  /// A new engine, its input untouched, to play through: the player goes with it.
+  private func build() {
+    if tapped {
+      engine.inputNode.removeTap(onBus: 0)
+      tapped = false
+    }
+    engine.stop()
+    if let changes { NotificationCenter.default.removeObserver(changes) }
+    engine = AVAudioEngine()
+    player = AVAudioPlayerNode()
+    touched = false
+    engine.attach(player)
+    // Connecting the mixer also creates the output node, which the engine needs before it can start.
+    engine.connect(player, to: engine.mainMixerNode, format: AVAudioFormat(standardFormatWithSampleRate: 24000, channels: 1))
+    changes = NotificationCenter.default.addObserver(forName: .AVAudioEngineConfigurationChange, object: engine, queue: nil) {
+      [weak self] _ in self?.queue.async { self?.recover() }
+    }
+  }
+
+  /// Whether the microphone is to be open: for a dictation, with permission, since touching the input node at all opens it.
+  private var hearing: Bool { (pressed || dictation) && AVAudioApplication.shared.recordPermission == .granted }
+
+  /// Opens the microphone, starting the engine again should it be playing without it, carrying on with what it plays.
+  private func openMicrophone() {
+    do {
+      if !engine.isRunning {
+        try activate()
+      } else if touched != hearing {
+        try restart()
+      }
+    } catch {
+      tell(["type": "error", "message": "Could not start the audio: \(error)"])
+    }
+  }
+
+  /// Closes the microphone, with nothing dictated: carrying on with what it plays without it, or resting, as yapd hears.
+  private func closeMicrophone() {
+    guard engine.isRunning, touched else { return }
+    guard playing == nil else {
+      do { try restart() } catch { tell(["type": "error", "message": "Could not restart audio: \(error)"]) }
+      return
+    }
+    active = false
+    halt()
+    tell(["type": "rested"])
+    try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+  }
+
+  private func session(_ hearing: Bool) throws {
     let session = AVAudioSession.sharedInstance()
-    // Voice chat is what turns on the echo cancellation, and the speaker rather than the earpiece, unless headphones are in.
-    try session.setCategory(.playAndRecord, mode: Speaker.raw ? .default : .voiceChat, options: [.defaultToSpeaker, .allowBluetoothHFP, .duckOthers])
+    if hearing {
+      // Voice chat is what turns on the echo cancellation, and the speaker rather than the earpiece, unless headphones are in.
+      try session.setCategory(.playAndRecord, mode: Speaker.raw ? .default : .voiceChat, options: [.defaultToSpeaker, .allowBluetoothHFP, .duckOthers])
+    } else {
+      // Only playing, which records nothing, not even through headphones, and plays through them at their best.
+      try session.setCategory(.playback, mode: .default, options: [.duckOthers])
+    }
     try session.setActive(true)
   }
 
   private func activate() throws {
     active = true
     guard !engine.isRunning else { return }
-    try session()
-    // Touching the input node at all opens the microphone, so it's left alone without permission.
-    var hearing = AVAudioApplication.shared.recordPermission == .granted
+    let hearing = hearing
+    if touched != hearing { build() }
+    try session(hearing)
+    var heard = hearing
     if hearing {
       do {
         try listen()
       } catch {
         tell(["type": "error", "message": "Could not open the microphone: \(error)"])
-        hearing = false
+        heard = false
       }
     }
     engine.prepare()
@@ -215,12 +304,13 @@ final class Speaker {
       tell(["type": "rested"])
       throw error
     }
-    listening = hearing
-    tell(["type": "active", "listening": hearing])
+    listening = heard
+    tell(["type": "active", "listening": heard])
     report()
   }
 
   private func listen() throws {
+    touched = true
     let input = engine.inputNode
     let usable = { (format: AVAudioFormat) in format.channelCount > 0 && format.sampleRate > 0 }
     guard usable(input.inputFormat(forBus: 0)) else { throw POSIXError(.ENODEV) }
@@ -233,7 +323,12 @@ final class Speaker {
     tapped = true
   }
 
-  /// Stops the engine, which turns the microphone off until the next line, and lets other apps' audio back up.
+  /**
+   * Stops the engine, which turns the microphone off until the next line, and
+   * lets other apps' audio back up. A press yapd hasn't answered yet stays
+   * pending, since this may have been sent before it: yapd starting that
+   * dictation opens the microphone again, and not starting it lets it go.
+   */
   private func rest() {
     stop(silently: true)
     active = false
@@ -345,6 +440,15 @@ final class Speaker {
   /// A route change, like headphones going in, stops the engine: start it again and carry on where it was.
   private func recover() {
     guard active, !engine.isRunning else { return }
+    do {
+      try restart()
+    } catch {
+      tell(["type": "error", "message": "Could not restart audio: \(error)"])
+    }
+  }
+
+  /// Starts the engine again, with the microphone or without it as it's wanted now, carrying on with what it played from where it got to.
+  private func restart() throws {
     let current = playing
     let at = current.map(position)
     playing = nil
@@ -354,11 +458,7 @@ final class Speaker {
       play(id: current.id, url: current.file.url, from: at)
       return
     }
-    do {
-      try activate()
-    } catch {
-      tell(["type": "error", "message": "Could not restart audio: \(error)"])
-    }
+    try activate()
   }
 
   private func report() {

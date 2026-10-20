@@ -1,6 +1,6 @@
 import type { Socket } from "bun"
 import { describe, expect, test } from "bun:test"
-import { ConfigProvider, Context, Effect, Either, Fiber, Option, Queue, Runtime, type Scope, Stream, TestClock, TestContext } from "effect"
+import { ConfigProvider, Context, Effect, Either, Exit, Fiber, Option, Queue, Runtime, type Scope, Stream, TestClock, TestContext } from "effect"
 import { Audio, type ClientSocket, Devices, native, router, wav } from "./Audio.ts"
 import * as Helper from "./Helper.ts"
 import { Shortcut } from "./Shortcut.ts"
@@ -348,6 +348,28 @@ describe("Devices", () => {
     expect(await started(false)).toEqual([true, false])
     expect(await started(true, [["YAPD_SEND_ON_PAUSE", "false"]])).toEqual([false, true])
   })
+
+  test("a phone's stop ends what it's saying at once, broken off, and does nothing while nothing plays", () =>
+    run(
+      Effect.gen(function* () {
+        const context = yield* router()
+        const sockets = Option.getOrThrow(Context.get(context, Devices).sockets)
+        const path = yield* sound
+        const phone = client(sockets)
+        phone.hello()
+        phone.say({ type: "pressed", key: "stop" })
+        const playing = yield* Effect.fork(Effect.scoped(Effect.flatMap(Context.get(context, Audio).play(path), (playback) => playback.finished)))
+        yield* settle
+        const id = phone.told("play")[0]?.id
+        phone.say({ type: "playing", id, duration: 10 })
+        yield* settle
+        phone.say({ type: "pressed", key: "stop" })
+        phone.say({ type: "stopped", id, at: 1 })
+        const ended = yield* Fiber.await(playing)
+        expect(Exit.isFailure(ended)).toBe(true)
+        expect(phone.told("stop")).toHaveLength(1)
+      }),
+    ))
 
   test("a client connecting again as itself takes the place of the one before", () =>
     run(
