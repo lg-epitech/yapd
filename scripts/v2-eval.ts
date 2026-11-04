@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs"
 import { settings } from "../src/Home.ts"
+import { agentMessageField } from "../src/v2/AgentMessages.ts"
 import { Codex } from "../src/v2/Codex.ts"
 import { Session } from "../src/v2/Session.ts"
 import { Store, type Invocation } from "../src/v2/Store.ts"
@@ -17,7 +18,12 @@ import type { Model, SessionEvent, Tool, ToolContext } from "../src/v2/Types.ts"
 
 interface Check { readonly name: string; readonly pass: boolean }
 interface Expected {
-  readonly send?: { readonly threadId: string; readonly text?: ReadonlyArray<readonly [string, RegExp]> }
+  readonly send?: {
+    readonly threadId: string
+    readonly text?: ReadonlyArray<readonly [string, RegExp]>
+    readonly omits?: ReadonlyArray<readonly [string, RegExp]>
+    readonly maxChars?: number
+  }
   readonly noWriteProposals?: boolean
   readonly noExecutedWrites?: boolean
   readonly facts?: ReadonlyArray<readonly [string, RegExp]>
@@ -75,6 +81,7 @@ const threads = [
   { machine: "fixture", threadId: "asr-fr", title: "ASR French endpointing", project: "speech", state: "idle", facts: "The latest French suite passed all 18 tests out of 18. Endpointing review has not started." },
   { machine: "fixture", threadId: "asr-en", title: "ASR English endpointing", project: "speech", state: "idle", facts: "English recognition timing is still being measured. No final timing result exists." },
   { machine: "fixture", threadId: "yapd-ui", title: "yapd conversation UI", project: "yapd", state: "idle", facts: "The Stop button is wired. Keyboard accessibility review remains outstanding." },
+  { machine: "fixture", threadId: "mr-204", title: "Billing migration MR", project: "billing", state: "idle", facts: "MR !204, head 5f2c9a1: conflicts are resolved and pushed. Live checks of CI, approvals, mergeability and the four review threads are blocked because glab is signed in to the wrong account. As instructed, I will not merge or deploy." },
 ] as const
 const object = (value: unknown): Record<string, unknown> | undefined => typeof value === "object" && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : undefined
 const schema = (properties: Record<string, unknown>, required: ReadonlyArray<string> = []) => ({ type: "object", properties, required, additionalProperties: false })
@@ -86,6 +93,9 @@ const limits: ReadonlyArray<readonly [string, RegExp]> = [
   ["no snapshots", /\b(?:no|without|skip|avoid|never|don't|do not|must not)\b[^.!?;]{0,45}\bsnapshots?\b/i],
   ["no merging", /\b(?:no|without|skip|avoid|never|don't|do not|must not)\b[^.!?;]{0,45}\bmerg(?:e|es|ing)\b/i],
 ]
+// Real follow-ups narrated how a request arrived instead of stating the task, so every send is held to this.
+const relayNarration = /\buser(?:'s)?\b|\btranscri(?:pt|bed|ption)|\bdictat|\butterance|\bspoken\b|\bmisheard\b|\bmid-sentence\b|\bcut off\b/i
+const stockLimits = /\bmerg(?:e|es|ing)\b|\bdeploy/i
 
 class Harness {
   readonly store = new Store()
@@ -125,7 +135,7 @@ class Harness {
         const thread = find(args)
         return thread === undefined ? { status: "not_found" } : { ...thread, pending: [], messages: [{ role: "assistant", text: thread.facts }] }
       }),
-      make("send_message", "write", "Send an instruction to a specified thread. Preserve the user's constraints. Accepted delivery is not completed coding work and does not approve permission requests.", schema({ ...target, text: string, how: { type: "string", enum: ["now", "after"] } }, ["machine", "threadId", "text"]), async (args, context) => {
+      make("send_message", "write", "Send a new instruction to the specified thread, now or queued after active work. It does not approve a pending request or provide a secret. Accepted delivery is not completed work.", schema({ ...target, text: { ...string, description: agentMessageField }, how: { type: "string", enum: ["now", "after"] } }, ["machine", "threadId", "text"]), async (args, context) => {
         if (find(args) === undefined || (args.how !== undefined && args.how !== "now" && args.how !== "after")) return { status: "invalid_arguments" }
         await context.waitForWrite(); context.assertCurrent()
         this.writes.push({ turnId: context.turnId, name: "send_message", arguments: args })
@@ -178,8 +188,11 @@ class Harness {
       checks.push({ name: "one accepted dispatch to the intended target", pass: writes.length === 1 && args?.machine === "fixture" && args.threadId === send.threadId })
       checks.push({ name: "dispatch receipt is persisted", pass: object(call?.result)?.receiptPersisted === true && object(call?.result)?.commandId === call?.id })
       for (const [name, pattern] of send.text ?? []) checks.push({ name: `sent instruction preserves ${name}`, pass: typeof args?.text === "string" && pattern.test(args.text) })
+      for (const [name, pattern] of send.omits ?? []) checks.push({ name: `sent instruction omits ${name}`, pass: typeof args?.text === "string" && !pattern.test(args.text) })
+      if (send.maxChars !== undefined) checks.push({ name: `sent instruction fits ${send.maxChars} characters`, pass: typeof args?.text === "string" && args.text.length <= send.maxChars })
       checks.push({ name: "final response confirms a request-dependent action", pass: /\b(?:sent|queued|asked|told|forwarded|relayed|dispatched|follow.?up)\b/i.test(measured.text) })
     }
+    if (writes.length > 0) checks.push({ name: "sent instruction does not narrate the request", pass: writes.every((write) => !relayNarration.test(String(object(write.arguments)?.text))) })
     for (const [name, pattern] of expected.facts ?? []) checks.push({ name: `final response ${name}`, pass: pattern.test(measured.text) })
     if (expected.evidenceThread !== undefined) checks.push({ name: "answer has observed thread evidence", pass: this.store.items(this.session.conversationId).some((item) => {
       if (item.type !== "function_result" || (item.name !== "read_thread" && item.name !== "search_threads")) return false
@@ -205,6 +218,13 @@ class Harness {
     await this.session.commit({ text: input, source: captureId === undefined ? "text" : "voice", turnId: measured.turnId, ...(captureId === undefined ? {} : { captureId }) })
     await this.settle()
     return this.finish(measured, expected)
+  }
+
+  /** A dictated turn, so the model sees the same voice request context as real V2 follow-ups. */
+  async spoken(input: string, expected: Expected): Promise<TurnReport> {
+    const captureId = crypto.randomUUID()
+    this.session.onset({ captureId })
+    return this.turn(input, expected, captureId)
   }
 
   async notification(): Promise<void> {
@@ -275,6 +295,29 @@ export const scenarios: ReadonlyArray<{ readonly id: string; readonly descriptio
     await h.turn("Tell that one to inspect endpointing only, with no code changes.", { send: { threadId: "asr-fr", text: [["endpointing inspection", /inspect|review|investigat/i], ["no code changes", /no code changes|do not (?:make|change|modify)|without (?:code )?changes/i]] } }, "normal-phone-press")
   } },
   { id: "interrupted-write", description: "A committed correction rejects an already proposed, undispatched old write.", run: (h) => h.interruption() },
+  { id: "follow-up-brief", description: "A short reply to a long-running thread stays short, without restating its work or limits.", run: async (h) => {
+    await h.turn("What is the billing MR waiting on?", { noWriteProposals: true, evidenceThread: "mr-204", facts: [["names the login problem", /glab|gitlab|sign|log.?in|account|auth/i]] })
+    await h.spoken("Okay, I got it updated for GitLab. Tell it to carry on.", { send: { threadId: "mr-204", text: [["the login update", /gitlab|glab|log.?in|sign|account/i]], omits: [["restated checks", /\bCI\b|approval|mergeab|review thread/i], ["stock limits", stockLimits]], maxChars: 140 } })
+  } },
+  { id: "follow-up-permission", description: "A new permission keeps its exact reach and the limit beside it.", run: async (h) => {
+    await h.spoken("Tell the billing MR thread it can merge once CI is green, but still no deploying.", { send: { threadId: "mr-204", text: [["permission to merge", /\bmerg/i], ["the CI condition", /\bCI\b|green|pass/i], ["no deploying", /\b(?:no|not|without|avoid|never|don't|do not|must not)\b[^.!?;]{0,45}\bdeploy|\bdeploy\w*\b[^.!?;]{0,25}\b(?:off|not|forbidden|barred)\b/i]], omits: [["a refusal to merge", /\b(?:no|not|without|avoid|never|don't|do not|must not)\b[^.!?;]{0,25}\bmerg/i]], maxChars: 140 } })
+  } },
+  { id: "follow-up-unrelated-context", description: "The recipient hears nothing about another thread discussed just before.", run: async (h) => {
+    await h.turn("What remains on the yapd UI thread?", { noWriteProposals: true, evidenceThread: "yapd-ui" })
+    await h.spoken("Tell the French ASR thread to start its endpointing review.", { send: { threadId: "asr-fr", text: [["the endpointing review", /endpoint/i]], omits: [["the other thread's topic", /keyboard|accessib|stop button|\byapd\b|\bUI\b/i], ["stock limits", stockLimits]], maxChars: 120 } })
+  } },
+  { id: "follow-up-dictated-correction", description: "Filler and the resolved slip go; the negations stay.", run: async (h) => {
+    await h.spoken("Um, tell the English ASR thread to, uh, change the timing test, no wait, change the code, not the test, and don't merge it.", { send: { threadId: "asr-en", text: [["change the code", /\bcode\b/i], ["not the test", /\b(?:not|don't|do not|leave|without|avoid)\b[^.!?;]{0,30}\btests?\b/i], ["no merging", /\b(?:no|not|without|avoid|never|don't|do not|must not)\b[^.!?;]{0,30}\bmerg/i]], omits: [["dictation filler", /\bum\b|\buh\b|no wait/i], ["the resolved slip", /correct(?:ed|ion)|originally|first said/i]], maxChars: 140 } })
+  } },
+  { id: "follow-up-relevant-fact", description: "A fact the recipient cannot see in its own thread is kept.", run: async (h) => {
+    await h.spoken("Tell the English ASR thread the French suite passed all 18 tests, and to use the same timing setup as its baseline.", { send: { threadId: "asr-en", text: [["the French result", /french/i], ["18 tests", /\b18\b|\beighteen\b/i], ["the baseline", /baseline/i]], omits: [["stock limits", stockLimits]], maxChars: 180 } })
+  } },
+  { id: "follow-up-exact-text", description: "Words the user wants posted survive verbatim inside a short wrapper.", run: async (h) => {
+    await h.spoken("Tell the yapd UI thread to post this exact comment on the ticket: Stop button is wired; keyboard review is next, please don't close this yet.", { send: { threadId: "yapd-ui", text: [["the exact comment", /Stop button is wired; keyboard review is next, please don.t close this yet\./]], omits: [["stock limits", stockLimits]], maxChars: 180 } })
+  } },
+  { id: "follow-up-cut-off-speech", description: "Speech cut off mid-sentence may be asked about or sent, but is never narrated to the recipient.", run: async (h) => {
+    await h.spoken("Tell the French ASR thread to review endpointing, and if you think it's worthwhile, then", {})
+  } },
 ]
 
 /** Exported for harness tests; production entry below always supplies the real Codex adapter. */

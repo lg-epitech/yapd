@@ -7,7 +7,7 @@ test("listing the subscription scenarios needs no Codex executable and performs 
   const output = JSON.parse(await new Response(process_.stdout).text()) as { type: string; scenarios: Array<{ id: string }> }
   expect(await process_.exited).toBe(0)
   expect(output.type).toBe("available")
-  expect(output.scenarios).toHaveLength(8)
+  expect(output.scenarios).toHaveLength(15)
 })
 
 test("evaluation matches V2's workspace identities without leaking task answers, and can exercise empty-context discovery", async () => {
@@ -22,7 +22,7 @@ test("evaluation matches V2's workspace identities without leaking task answers,
         if (snapshot?.type !== "context") throw new Error("Missing workspace context")
         const current = JSON.parse(snapshot.text)
         expect(current.kind).toBe("current_workspace")
-        expect(current.threads.map((thread: { threadId: string }) => thread.threadId)).toEqual(["asr-fr", "asr-en", "yapd-ui"])
+        expect(current.threads.map((thread: { threadId: string }) => thread.threadId)).toEqual(["asr-fr", "asr-en", "yapd-ui", "mr-204"])
         expect(current.threads.every((thread: object) => Object.keys(thread).sort().join(",") === "machine,project,state,threadId,title")).toBe(true)
         expect(snapshot.text).not.toMatch(/18|passed|accessibility|snapshots|approve/)
       }
@@ -70,6 +70,44 @@ test("accepted follow-up receipts cannot hide lost French-only, snapshot and mer
   expect(result.result.pass).toBe(false)
   expect(result.turns[1]?.executedWrites).toBe(1)
   expect(result.turns[1]?.checks.filter(({ name }) => name.startsWith("sent instruction preserves")).map(({ pass }) => pass)).toEqual([false, false, false])
+})
+
+const briefFollowUp = (text: string): Model => {
+  let turn = 0
+  return { stream: async function* () {
+    if (turn++ === 0) {
+      yield { type: "tool_call", callId: "read", name: "read_thread", arguments: { machine: "fixture", threadId: "mr-204" }, respond: async () => {} }
+      yield { type: "text_delta", delta: "It needs a working GitLab login." }
+    } else {
+      yield { type: "tool_call", callId: "send", name: "send_message", arguments: { machine: "fixture", threadId: "mr-204", text }, respond: async () => {} }
+      yield { type: "text_delta", delta: "Sent." }
+    }
+    yield { type: "done" }
+  } }
+}
+
+test("an accepted follow-up fails when it narrates the request and restates the thread's work and limits", async () => {
+  const bloated = await run("follow-up-brief", briefFollowUp("The user has now confirmed the GitLab login is updated to the proper account. You can retry now. Finish the requested live checks: current-head CI, approvals and mergeability. Do not merge or deploy."))
+  expect(bloated.result.pass).toBe(false)
+  expect(bloated.turns[1]?.executedWrites).toBe(1)
+  expect(bloated.turns[1]?.checks.filter(({ pass }) => !pass).map(({ name }) => name)).toEqual([
+    "sent instruction omits restated checks",
+    "sent instruction omits stock limits",
+    "sent instruction fits 140 characters",
+    "sent instruction does not narrate the request",
+  ])
+  expect((await run("follow-up-brief", briefFollowUp("GitLab login is fixed. Carry on."))).result.pass).toBe(true)
+})
+
+test("speech cut off mid-sentence may go unsent, but anything sent cannot narrate it", async () => {
+  const stream = (text?: string): Model => ({ stream: async function* () {
+    if (text !== undefined) yield { type: "tool_call", callId: "send", name: "send_message", arguments: { machine: "fixture", threadId: "asr-fr", text }, respond: async () => {} }
+    yield { type: "text_delta", delta: "What should it do if the review looks worthwhile?" }
+    yield { type: "done" }
+  } })
+  expect((await run("follow-up-cut-off-speech", stream())).result.pass).toBe(true)
+  expect((await run("follow-up-cut-off-speech", stream("Review endpointing."))).result.pass).toBe(true)
+  expect((await run("follow-up-cut-off-speech", stream("Review endpointing. The user's utterance ended mid-sentence."))).result.pass).toBe(false)
 })
 
 test("a plausible factual answer without observed fixture evidence does not pass", async () => {

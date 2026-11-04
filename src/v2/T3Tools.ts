@@ -5,6 +5,7 @@ import * as Ledger from "../Ledger.ts"
 import * as T3Actions from "../T3Actions.ts"
 import * as Server from "../T3CodeServer.ts"
 import type * as Threads from "../Threads.ts"
+import { agentMessageField } from "./AgentMessages.ts"
 import type { Tool, ToolContext } from "./Types.ts"
 
 type ThreadAccess = Pick<Threads.Threads["Type"], "desk" | "find" | "unseen" | "detail" | "search" | "waiting" | "keep">
@@ -26,11 +27,12 @@ const List = Schema.Struct({ limit: Schema.optional(Schema.Int.pipe(Schema.betwe
 const Search = Schema.Struct({ query: Schema.String.pipe(Schema.minLength(2), Schema.maxLength(200)) })
 const Read = Schema.Struct({ ...target, requestId: Schema.optional(identifier) })
 const Catalog = Schema.Struct({ machine: identifier })
-const Send = Schema.Struct({ ...target, text: words, how: Schema.optional(Schema.Literal("now", "after")) })
+const agentMessage = words.annotations({ description: agentMessageField })
+const Send = Schema.Struct({ ...target, text: agentMessage, how: Schema.optional(Schema.Literal("now", "after")) })
 const Start = Schema.Struct({
   machine: identifier,
   project: identifier,
-  prompt: words,
+  prompt: agentMessage,
   model: Schema.optional(identifier),
   effort: Schema.optional(identifier),
   worktree: Schema.optional(Schema.Boolean),

@@ -8,6 +8,7 @@ import * as T3Actions from "../T3Actions.ts"
 import * as Server from "../T3CodeServer.ts"
 import * as T3Live from "../T3Live.ts"
 import * as Threads from "../Threads.ts"
+import { agentMessageField } from "./AgentMessages.ts"
 import { createT3Tools, type T3ToolOptions } from "./T3Tools.ts"
 import { SupersededError, type ToolContext } from "./Types.ts"
 
@@ -148,6 +149,17 @@ const runFixture = (work: (made: ReturnType<typeof fixture>) => Promise<void>) =
 })))
 
 describe("V2 T3 tool catalog", () => {
+  test("both fields that write to another agent carry the message guidance and keep their validation", () => runFixture(async (h) => {
+    const field = (tool: string, name: string) => {
+      const parameters = createT3Tools(h.options).find((candidate) => candidate.name === tool)!.parameters as { properties: Record<string, unknown> }
+      return parameters.properties[name]
+    }
+    for (const [tool, name] of [["send_message", "text"], ["start_thread", "prompt"]] as const) {
+      expect(field(tool, name)).toMatchObject({ description: agentMessageField, type: "string", minLength: 1, maxLength: 100_000, pattern: "\\S" })
+    }
+    expect(await h.call("send_message", { ...target, text: "   " })).toMatchObject({ status: "invalid_arguments" })
+  }))
+
   test("settling and unsettling use the real thread command path, durable receipts and stable targets", () => runFixture(async (h) => {
     const ctx = context({ userText: "Settle the French ASR thread." })
     const first = await h.call("settle_thread", target, ctx)

@@ -2,6 +2,7 @@ import { afterEach, expect, test } from "bun:test"
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { agentMessages } from "./AgentMessages.ts"
 import { Codex } from "./Codex.ts"
 import type { ConversationItem, ModelEvent } from "./Types.ts"
 
@@ -95,6 +96,7 @@ test("subscription app-server consumes real dynamic-tool replies in the same run
   const start = sent.find((m) => m.method === "thread/start")!
   expect(start.params.modelProvider).toBe("openai")
   expect(start.params.dynamicTools).toEqual([{ type: "function", name: "lookup", description: tools[0]!.description, inputSchema: tools[0]!.parameters }])
+  expect(start.params.baseInstructions).toContain(agentMessages)
   expect(start.params.sandbox).toBe("read-only")
   const turns = sent.filter((m) => m.method === "turn/start")
   expect(turns[1]!.params.input[0].text).toContain("Explain that review.")

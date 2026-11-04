@@ -1,5 +1,6 @@
 import type { Subprocess } from "bun"
 import { tmpdir } from "node:os"
+import { agentMessages } from "./AgentMessages.ts"
 import type { ConversationItem, Model, ModelEvent, ToolDefinition } from "./Types.ts"
 
 type Object_ = Record<string, unknown>
@@ -227,7 +228,7 @@ export class Codex implements Model {
       modelProvider: "openai", allowProviderModelFallback: false,
       cwd: tmpdir(), runtimeWorkspaceRoots: [], environments: [],
       sandbox: "read-only", approvalPolicy: "never", ephemeral: true,
-      baseInstructions: this.options.instructions ?? instructions,
+      baseInstructions: this.options.instructions ?? `${instructions}\n\n${agentMessages}`,
       config: { mcp_servers: disabled, ...(this.options.effort === undefined ? {} : { model_reasoning_effort: this.options.effort }) },
       dynamicTools: tools.map((tool) => ({ type: "function", name: tool.name, description: tool.description, inputSchema: tool.parameters })),
     }))
