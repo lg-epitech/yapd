@@ -18,7 +18,11 @@ export interface T3ToolOptions {
   /** Needed for a stop pinned to a specific run; Actions.run(Stop) selects the newest run. */
   readonly transport?: (machine: string) => Effect.Effect<Server.Transport, Server.Trouble> | undefined
   readonly show?: (result: { readonly title: string; readonly text: string; readonly url?: string }) => Promise<void>
+  /** How long a settle waits for the live view to show it. */
+  readonly confirmWaitMs?: number
 }
+
+export const settleThreadDescription = `Mark the specified idle thread settled/done without archiving it. Use settled=false to mark it active again. This never stops work or answers pending requests; T3 Code may refuse to settle a busy thread. Ask the user before stopping work to make it eligible. Say the outcome in a few words, without restating the request: "Settled." or "I settled the thread." only when confirmed is true; "Settlement requested." when it was accepted or queued but confirmed is false or absent. Never say "The request to settle it was accepted." For settled=false, say "Marked active." or "Reactivation requested." the same way. Report a refusal or unknown outcome plainly.`
 
 const identifier = Schema.String.pipe(Schema.minLength(1), Schema.maxLength(512), Schema.pattern(/\S/))
 const words = Schema.String.pipe(Schema.minLength(1), Schema.maxLength(100_000), Schema.pattern(/\S/))
@@ -181,6 +185,18 @@ export const createT3Tools = (options: T3ToolOptions): ReadonlyArray<Tool> => {
     }
     return { ...receipt(outcome, row?.commandId ?? null), receiptPersisted: row?.state === "sent" }
   }
+  /** Acceptance means T3 Code took the command; the live view shows it applied. A failed look leaves the receipt standing. */
+  const shown = async (to: Threads.Ref, settling: boolean, context: ToolContext) => {
+    const deadline = Date.now() + (options.confirmWaitMs ?? 1500)
+    try {
+      for (;;) {
+        const thread = Option.getOrUndefined(await run(threads.find(to)))
+        if (thread !== undefined && (thread.settledOverride === "settled") === settling) return true
+        if (context.signal.aborted || Date.now() >= deadline) return false
+        await Bun.sleep(50)
+      }
+    } catch { return false }
+  }
 
   return [
     tool("list_threads", "List current threads with stable machine/thread/run IDs, status, pending requests, and unreachable machines.", "read", List, async ({ limit }, context) => {
@@ -295,7 +311,7 @@ export const createT3Tools = (options: T3ToolOptions): ReadonlyArray<Tool> => {
         return { status: refusedByServer ? "refused" : notSent ? "not_sent" : "unknown", commandId: prepared.commandId, runId: args.runId, reason: reason(error) }
       }
     }),
-    tool("settle_thread", "Mark the specified idle thread settled/done without archiving it. Use settled=false to mark it active again. This never stops work or answers pending requests; T3 Code may refuse to settle a busy thread. Ask the user before stopping work to make it eligible.", "write", Settle, async (args, context) => {
+    tool("settle_thread", settleThreadDescription, "write", Settle, async (args, context) => {
       const to = ref(args)
       const settling = args.settled !== false
       const previous = await existing(context, to)
@@ -308,7 +324,8 @@ export const createT3Tools = (options: T3ToolOptions): ReadonlyArray<Tool> => {
       const outcome = await run(hands.run(step(context), { _tag: "Tidy", what: settling ? "settle" : "unsettle", to: [{ ref: to, called: current?.title ?? "that thread" }] }, { wanted: wanted(context) }))
       const row = Option.getOrUndefined(await run(ledger.get(ids(context).commandId)))
       const result = outcome._tag === "Tidied" ? outcome.each[0]?.outcome : outcome
-      return { ...receipt(result ?? { _tag: "Refused", reason: "No thread action was recorded." }, row?.commandId ?? null), receiptPersisted: row?.state === "sent" }
+      const told = receipt(result ?? { _tag: "Refused", reason: "No thread action was recorded." }, row?.commandId ?? null)
+      return { ...told, receiptPersisted: row?.state === "sent", ...(told.status === "accepted" ? { confirmed: await shown(to, settling, context) } : {}) }
     }),
     tool("answer_question", "Answer the current pending question by its requestId and question IDs from read_thread. Secret requests require T3 Code's private input instead.", "write", Answer, async (args, context) => {
       const to = ref(args)

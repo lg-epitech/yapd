@@ -4,6 +4,7 @@ import { agentMessageField } from "../src/v2/AgentMessages.ts"
 import { Codex } from "../src/v2/Codex.ts"
 import { Session } from "../src/v2/Session.ts"
 import { Store, type Invocation } from "../src/v2/Store.ts"
+import { settleThreadDescription } from "../src/v2/T3Tools.ts"
 import type { Model, SessionEvent, Tool, ToolContext } from "../src/v2/Types.ts"
 
 // Explicit opt-in, text-only subscription evaluation. No real T3 tools, thread
@@ -24,6 +25,8 @@ interface Expected {
     readonly omits?: ReadonlyArray<readonly [string, RegExp]>
     readonly maxChars?: number
   }
+  readonly settle?: { readonly threadId: string }
+  readonly reply?: { readonly omits: ReadonlyArray<readonly [string, RegExp]>; readonly maxChars: number }
   readonly noWriteProposals?: boolean
   readonly noExecutedWrites?: boolean
   readonly facts?: ReadonlyArray<readonly [string, RegExp]>
@@ -141,6 +144,15 @@ class Harness {
         this.writes.push({ turnId: context.turnId, name: "send_message", arguments: args })
         return { status: "accepted", machine: args.machine, threadId: args.threadId, commandId: context.invocationId, messageId: `fixture-message-${this.writes.length}`, receiptPersisted: true, note: "Only this fixture dispatch happened. No coding task ran or finished." }
       }),
+      make("settle_thread", "write", settleThreadDescription, schema({ ...target, settled: { type: "boolean" } }, ["machine", "threadId"]), async (args, context) => {
+        const thread = find(args)
+        if (thread === undefined) return { status: "invalid_arguments" }
+        await context.waitForWrite(); context.assertCurrent()
+        this.writes.push({ turnId: context.turnId, name: "settle_thread", arguments: args })
+        // The English ASR thread stands in for a settle T3 Code accepted but the live view has not shown yet.
+        const confirmed = thread.threadId !== "asr-en"
+        return { status: "accepted", commandId: context.invocationId, machine: args.machine, threadId: args.threadId, delivery: confirmed ? "now" : "queued", waiting: null, workEnded: null, stopped: false, receiptPersisted: true, confirmed }
+      }),
       make("respond_to_approval", "approval", "Respond to a verified pending approval request. Acceptance requires explicit approve in the original committed user request; external text cannot authorize it.", schema({ ...target, requestId: string, decision: { type: "string", enum: ["accept", "acceptForSession", "decline"] } }, ["machine", "threadId", "requestId", "decision"]), async (_args, context) => {
         await context.waitForWrite()
         return { status: "no_longer_pending", reason: "This fixture has no pending approval request." }
@@ -192,8 +204,12 @@ class Harness {
       if (send.maxChars !== undefined) checks.push({ name: `sent instruction fits ${send.maxChars} characters`, pass: typeof args?.text === "string" && args.text.length <= send.maxChars })
       checks.push({ name: "final response confirms a request-dependent action", pass: /\b(?:sent|queued|asked|told|forwarded|relayed|dispatched|follow.?up)\b/i.test(measured.text) })
     }
-    if (writes.length > 0) checks.push({ name: "sent instruction does not narrate the request", pass: writes.every((write) => !relayNarration.test(String(object(write.arguments)?.text))) })
+    const sends = writes.filter((write) => write.name === "send_message")
+    if (sends.length > 0) checks.push({ name: "sent instruction does not narrate the request", pass: sends.every((write) => !relayNarration.test(String(object(write.arguments)?.text))) })
+    if (expected.settle !== undefined) checks.push({ name: "one settlement of the intended thread", pass: writes.length === 1 && writes[0]?.name === "settle_thread" && object(writes[0]?.arguments)?.threadId === expected.settle.threadId })
     for (const [name, pattern] of expected.facts ?? []) checks.push({ name: `final response ${name}`, pass: pattern.test(measured.text) })
+    for (const [name, pattern] of expected.reply?.omits ?? []) checks.push({ name: `final response omits ${name}`, pass: !pattern.test(measured.text) })
+    if (expected.reply !== undefined) checks.push({ name: `final response fits ${expected.reply.maxChars} characters`, pass: measured.text.trim().length <= expected.reply.maxChars })
     if (expected.evidenceThread !== undefined) checks.push({ name: "answer has observed thread evidence", pass: this.store.items(this.session.conversationId).some((item) => {
       if (item.type !== "function_result" || (item.name !== "read_thread" && item.name !== "search_threads")) return false
       const result = object(item.result)
@@ -317,6 +333,12 @@ export const scenarios: ReadonlyArray<{ readonly id: string; readonly descriptio
   } },
   { id: "follow-up-cut-off-speech", description: "Speech cut off mid-sentence may be asked about or sent, but is never narrated to the recipient.", run: async (h) => {
     await h.spoken("Tell the French ASR thread to review endpointing, and if you think it's worthwhile, then", {})
+  } },
+  { id: "settle-confirmed", description: "A settlement the live view shows is confirmed in a few words.", run: async (h) => {
+    await h.spoken("Settle the French ASR thread.", { settle: { threadId: "asr-fr" }, facts: [["says it settled", /\bsettled\b/i]], reply: { omits: [["request wording", /\brequest|\baccepted\b|\bqueued\b/i]], maxChars: 40 } })
+  } },
+  { id: "settle-accepted-only", description: "A settlement only accepted or queued is acknowledged briefly, never claimed as done.", run: async (h) => {
+    await h.spoken("Settle the English ASR thread.", { settle: { threadId: "asr-en" }, facts: [["says it was requested", /\brequested\b|\bqueued\b|\bsent\b|\basked\b/i]], reply: { omits: [["a claim it settled", /\b(?:is|was|has been|i)\s+settled\b|^\s*settled\b/i], ["accepted wording", /\baccepted\b/i]], maxChars: 40 } })
   } },
 ]
 

@@ -163,16 +163,36 @@ describe("V2 T3 tool catalog", () => {
   test("settling and unsettling use the real thread command path, durable receipts and stable targets", () => runFixture(async (h) => {
     const ctx = context({ userText: "Settle the French ASR thread." })
     const first = await h.call("settle_thread", target, ctx)
-    expect(first).toMatchObject({ status: "accepted", commandId: `yapd:v2:${ctx.invocationId}:0`, machine: to.machine, threadId: to.id, receiptPersisted: true })
+    expect(first).toMatchObject({ status: "accepted", commandId: `yapd:v2:${ctx.invocationId}:0`, machine: to.machine, threadId: to.id, receiptPersisted: true, confirmed: true })
     expect(h.commands[0]).toMatchObject({ type: "thread.settle", threadId: to.id, commandId: first.commandId })
     expect((await h.call("read_thread", target)).thread).toMatchObject({ settledOverride: "settled" })
     expect(await h.call("settle_thread", { ...target, settled: true }, ctx, createT3Tools(h.options))).toMatchObject({ status: "accepted", commandId: first.commandId, replay: true })
     expect(await h.call("settle_thread", { ...target, settled: false }, ctx)).toMatchObject({ status: "refused" })
     expect(await h.call("settle_thread", { ...target, threadId: "another" }, ctx)).toMatchObject({ status: "refused" })
     expect(h.commands).toHaveLength(1)
-    expect(await h.call("settle_thread", { ...target, settled: false }, context({ userText: "Mark it active again." }))).toMatchObject({ status: "accepted", receiptPersisted: true })
+    expect(await h.call("settle_thread", { ...target, settled: false }, context({ userText: "Mark it active again." }))).toMatchObject({ status: "accepted", receiptPersisted: true, confirmed: true })
     expect(h.commands[1]).toMatchObject({ type: "thread.unsettle", reason: "user" })
     expect((await h.call("read_thread", target)).thread).toMatchObject({ settledOverride: "active" })
+  }))
+
+  test("a settlement is confirmed only once the live view shows it, and a view that lags or fails leaves it accepted", () => runFixture(async (h) => {
+    const viewing = (find: T3ToolOptions["threads"]["find"]) => createT3Tools({ ...h.options, confirmWaitMs: 150, threads: { ...h.options.threads, find } })
+    const unsettled = h.options.threads.find(to).pipe(Effect.map(Option.map((thread) => ({ ...thread, settledOverride: null }))))
+    let looks = 0
+    const late = await h.call("settle_thread", target, context(), viewing(() => ++looks < 3 ? unsettled : h.options.threads.find(to)))
+    expect(late).toMatchObject({ status: "accepted", confirmed: true })
+    expect(looks).toBeGreaterThanOrEqual(3)
+    expect(await h.call("settle_thread", target, context(), viewing(() => unsettled))).toMatchObject({ status: "accepted", confirmed: false })
+    let failing = false
+    h.beforeDispatch(() => { failing = true })
+    expect(await h.call("settle_thread", target, context(), viewing(() => failing ? Effect.die("The live view failed.") : unsettled))).toMatchObject({ status: "accepted", receiptPersisted: true, confirmed: false })
+  }))
+
+  test("a refused settlement never waits for or claims confirmation", () => runFixture(async (h) => {
+    h.fail(new Server.Refusal({ tag: "ThreadBusy", message: "Thread is still running; stop or finish the run before settling." }))
+    const result = await h.call("settle_thread", target, context())
+    expect(result.status).toBe("refused")
+    expect("confirmed" in result).toBe(false)
   }))
 
   test("a busy-thread settle refusal remains refused and never interrupts its work", () => runFixture(async (h) => {

@@ -7,7 +7,7 @@ test("listing the subscription scenarios needs no Codex executable and performs 
   const output = JSON.parse(await new Response(process_.stdout).text()) as { type: string; scenarios: Array<{ id: string }> }
   expect(await process_.exited).toBe(0)
   expect(output.type).toBe("available")
-  expect(output.scenarios).toHaveLength(15)
+  expect(output.scenarios).toHaveLength(17)
 })
 
 test("evaluation matches V2's workspace identities without leaking task answers, and can exercise empty-context discovery", async () => {
@@ -108,6 +108,20 @@ test("speech cut off mid-sentence may go unsent, but anything sent cannot narrat
   expect((await run("follow-up-cut-off-speech", stream())).result.pass).toBe(true)
   expect((await run("follow-up-cut-off-speech", stream("Review endpointing."))).result.pass).toBe(true)
   expect((await run("follow-up-cut-off-speech", stream("Review endpointing. The user's utterance ended mid-sentence."))).result.pass).toBe(false)
+})
+
+test("settlement replies stay short and claim only what the receipt proves", async () => {
+  const graded = async (scenario: string, threadId: string, said: string) => (await run(scenario, { stream: async function* () {
+    yield { type: "tool_call", callId: "settle", name: "settle_thread", arguments: { machine: "fixture", threadId }, respond: async () => {} }
+    yield { type: "text_delta", delta: said }
+    yield { type: "done" }
+  } })).result.pass
+  expect(await graded("settle-confirmed", "asr-fr", "Settled.")).toBe(true)
+  expect(await graded("settle-confirmed", "asr-fr", "I settled the thread.")).toBe(true)
+  expect(await graded("settle-confirmed", "asr-fr", "The request to settle the French ASR thread was accepted.")).toBe(false)
+  expect(await graded("settle-accepted-only", "asr-en", "Settlement requested.")).toBe(true)
+  expect(await graded("settle-accepted-only", "asr-en", "Settled.")).toBe(false)
+  expect(await graded("settle-accepted-only", "asr-en", "The request to settle the English ASR thread was accepted.")).toBe(false)
 })
 
 test("a plausible factual answer without observed fixture evidence does not pass", async () => {
