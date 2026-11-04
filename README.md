@@ -22,6 +22,8 @@ Every setting, and how it all works, is in [the long version](docs/guide.md).
 
 V2 gives typed requests, microphone captures and thread notifications one conversation and one tool loop. It uses Codex's existing ChatGPT sign-in for reasoning and tools, and self-hosted speech. It does not use separately billed model APIs. Run `codex login` on the server if needed.
 
+V2 needs Bun 1.3.13 or later. Replies are written for speech, and a Markdown-to-speech fallback removes presentation syntax before synthesis. Plain prose streams normally; unexpected formatted text waits for completion so partial formatting cannot be spoken. The visible transcript retains the original reply.
+
 The default is `gpt-6.1-sol` at low reasoning effort. Existing `YAPD_BRAIN_MODEL` and `YAPD_BRAIN_EFFORT` settings take precedence. Speech and the tool session warm up silently at startup.
 
 ```sh

@@ -174,6 +174,30 @@ const player = (options: { readonly drain?: ReturnType<typeof deferred<PCMPositi
 }
 
 describe("V2 local speech output", () => {
+  test("Cryptio bold status labels split across model deltas never reach synthesis as markup", async () => {
+    const device = player()
+    const phrases: string[] = []
+    const events: PlaybackEvent[] = []
+    const output = createSpeechOutput({ player: device.implementation, onPlayback: (event) => { events.push(event) }, onError: () => {}, synthesize: async function* (text) {
+      phrases.push(text); yield { pcm16: new Uint8Array([1, 0]), rate: 16_000 }
+    } })
+    const raw = "- **Solana errors:** Errors fell from 17–32k to 170.\n- **RTG migrations:** Unichain is blocked by DATA-3064; !272 is still a draft."
+    try {
+      for (const character of raw) {
+        output.accept(delta(character))
+        await new Promise<void>((resolve) => setImmediate(resolve))
+      }
+      output.accept(done(raw)); await output.drained("r")
+      const spoken = phrases.join("")
+      expect(spoken).not.toContain("*")
+      expect(spoken).not.toMatch(/(?:^|\n)\s*- /)
+      expect(spoken).toContain("Solana errors:")
+      expect(spoken).toContain("RTG migrations:")
+      for (const fact of ["17–32k", "170", "DATA-3064", "!272", "still a draft"]) expect(spoken).toContain(fact)
+      expect(events.at(-1)).toMatchObject({ state: "finished", playedText: spoken })
+    } finally { await output.close() }
+  })
+
   test("streams stable phrases before response completion, preserves chunk order, and waits for real drain", async () => {
     const drain = deferred<PCMPosition>()
     const device = player({ drain })
@@ -199,6 +223,54 @@ describe("V2 local speech output", () => {
     expect(events.at(-1)).toMatchObject({ state: "finished", certainty: "exact", playedText: "The tests pass. I checked the receipts." })
     expect(errors).toEqual([])
     await output.close()
+  })
+
+  test("formatted speech resumes using spoken phrase offsets and never replays raw markup", async () => {
+    const device = player({ rendered: true })
+    const phrases: string[] = []
+    const events: PlaybackEvent[] = []
+    const blocked = deferred()
+    let calls = 0
+    const output = createSpeechOutput({ player: device.implementation, onPlayback: (event) => { events.push(event) }, onError: () => {}, synthesize: async function* (text) {
+      phrases.push(text); calls++
+      if (calls === 2) await blocked.promise
+      yield { pcm16: new Uint8Array([calls, 0]), rate: 16_000 }
+    } })
+    const raw = "**Solana is fixed.** **RTG is blocked.**"
+    try {
+      output.accept(delta(raw)); output.accept(done(raw))
+      await until(() => calls === 2)
+      output.accept({ type: "output_cancelled", responseId: "r", reason: "onset" })
+      await until(() => device.opened[0]?.stopped === true)
+      expect(events.at(-1)?.playedText).toBe("Solana is fixed. ")
+      output.accept({ type: "output_resumed", responseId: "r", text: raw })
+      await output.drained("r"); blocked.resolve()
+      expect(phrases).toEqual(["Solana is fixed. ", "RTG is blocked.", "RTG is blocked."])
+      expect(events.at(-1)).toMatchObject({ state: "finished", playedText: "Solana is fixed. RTG is blocked." })
+    } finally { blocked.resolve(); await output.close() }
+  })
+
+  test("an already streamed sentence stays separated from a later formatted section", async () => {
+    const phrases: string[] = []
+    const output = createSpeechOutput({ player: player().implementation, onPlayback: () => {}, onError: () => {}, synthesize: async function* (text) {
+      phrases.push(text); yield { pcm16: new Uint8Array([1, 0]), rate: 16_000 }
+    } })
+    try {
+      output.accept(delta("Here is the status.")); await until(() => phrases.length === 1)
+      output.accept(delta("\n\n- **Solana:** fixed.\n- **RTG:** blocked."))
+      expect(phrases).toEqual(["Here is the status."])
+      output.accept(done("Here is the status.\n\n- **Solana:** fixed.\n- **RTG:** blocked.")); await output.drained("r")
+      expect(phrases.join("")).toBe("Here is the status. Solana: fixed.\nRTG: blocked.")
+    } finally { await output.close() }
+  })
+
+  test("formatting-only replies finish without synthesizing punctuation", async () => {
+    const events: PlaybackEvent[] = []
+    const output = createSpeechOutput({ onPlayback: (event) => { events.push(event) }, onError: () => {}, synthesize: async function* () { throw new Error("Nothing should be spoken") } })
+    try {
+      output.accept(delta("---\n")); output.accept(done("---\n")); await output.drained("r")
+      expect(events.at(-1)).toMatchObject({ state: "finished", playedText: "", certainty: "exact" })
+    } finally { await output.close() }
   })
 
   test("false onset resumes from a confirmed phrase boundary and rejects old synthesis chunks", async () => {

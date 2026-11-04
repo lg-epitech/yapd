@@ -1,4 +1,5 @@
 import type { SessionEvent } from "./Types.ts"
+import { hasFormatting, spokenText } from "./SpokenText.ts"
 
 export interface Transcript {
   /** A complete replacement of the previous prefix, never an append-only delta. */
@@ -204,6 +205,9 @@ export interface SpeechOutput {
 
 interface Output {
   readonly id: string
+  raw: string
+  projected: number
+  /** Only the speakable projection is synthesized, indexed and reported as heard. */
   text: string
   done: boolean
   suspended: boolean
@@ -288,7 +292,28 @@ export const createSpeechOutput = (options: SpeechOutputOptions): SpeechOutput =
     void halt(state, failure, true).catch(() => {})
   }
   const checkBounds = (state: Output) => {
-    if (state.text.length > maxResponse || state.text.length - state.heard > maxPending) throw new Error("Pending speech exceeded its limit.")
+    if (state.raw.length > maxResponse || state.raw.length - state.projected + state.text.length - state.heard > maxPending) throw new Error("Pending speech exceeded its limit.")
+  }
+  const project = (state: Output) => {
+    const tail = state.raw.slice(state.projected)
+    if (hasFormatting(tail)) {
+      if (!state.done) return
+      const spoken = spokenText(tail)
+      // The parser removes paragraph-leading whitespace. Keep a boundary
+      // between an already streamed sentence and a later formatted section.
+      if (state.text !== "" && !/\s$/.test(state.text) && spoken !== "") state.text += " "
+      state.text += spoken
+      state.projected = state.raw.length
+      return
+    }
+    // Plain replies keep their normal incremental latency. Only stable phrases
+    // advance the raw cursor, so later Markdown cannot revise a spoken prefix.
+    for (;;) {
+      const end = phraseEnd(state.raw, state.projected, maxPhrase, state.done)
+      if (end === state.projected) return
+      state.text += state.raw.slice(state.projected, end)
+      state.projected = end
+    }
   }
   const kick = (state: Output) => {
     if (state.task !== undefined || !valid(state, state.generation)) return
@@ -340,6 +365,7 @@ export const createSpeechOutput = (options: SpeechOutputOptions): SpeechOutput =
         state.heard = state.text.length
         options.onPlayback({ type: "playback", responseId: state.id, playedMs: state.playedMs, state: "finished", certainty: "exact", playedText: state.text })
       } else if (state.text.trim() !== "") throw new Error("No speech audio was played.")
+      else options.onPlayback({ type: "playback", responseId: state.id, playedMs: state.playedMs, state: "finished", certainty: "exact", playedText: "" })
       state.terminal = true; state.resolve()
     })()
     state.task = work
@@ -354,7 +380,7 @@ export const createSpeechOutput = (options: SpeechOutputOptions): SpeechOutput =
     let reject!: (error: Error) => void
     const result = new Promise<void>((yes, no) => { resolve = yes; reject = no })
     void result.catch(() => {})
-    const state: Output = { id, text: "", done: false, suspended: false, terminal: false, cursor: 0, heard: 0, playedMs: 0, generation: 0, resumeVersion: 0, controller: new AbortController(), sent: 0, marks: [], result, resolve, reject }
+    const state: Output = { id, raw: "", projected: 0, text: "", done: false, suspended: false, terminal: false, cursor: 0, heard: 0, playedMs: 0, generation: 0, resumeVersion: 0, controller: new AbortController(), sent: 0, marks: [], result, resolve, reject }
     outputs.set(id, state)
     // Keep receipt lookup bounded; the active response is never evicted.
     if (outputs.size > 32) for (const [key, old] of outputs) if (old !== current && old.terminal) { outputs.delete(key); break }
@@ -377,17 +403,17 @@ export const createSpeechOutput = (options: SpeechOutputOptions): SpeechOutput =
             if (outputs.get(event.responseId)?.terminal) return
             if (current !== undefined && current.id !== event.responseId) return
             const state = activate(event.responseId)
-            state.text += event.delta; checkBounds(state); kick(state); break
+            state.raw += event.delta; checkBounds(state); project(state); kick(state); break
           }
           case "response_done": {
             if (current !== undefined && current.id !== event.responseId) return
             const state = outputs.get(event.responseId) ?? activate(event.responseId)
             if (state.terminal) return
-            if (event.text !== state.text) {
-              if (!event.text.startsWith(state.text)) throw new Error("Final response revised text that was already sent to speech.")
-              state.text = event.text
+            if (event.text !== state.raw) {
+              if (!event.text.startsWith(state.raw)) throw new Error("Final response revised text that was already sent to speech.")
+              state.raw = event.text
             }
-            state.done = true; checkBounds(state); kick(state); break
+            state.done = true; checkBounds(state); project(state); kick(state); break
           }
           case "output_cancelled": {
             const state = outputs.get(event.responseId)
@@ -404,13 +430,13 @@ export const createSpeechOutput = (options: SpeechOutputOptions): SpeechOutput =
             // Wait for the stopped-device receipt before choosing a phrase boundary.
             void owner.then(() => {
               if (closed || current !== state || state.terminal || state.resumeVersion !== version) return
-              if (!event.text.startsWith(state.text) && !state.text.startsWith(event.text)) throw new Error("Resumed response changed its generated prefix.")
-              if (event.text.length > state.text.length) state.text = event.text
+              if (!event.text.startsWith(state.raw) && !state.raw.startsWith(event.text)) throw new Error("Resumed response changed its generated prefix.")
+              if (event.text.length > state.raw.length) state.raw = event.text
               state.cursor = state.heard; state.sent = 0; state.marks = []
               delete state.position; delete state.rate; delete state.task
               delete state.stopping
               state.generation++; state.controller = new AbortController(); state.suspended = false
-              checkBounds(state); kick(state)
+              checkBounds(state); project(state); kick(state)
             }).catch((error: unknown) => fail(state, error))
             break
           }
