@@ -10,6 +10,30 @@ test("listing the subscription scenarios needs no Codex executable and performs 
   expect(output.scenarios).toHaveLength(8)
 })
 
+test("evaluation matches V2's workspace identities without leaking task answers, and can exercise empty-context discovery", async () => {
+  for (const workspace of ["snapshot", "empty"] as const) {
+    let inputs = 0
+    const result = await evaluateScenario("ambiguous-target", { stream: async function* ({ items }) {
+      inputs++
+      const snapshot = items.find((item) => item.type === "context" && item.eventId === "workspace:fixture")
+      if (workspace === "empty") expect(snapshot).toBeUndefined()
+      else {
+        expect(snapshot?.type).toBe("context")
+        if (snapshot?.type !== "context") throw new Error("Missing workspace context")
+        const current = JSON.parse(snapshot.text)
+        expect(current.kind).toBe("current_workspace")
+        expect(current.threads.map((thread: { threadId: string }) => thread.threadId)).toEqual(["asr-fr", "asr-en", "yapd-ui"])
+        expect(current.threads.every((thread: object) => Object.keys(thread).sort().join(",") === "machine,project,state,threadId,title")).toBe(true)
+        expect(snapshot.text).not.toMatch(/18|passed|accessibility|snapshots|approve/)
+      }
+      yield { type: "text_delta", delta: "Which thread: French or English?" }
+      yield { type: "done" }
+    } }, () => {}, 1500, workspace === "empty" ? { workspace } : undefined)
+    expect(result.pass).toBe(true)
+    expect(inputs).toBe(1)
+  }
+})
+
 const run = async (scenario: string, model: Model) => {
   const records: Array<TurnReport | ScenarioReport> = []
   const result = await evaluateScenario(scenario, model, (record) => { records.push(record) }, 1500)

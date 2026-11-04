@@ -66,6 +66,10 @@ export interface ScenarioReport {
   readonly errors: ReadonlyArray<string>
 }
 type Emit = (record: TurnReport | ScenarioReport) => void
+export interface EvaluationOptions {
+  /** Match Serve's bounded identity/status snapshot, or test discovery from empty context. */
+  readonly workspace?: "snapshot" | "empty"
+}
 
 const threads = [
   { machine: "fixture", threadId: "asr-fr", title: "ASR French endpointing", project: "speech", state: "idle", facts: "The latest French suite passed all 18 tests out of 18. Endpointing review has not started." },
@@ -91,8 +95,13 @@ class Harness {
   private readonly measurements = new Map<string, Measurement>()
   private waking: Measurement | undefined
 
-  constructor(readonly id: string, model: Model, private readonly emit: Emit, readonly timeoutMs: number) {
+  constructor(readonly id: string, model: Model, private readonly emit: Emit, readonly timeoutMs: number, options: EvaluationOptions) {
     this.session = new Session({ conversationId: `v2-eval:${id}`, model, store: this.store, tools: this.tools(), maxToolCalls: 10, onEvent: (event) => this.observe(event) })
+    if (options.workspace !== "empty") this.session.external({ eventId: "workspace:fixture", text: JSON.stringify({
+      kind: "current_workspace",
+      instruction: "Current thread identities and cached status. Read tools for detailed task facts; search/list tools if the intended thread is outside this bounded snapshot.",
+      threads: threads.map(({ facts: _facts, ...thread }) => thread), unreachableMachines: [],
+    }) })
   }
 
   private tools(): ReadonlyArray<Tool> {
@@ -269,10 +278,10 @@ export const scenarios: ReadonlyArray<{ readonly id: string; readonly descriptio
 ]
 
 /** Exported for harness tests; production entry below always supplies the real Codex adapter. */
-export const evaluateScenario = async (id: string, model: Model, emit: Emit, timeoutMs = 45_000): Promise<ScenarioReport> => {
+export const evaluateScenario = async (id: string, model: Model, emit: Emit, timeoutMs = 45_000, options: EvaluationOptions = {}): Promise<ScenarioReport> => {
   const scenario = scenarios.find((candidate) => candidate.id === id)
   if (scenario === undefined) throw new Error(`Unknown scenario: ${id}`)
-  const harness = new Harness(id, model, emit, timeoutMs)
+  const harness = new Harness(id, model, emit, timeoutMs, options)
   const errors: Array<string> = []
   try { await scenario.run(harness) } catch (error) {
     const reason = error instanceof Error ? error.message : String(error)
@@ -302,7 +311,7 @@ const configured = (): Record<string, string> => {
 
 export const main = async (args: ReadonlyArray<string>): Promise<number> => {
   const flags = new Set(["--run", "--list", "--help"])
-  const valued = new Set(["--only", "--model", "--effort", "--tier", "--timeout-ms"])
+  const valued = new Set(["--only", "--model", "--effort", "--tier", "--timeout-ms", "--workspace"])
   const values = new Map<string, string>()
   let run = false
   for (let index = 0; index < args.length; index++) {
@@ -313,8 +322,10 @@ export const main = async (args: ReadonlyArray<string>): Promise<number> => {
   }
   const selected = values.has("--only") ? values.get("--only")!.split(",").map((id) => id.trim()) : scenarios.map(({ id }) => id)
   if (selected.length === 0 || selected.some((id) => !scenarios.some((scenario) => scenario.id === id))) throw new Error("--only must name comma-separated scenario IDs from --list.")
+  const workspace = values.get("--workspace") ?? "snapshot"
+  if (workspace !== "snapshot" && workspace !== "empty") throw new Error("--workspace must be snapshot or empty.")
   if (!run || args.includes("--list") || args.includes("--help")) {
-    console.log(JSON.stringify({ type: "available", scenarios: scenarios.map(({ id, description }) => ({ id, description })), usage: "bun scripts/v2-eval.ts --run [--only ids] [--model model] [--effort low] [--timeout-ms 45000]", note: "No inference runs without --run. Real runs use the signed-in Codex subscription and isolated fixture tools only." }))
+    console.log(JSON.stringify({ type: "available", scenarios: scenarios.map(({ id, description }) => ({ id, description })), usage: "bun scripts/v2-eval.ts --run [--only ids] [--model model] [--effort low] [--timeout-ms 45000] [--workspace snapshot|empty]", note: "No inference runs without --run. Real runs use the signed-in Codex subscription and isolated fixture tools only. Workspace identities/status are supplied by default, matching V2; empty tests discovery without that snapshot." }))
     return 0
   }
   const settings = configured()
@@ -323,7 +334,7 @@ export const main = async (args: ReadonlyArray<string>): Promise<number> => {
   const tier = values.get("--tier") || settings.YAPD_BRAIN_TIER || settings.YAPD_TIER
   const timeoutMs = Number(values.get("--timeout-ms") ?? 45_000)
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > 120_000) throw new Error("--timeout-ms must be an integer from 1000 to 120000.")
-  console.log(JSON.stringify({ type: "run", version: 1, runId: crypto.randomUUID(), at: new Date().toISOString(), model, effort, tier: tier ?? null, scenarios: selected, trialsPerScenario: 1, scope: "text reasoning and fixture tools; no actual T3, ASR, TTS or playback", context: "Each scenario starts fresh; successive turns share the adapter-managed conversation.", grading: "Deterministic fixture assertions; arguments, receipts and final wording remain available for review.", timing: "firstTextMs includes filler; no meaningful-audio latency is measured. taskDoneMs means checked fixture dispatch or final answer, never completed coding work. No percentiles are estimated." }))
+  console.log(JSON.stringify({ type: "run", version: 2, runId: crypto.randomUUID(), at: new Date().toISOString(), model, effort, tier: tier ?? null, scenarios: selected, workspace, trialsPerScenario: 1, scope: "text reasoning and fixture tools; no actual T3, ASR, TTS or playback", context: "Each scenario starts fresh; successive turns share the adapter-managed conversation. A workspace snapshot contains identities/status only, never test answers or authorization.", grading: "Deterministic fixture assertions; arguments, receipts and final wording remain available for review.", timing: "Account connection is prepared before each scenario; first turn includes tool-thread initialization. firstTextMs includes filler; no meaningful-audio latency is measured. taskDoneMs means checked fixture dispatch or final answer, never completed coding work. No percentiles are estimated." }))
   const results: Array<ScenarioReport> = []
   for (const id of selected) {
     const codex = new Codex({ model, effort, ...(tier === undefined ? {} : { tier }), timeoutMs: Math.min(timeoutMs, 15_000) })
@@ -331,7 +342,7 @@ export const main = async (args: ReadonlyArray<string>): Promise<number> => {
       const start = performance.now()
       await codex.prepare() // The existing adapter rejects API-key authentication.
       console.log(JSON.stringify({ type: "prepared", scenario: id, prepareMs: performance.now() - start }))
-      results.push(await evaluateScenario(id, codex, (record) => console.log(JSON.stringify(record)), timeoutMs))
+      results.push(await evaluateScenario(id, codex, (record) => console.log(JSON.stringify(record)), timeoutMs, { workspace }))
     } catch (error) {
       console.log(JSON.stringify({ type: "run_error", scenario: id, message: error instanceof Error ? error.message : String(error) }))
       return 2

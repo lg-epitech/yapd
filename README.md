@@ -43,6 +43,8 @@ YAPD_V2_ASR_WS_URL=ws://127.0.0.1:8769/v1/audio/transcriptions/realtime bun src/
 
 This preview does not replace the installed service. Use a separate `YAPD_HOME` and port for an isolated trial. The [V2 ticket](https://github.com/lg-epitech/yapd/issues/60) records measured results and remaining experience checks. `bun scripts/v2-eval.ts --list` lists the text/tool checks; `--run --only contextual-target,constraints` runs a small subscription-backed subset against synthetic tools.
 
+The eval supplies the same kind of thread identity/status snapshot as V2, without task answers. Use `--workspace empty` to measure discovery from scratch. Its first turn includes tool-session initialization; later turns reuse that session. These text timings do not measure microphone or speaker latency.
+
 ## Setup
 
 ```sh
