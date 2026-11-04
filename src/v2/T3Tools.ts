@@ -37,6 +37,7 @@ const Start = Schema.Struct({
   baseBranch: Schema.optional(identifier),
 })
 const Stop = Schema.Struct({ ...target, runId: identifier })
+const Settle = Schema.Struct({ ...target, settled: Schema.optional(Schema.Boolean) })
 const Answer = Schema.Struct({
   ...target,
   requestId: identifier,
@@ -291,6 +292,21 @@ export const createT3Tools = (options: T3ToolOptions): ReadonlyArray<Tool> => {
         await run(ledger.settle(prepared.commandId, state, { reason: reason(error) }))
         return { status: refusedByServer ? "refused" : notSent ? "not_sent" : "unknown", commandId: prepared.commandId, runId: args.runId, reason: reason(error) }
       }
+    }),
+    tool("settle_thread", "Mark the specified idle thread settled/done without archiving it. Use settled=false to mark it active again. This never stops work or answers pending requests; T3 Code may refuse to settle a busy thread. Ask the user before stopping work to make it eligible.", "write", Settle, async (args, context) => {
+      const to = ref(args)
+      const settling = args.settled !== false
+      const previous = await existing(context, to)
+      if (previous !== undefined) {
+        const body = previous.row.body as { readonly _tag?: string } | null
+        return body?._tag === (settling ? "Settle" : "Unsettle") ? previous.result : refused("This invocation already records a different thread action.")
+      }
+      const current = Option.getOrUndefined(await run(threads.find(to), context))
+      await context.waitForWrite()
+      const outcome = await run(hands.run(step(context), { _tag: "Tidy", what: settling ? "settle" : "unsettle", to: [{ ref: to, called: current?.title ?? "that thread" }] }, { wanted: wanted(context) }))
+      const row = Option.getOrUndefined(await run(ledger.get(ids(context).commandId)))
+      const result = outcome._tag === "Tidied" ? outcome.each[0]?.outcome : outcome
+      return { ...receipt(result ?? { _tag: "Refused", reason: "No thread action was recorded." }, row?.commandId ?? null), receiptPersisted: row?.state === "sent" }
     }),
     tool("answer_question", "Answer the current pending question by its requestId and question IDs from read_thread. Secret requests require T3 Code's private input instead.", "write", Answer, async (args, context) => {
       const to = ref(args)

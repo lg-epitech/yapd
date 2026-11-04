@@ -30,6 +30,8 @@ bun src/main.ts v2
 
 The native clients use their existing connection. The optional conversation page is `/v2`, with your yapd pairing token. Phone capture remains manual: press to record, press Send, and the microphone closes before the answer. Use the updated clients for streaming playback and complete-capture acknowledgments.
 
+On Mac, a conversation keeps listening between replies. Ask it to stop listening, press Escape, or turn yapd off to end it. A notification on its own does not open an ongoing conversation.
+
 The default recognizer is your ASR's multipart endpoint at `http://127.0.0.1:8792/v1/transcribe`; override it with `YAPD_V2_ASR_URL`. Its prefix uploads are provisional previews, not native streaming inference. Kokoro starts speaking stable phrases while the answer continues generating.
 
 For native streaming recognition on a Linux x86-64 server, start the pinned CPU recognizer in another terminal:

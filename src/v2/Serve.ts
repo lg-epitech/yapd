@@ -26,6 +26,7 @@ import { SileroVad, Vad } from "../Vad.ts"
 import { KokoroVoice, Voice, Warmth } from "../Voice.ts"
 import { createAudioPlayer, createVoiceSynthesizer } from "./AudioBridge.ts"
 import { Codex } from "./Codex.ts"
+import { createStopListeningTool } from "./ConversationTools.ts"
 import { record, type Recording } from "./Capture.ts"
 import { LiveView } from "./LiveView.ts"
 import { createHistoryTool } from "./HistoryTool.ts"
@@ -97,7 +98,10 @@ const running = Effect.gen(function* () {
   // This is silent startup work, never an acknowledgment played to the user.
   yield* (yield* Warmth).warm(["Ready."])
   const conversationStore = yield* Effect.acquireRelease(Effect.sync(() => new ConversationStore(join(Home.home, "v2.sqlite"))), (store) => Effect.sync(() => store.close()))
-  const catalog = [...tools, createHistoryTool(conversationStore, "main")]
+  const catalog = [...tools, createHistoryTool(conversationStore, "main"), createStopListeningTool(async () => {
+    if (voiceTurns === undefined) throw new Error("Voice input is not ready.")
+    await Effect.runPromise(voiceTurns.suspend)
+  })]
   yield* Effect.tryPromise(() => model.prepare(catalog))
   const session = new Session({ conversationId: "main", model, tools: catalog, store: conversationStore })
   const asrUrl = process.env.YAPD_V2_ASR_URL?.trim() || "http://127.0.0.1:8792/v1/transcribe"

@@ -28,17 +28,21 @@ const fixture = async (options: { readonly openGate?: ReturnType<typeof deferred
   const listeners: Array<{ deviceId: string; queue: Queue.Queue<RollingFrame>; history: RollingFrame[]; opened: boolean; closed: boolean; native?: { id: string; frames: Queue.Queue<Float32Array>; samples: number } }> = []
   const promotions: Array<{ id: string; fromSequence: number }> = []
   let manager!: VoiceTurns
-  const emit = (event: SessionEvent) => manager.event(event)
+  let activeResponse = "first"
+  const emit = (event: SessionEvent) => {
+    if (event.type === "response_started") activeResponse = event.responseId
+    manager.event(event)
+  }
   const runtime: Pick<Runtime, "originFor" | "start" | "push" | "send" | "cancel"> = {
     originFor: (id) => origins.get(id),
     start: (input) => {
       starts.push(input); recognized.set(input.captureId, [])
-      emit({ type: "output_cancelled", responseId: "first", reason: "onset" })
-      emit({ type: "playback", responseId: "first", playedMs: 0, state: "interrupted", certainty: "approximate" })
+      emit({ type: "output_cancelled", responseId: activeResponse, reason: "onset" })
+      emit({ type: "playback", responseId: activeResponse, playedMs: 0, state: "interrupted", certainty: "approximate" })
     },
     push: ({ captureId, frame }) => { recognized.get(captureId)?.push(frame.slice()) },
     send: async ({ captureId }) => { sends.push(captureId); return { turnId: captureId, revision: 2, responseId: "spoken", duplicate: false } },
-    cancel: ({ captureId }) => { cancels.push(captureId); emit({ type: "output_resumed", responseId: "first", text: "Original answer" }) },
+    cancel: ({ captureId }) => { cancels.push(captureId); emit({ type: "output_resumed", responseId: activeResponse, text: "Original answer" }) },
   }
   const audio: Pick<Audio["Type"], "listenFor" | "listeningDevice"> = {
     listeningDevice: policy.changes,
@@ -89,7 +93,40 @@ const fixture = async (options: { readonly openGate?: ReturnType<typeof deferred
   }
 }
 
-test("only a pinned eligible Mac response opens input, during thinking and playback but never after terminal playback", async () => {
+test("a Mac conversation still accepts a complete follow-up after the second reply finishes", async () => {
+  const f = await fixture()
+  try {
+    await f.start(); await until(() => f.listeners[0]?.opened === true)
+    f.push(0.9); await until(() => f.promotions.length === 1)
+    for (let i = 0; i < 3; i++) f.push(0.9)
+    for (let i = 0; i < 38; i++) f.push(0)
+    await until(() => f.sends.length === 1)
+    f.origins.set("second", { deviceId: "mac" })
+    await f.start("second")
+    f.emit({ type: "response_done", responseId: "second", turnId: "second", text: "I cannot settle that thread yet." })
+    f.emit({ type: "playback", responseId: "second", playedMs: 1800, state: "finished", certainty: "exact" })
+    await tick()
+    expect(f.listeners.at(-1)?.closed).toBe(false)
+
+    // The user begins after playback, pauses briefly, then completes the turn.
+    for (let i = 0; i < 50; i++) f.push(0)
+    f.push(0.9); await until(() => f.promotions.length === 2)
+    for (let i = 0; i < 3; i++) f.push(0.9)
+    for (let i = 0; i < 16; i++) f.push(0)
+    await tick(); expect(f.sends).toHaveLength(1)
+    for (let i = 0; i < 5; i++) f.push(0.9)
+    for (let i = 0; i < 38; i++) f.push(0)
+    await until(() => f.sends.length === 2)
+    const captured = f.recognized.get(f.sends[1]!)!
+    expect(captured.filter((frame) => frame[0]! > 0.8)).toHaveLength(9)
+    expect(captured.at(-1)?.[0]).toBe(-0.75)
+    expect(f.errors).toEqual([])
+    await Effect.runPromise(f.manager.suspend)
+    expect(f.listeners.every(({ closed }) => closed)).toBe(true)
+  } finally { await f.close() }
+})
+
+test("only a pinned eligible Mac conversation opens input and Stop releases it between replies", async () => {
   const f = await fixture()
   try {
     expect(f.listeners).toHaveLength(0)
@@ -100,6 +137,9 @@ test("only a pinned eligible Mac response opens input, during thinking and playb
     f.emit({ type: "response_done", responseId: "first", turnId: "first", text: "Complete generated answer" }); await tick()
     expect(f.listeners[0]!.closed).toBe(false)
     f.emit({ type: "playback", responseId: "first", playedMs: 1000, state: "finished", certainty: "exact" })
+    await tick()
+    expect(f.listeners[0]!.closed).toBe(false)
+    await Effect.runPromise(f.manager.suspend)
     await until(() => f.listeners[0]?.closed === true)
     await tick()
     expect(f.listeners).toHaveLength(1)
@@ -140,7 +180,8 @@ test("promotion uses the existing recognizer and complete final boundary, retain
     expect(f.starts[0]).toMatchObject({ deviceId: "mac", focus: { machine: "rig", id: "thread" } })
     expect(f.recognized.get(id)?.at(-1)?.[0]).toBe(-0.75)
     expect(f.promotions[0]!.fromSequence).toBe(0)
-    await until(() => f.listeners[0]?.closed === true)
+    await tick()
+    expect(f.listeners[0]!.closed).toBe(false)
     expect(f.errors).toEqual([])
   } finally { await f.close() }
 })
@@ -194,12 +235,30 @@ test("VAD setup and inference failure cancel listening instead of treating the f
   } finally { await f.close() }
 })
 
-test("an empty completed response releases input even though there is no audio playback receipt", async () => {
+test("an empty notification releases input even though there is no audio playback receipt", async () => {
   const f = await fixture()
   try {
-    await f.start(); await until(() => f.listeners[0]?.opened === true)
+    f.emit({ type: "response_started", responseId: "first", turnId: "first", authorization: "event" })
+    await until(() => f.listeners[0]?.opened === true)
     f.emit({ type: "response_done", responseId: "first", turnId: "first", text: "  " })
     await until(() => f.listeners[0]?.closed === true)
     expect(f.listeners).toHaveLength(1)
   } finally { await f.close() }
+})
+
+test("a notification alone closes input after playback, but one during a user conversation preserves it", async () => {
+  for (const engaged of [false, true]) {
+    const f = await fixture()
+    try {
+      if (engaged) { await f.start(); await until(() => f.listeners[0]?.opened === true) }
+      f.origins.set("notice", { deviceId: "mac" })
+      f.emit({ type: "response_started", responseId: "notice", turnId: "notice", authorization: "event" })
+      await until(() => f.listeners.some(({ opened, closed }) => opened && !closed))
+      f.emit({ type: "response_done", responseId: "notice", turnId: "notice", text: "The tests passed." })
+      f.emit({ type: "playback", responseId: "notice", playedMs: 1000, state: "finished", certainty: "exact" })
+      await tick()
+      expect(f.listeners.at(-1)?.closed).toBe(!engaged)
+      expect(f.errors).toEqual([])
+    } finally { await f.close() }
+  }
 })

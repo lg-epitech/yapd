@@ -78,6 +78,8 @@ const fixture = (store: Store.Store["Type"]) => {
         const stopped = projection.runs.find(({ id }) => id === payload.runId)
         if (stopped !== undefined) stopped.status = "interrupted"
       }
+      if (payload.type === "thread.settle") thread = { ...thread, settledOverride: "settled", pinnedAt: null }
+      if (payload.type === "thread.unsettle") thread = { ...thread, settledOverride: "active" }
       return Schema.decodeUnknown(schema)({ sequence: commands.length }).pipe(Effect.orDie)
     })) as Server.Transport["call"],
     asset: () => Effect.die("No asset requested"),
@@ -146,6 +148,69 @@ const runFixture = (work: (made: ReturnType<typeof fixture>) => Promise<void>) =
 })))
 
 describe("V2 T3 tool catalog", () => {
+  test("settling and unsettling use the real thread command path, durable receipts and stable targets", () => runFixture(async (h) => {
+    const ctx = context({ userText: "Settle the French ASR thread." })
+    const first = await h.call("settle_thread", target, ctx)
+    expect(first).toMatchObject({ status: "accepted", commandId: `yapd:v2:${ctx.invocationId}:0`, machine: to.machine, threadId: to.id, receiptPersisted: true })
+    expect(h.commands[0]).toMatchObject({ type: "thread.settle", threadId: to.id, commandId: first.commandId })
+    expect((await h.call("read_thread", target)).thread).toMatchObject({ settledOverride: "settled" })
+    expect(await h.call("settle_thread", { ...target, settled: true }, ctx, createT3Tools(h.options))).toMatchObject({ status: "accepted", commandId: first.commandId, replay: true })
+    expect(await h.call("settle_thread", { ...target, settled: false }, ctx)).toMatchObject({ status: "refused" })
+    expect(await h.call("settle_thread", { ...target, threadId: "another" }, ctx)).toMatchObject({ status: "refused" })
+    expect(h.commands).toHaveLength(1)
+    expect(await h.call("settle_thread", { ...target, settled: false }, context({ userText: "Mark it active again." }))).toMatchObject({ status: "accepted", receiptPersisted: true })
+    expect(h.commands[1]).toMatchObject({ type: "thread.unsettle", reason: "user" })
+    expect((await h.call("read_thread", target)).thread).toMatchObject({ settledOverride: "active" })
+  }))
+
+  test("a busy-thread settle refusal remains refused and never interrupts its work", () => runFixture(async (h) => {
+    h.running("busy-run")
+    h.fail(new Server.Refusal({ tag: "ThreadBusy", message: "Thread is still running; stop or finish the run before settling." }))
+    const ctx = context()
+    const result = await h.call("settle_thread", target, ctx)
+    expect(result).toMatchObject({ status: "refused", receiptPersisted: false })
+    expect(String(result.reason)).toContain("still working")
+    expect(h.projection.runs[0]?.status).toBe("running")
+    expect(h.commands.map(({ type }) => type)).toEqual(["thread.settle"])
+    h.fail(undefined)
+    expect(await h.call("settle_thread", target, ctx)).toMatchObject({ status: "refused", replay: true })
+    expect(h.commands).toHaveLength(1)
+  }))
+
+  test("an unconfirmed settlement is exposed as unknown and never retried after adapter recreation", () => runFixture(async (h) => {
+    h.fail(new Server.Trouble({ reason: "Connection lost after sending settle.", sent: true }))
+    const ctx = context()
+    const first = await h.call("settle_thread", target, ctx)
+    expect(first).toMatchObject({ status: "unknown", receiptPersisted: false })
+    expect(Option.getOrThrow(await Effect.runPromise(h.ledger.get(String(first.commandId)))).state).toBe("unknown")
+    h.fail(undefined)
+    expect(await h.call("settle_thread", target, ctx, createT3Tools(h.options))).toMatchObject({ status: "unknown", commandId: first.commandId, replay: true })
+    expect(h.commands).toHaveLength(1)
+    expect((await h.call("read_thread", target)).thread).toMatchObject({ settledOverride: null })
+  }))
+
+  test("a correction while settlement waits on the write gate prevents the original thread action", () => runFixture(async (h) => {
+    const suspended = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<void>()
+    let current = true, checks = 0
+    const ctx = context({
+      isCurrent: () => current,
+      canWrite: () => current,
+      waitForWrite: async () => {
+        if (++checks === 2) { suspended.resolve(); await release.promise }
+        if (!current) throw new SupersededError()
+      },
+    })
+    const settlement = h.call("settle_thread", target, ctx)
+    await suspended.promise
+    expect(h.commands).toHaveLength(0)
+    current = false
+    release.resolve()
+    expect(await settlement).toMatchObject({ status: "not_sent", receiptPersisted: false, commandId: null })
+    expect(h.commands).toHaveLength(0)
+    expect((await h.call("read_thread", target)).thread).toMatchObject({ settledOverride: null })
+  }))
+
   test("search, read, and send use returned stable IDs and feed JSON-ready actual outcomes", () => runFixture(async (h) => {
     const listed = await h.call("list_threads", {})
     expect(listed.unreachableMachines).toEqual([{ machine: "offline", reason: "Connection unavailable" }])

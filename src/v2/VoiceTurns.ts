@@ -17,6 +17,7 @@ interface Interest {
   readonly deviceId?: string
   readonly focus?: ThreadRef
   active: boolean
+  engaged: boolean
 }
 
 interface Entry {
@@ -30,7 +31,7 @@ interface Entry {
 type VoiceRuntime = Pick<Runtime, "start" | "push" | "send" | "cancel" | "originFor">
 const errorOf = (error: unknown): Error => error instanceof Error ? error : new Error(String(error))
 
-/** A listener belongs to the current response, never to an idle device or a reply timer. */
+/** User-started Mac conversations stay open between replies until explicitly ended. */
 export const make = (options: {
   readonly audio: Pick<Audio["Type"], "listenFor" | "listeningDevice">
   readonly vad: Vad["Type"]
@@ -47,6 +48,7 @@ export const make = (options: {
   const releases = new Set<Promise<void>>()
   const report = (error: unknown) => { try { options.onError(errorOf(error)) } catch { /* Diagnostics cannot prevent input cleanup. */ } }
   const eligible = () => !closed && !suspended && interest?.deviceId !== undefined && policy?.deviceId === interest.deviceId && policy.handsFree ? interest.deviceId : undefined
+  const listening = () => interest?.active === true || interest?.engaged === true
 
   const close = (entry: Entry, uncertain = false): Promise<void> => {
     if (entry.closing !== undefined) return entry.closing
@@ -68,7 +70,7 @@ export const make = (options: {
   const fail = (entry: Entry, error: unknown) => {
     if (entry.closing !== undefined || closed) return
     report(error)
-    if (current === entry && interest?.deviceId === entry.deviceId) { interest.active = false; suspended = true }
+    if (current === entry && interest?.deviceId === entry.deviceId) { interest.active = false; interest.engaged = false; suspended = true }
     void close(entry, true)
   }
 
@@ -77,12 +79,12 @@ export const make = (options: {
       if (closed) return
       const target = eligible()
       if (current !== undefined) {
-        if (current.deviceId !== target || (!interest?.active && !current.controller?.busy)) { await close(current); continue }
+        if (current.deviceId !== target || (!listening() && !current.controller?.busy)) { await close(current); continue }
         return
       }
-      if (target === undefined || !interest?.active || options.audio.listenFor === undefined) return
+      if (target === undefined || !listening() || options.audio.listenFor === undefined) return
       await released()
-      if (target !== eligible() || !interest?.active || closed) continue
+      if (target !== eligible() || !listening() || closed) continue
       const version = revision
       const entry: Entry = { deviceId: target, scope: Effect.runSync(Scope.make()), opening: new AbortController() }
       entries.add(entry); current = entry
@@ -91,7 +93,7 @@ export const make = (options: {
         const detect = await Effect.runPromise(options.vad.make, { signal: entry.opening.signal })
         if (entry.opening.signal.aborted || current !== entry || version !== revision) { await close(entry); continue }
         const listener = await Effect.runPromise(options.audio.listenFor(target).pipe(Scope.extend(entry.scope)), { signal: entry.opening.signal })
-        if (entry.opening.signal.aborted || current !== entry || version !== revision || target !== eligible() || !interest?.active) { await close(entry); continue }
+        if (entry.opening.signal.aborted || current !== entry || version !== revision || target !== eligible() || !listening()) { await close(entry); continue }
         const controller = new Listening({
           deviceId: target, runtime: options.runtime,
           focus: () => interest?.focus,
@@ -136,7 +138,7 @@ export const make = (options: {
   }
   const refresh = (newResponse = false) => {
     revision++
-    if (current !== undefined && (current.deviceId !== eligible() || newResponse && current.controller === undefined || !interest?.active && current.controller === undefined)) void close(current)
+    if (current !== undefined && (current.deviceId !== eligible() || newResponse && current.controller === undefined || !listening() && current.controller === undefined)) void close(current)
     schedule()
   }
   const suspend = Effect.promise(async () => {
@@ -163,14 +165,16 @@ export const make = (options: {
       if (closed) return
       if (event.type === "response_started") {
         const origin = options.runtime.originFor(event.responseId)
+        const engaged = event.authorization !== "event" || !suspended && interest?.engaged === true && interest.deviceId === origin?.deviceId
         suspended = false
-        interest = { responseId: event.responseId, ...(origin?.deviceId === undefined ? {} : { deviceId: origin.deviceId }), ...(origin?.focus === undefined ? {} : { focus: { ...origin.focus } }), active: true }
+        interest = { responseId: event.responseId, ...(origin?.deviceId === undefined ? {} : { deviceId: origin.deviceId }), ...(origin?.focus === undefined ? {} : { focus: { ...origin.focus } }), active: true, engaged }
         refresh(true)
         return
       }
       if (suspended || interest === undefined) return
       const responseId = "responseId" in event ? event.responseId : undefined
       if (responseId !== undefined && responseId !== interest.responseId) return
+      if (event.type === "error") interest.engaged = false
       if (event.type === "output_resumed" || event.type === "playback" && event.state === "playing") interest.active = true
       else if (event.type === "error" || event.type === "response_done" && event.text.trim() === "" || event.type === "playback" && event.state !== "playing" || event.type === "output_cancelled" && event.reason !== "onset") interest.active = false
       else return
