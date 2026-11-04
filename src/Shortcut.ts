@@ -72,11 +72,11 @@ export type Key = "shortcut" | "escape"
 
 export type Event =
   /** The user pressed the shortcut to dictate new work, to be sent once they stop talking when `onPause`, like from a phone. */
-  | { readonly _tag: "Started"; readonly onPause?: boolean }
+  | { readonly _tag: "Started"; readonly onPause?: boolean; readonly deviceId?: string; readonly captureId?: string }
   /** They pressed it again, to send it. */
-  | { readonly _tag: "Sent" }
+  | { readonly _tag: "Sent"; readonly deviceId?: string; readonly captureId?: string }
   /** They pressed Escape instead. */
-  | { readonly _tag: "Cancelled" }
+  | { readonly _tag: "Cancelled"; readonly deviceId?: string; readonly captureId?: string }
 
 const sent: Event = { _tag: "Sent" }
 const cancelled: Event = { _tag: "Cancelled" }
@@ -93,6 +93,8 @@ export class Shortcut extends Context.Tag("yapd/Shortcut")<
   {
     /** What the user does with the shortcut, from when the stream starts. */
     readonly events: Stream.Stream<Event>
+    /** Explicit native Stop, separate from V1's dictation event union. */
+    readonly interruptions?: Stream.Stream<{ readonly deviceId: string }>
     /** Ends a dictation from this side, like when it runs too long, as if the user pressed Escape. */
     readonly cancel: Effect.Effect<void>
     /** Sends a dictation from this side, like when the user stopped talking, as if they pressed again: nothing when none is on. */
@@ -119,9 +121,13 @@ export const make = (keys: Keys, send: (message: object) => void, initially: boo
   Effect.gen(function* () {
     /** Each with how many times the keys were taken or let go of before, so what's left over from before is dropped. */
     const events = yield* PubSub.unbounded<{ readonly event: Event; readonly turns: number }>()
+    const interruptions = yield* PubSub.unbounded<{ readonly deviceId: string }>()
     let on = initially
     let turns = 0
     let dictating = false
+    /** The capture belongs to its starting device, including when another device ends it. */
+    let deviceId: string | undefined
+    let captureId: string | undefined
     let registered: boolean | undefined
     /** Registrations the helper hasn't said how they went yet. It says so for each, in order with the presses. */
     let unanswered = 0
@@ -131,18 +137,22 @@ export const make = (keys: Keys, send: (message: object) => void, initially: boo
       if (on) unanswered++
       send(on ? { type: "shortcut", key: keys.key, modifiers: keys.modifiers } : { type: "shortcut" })
     }
-    const step = (key: Key, onPause?: boolean) =>
+    const step = (key: Key, onPause?: boolean, source?: string, physicalCapture?: string) =>
       Effect.suspend(() => {
         const next = press(dictating, key, onPause)
-        if (next.dictating !== dictating) send({ type: "escape", on: next.dictating })
+        if (next.event?._tag === "Started") { deviceId = source; captureId = physicalCapture }
+        const metadata = { ...(deviceId === undefined ? {} : { deviceId }), ...(captureId === undefined ? {} : { captureId }) }
+        const event = next.event === undefined ? undefined : { ...next.event, ...metadata }
+        if (next.dictating !== dictating) send({ type: "escape", on: next.dictating, ...metadata, ...(event?._tag === "Cancelled" ? { cancelled: true } : {}) })
         dictating = next.dictating
-        return next.event === undefined ? Effect.void : publish(next.event)
+        if (!dictating) { deviceId = undefined; captureId = undefined }
+        return event === undefined ? Effect.void : publish(event)
       })
     /**
      * From the helper, only while it holds the keys as last asked, so a press
      * still on its way from before they were let go of and taken again does nothing.
      */
-    const pressed = (key: Key, onPause?: boolean) => Effect.suspend(() => (on && unanswered === 0 ? step(key, onPause) : Effect.void))
+    const pressed = (key: Key, onPause?: boolean, deviceId?: string, captureId?: string) => Effect.suspend(() => (on && unanswered === 0 ? step(key, onPause, deviceId, captureId) : Effect.void))
 
     const toggle = (next: boolean) =>
       Effect.sync(() => {
@@ -150,8 +160,10 @@ export const make = (keys: Keys, send: (message: object) => void, initially: boo
         on = next
         turns++
         hold()
-        if (dictating) send({ type: "escape", on: false })
+        if (dictating) send({ type: "escape", on: false, cancelled: true, ...(deviceId === undefined ? {} : { deviceId }), ...(captureId === undefined ? {} : { captureId }) })
         dictating = false
+        deviceId = undefined
+        captureId = undefined
       })
 
     return {
@@ -159,6 +171,7 @@ export const make = (keys: Keys, send: (message: object) => void, initially: boo
         events: Stream.fromPubSub(events).pipe(
           Stream.filterMap((published) => (published.turns === turns ? Option.some(published.event) : Option.none())),
         ),
+        interruptions: Stream.fromPubSub(interruptions),
         cancel: step("escape"),
         send: Effect.suspend(() => (dictating ? step("shortcut") : Effect.void)),
         toggle,
@@ -183,17 +196,15 @@ export const make = (keys: Keys, send: (message: object) => void, initially: boo
        * From a device that holds no keys, like a phone's button, so there's
        * nothing to wait for it to register: only while the keys are taken.
        */
-      direct: (key: Key, onPause?: boolean) => Effect.suspend(() => (on ? step(key, onPause) : Effect.void)),
+      direct: (key: Key, onPause?: boolean, deviceId?: string, captureId?: string) => Effect.suspend(() => (on ? step(key, onPause, deviceId, captureId) : Effect.void)),
+      interrupted: (deviceId: string) => Effect.asVoid(PubSub.publish(interruptions, { deviceId })),
       /**
        * The device dictated on went away, letting go of whatever was being
        * dictated, and of Escape, which any other device still holding it for
        * that dictation lets go of too.
        */
-      quit: Effect.suspend(() => {
-        if (!dictating) return Effect.void
-        dictating = false
-        send({ type: "escape", on: false })
-        return publish(cancelled)
-      }),
+      quit: step("escape"),
+      /** Losing another device must not cancel this device's capture. */
+      departed: (source: string) => Effect.suspend(() => source === deviceId ? step("escape") : Effect.void),
     }
   })

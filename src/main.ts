@@ -72,7 +72,7 @@ const runMain = (effect: Effect.Effect<void, unknown>) => {
 const [command, argument] = process.argv.slice(2)
 
 /** Commands that read the user's settings. Hooks don't, and start wherever the agent runs. */
-const settled = ["serve", "setup", "doctor", "install", "uninstall", "relay", "start", "catalog", "mind", "t3", "client", "join", "pair"]
+const settled = ["serve", "v2", "v2-asr", "setup", "doctor", "install", "uninstall", "relay", "start", "catalog", "mind", "t3", "client", "join", "pair"]
 
 /** The environment a bun started with `env` in this folder ends up with, .env files and all. */
 const probe = (env: Record<string, string | undefined>): Record<string, string | undefined> =>
@@ -150,18 +150,32 @@ const served = Console.log(
   "Other machines use yapd here with yapd setup client and how to SSH here, like yapd setup client me@this-machine. A phone pairs with yapd pair.",
 )
 
-if ((command === "serve" || (command === "install" && !client)) && !serves) {
+if ((command === "serve" || command === "v2" || (command === "install" && !client)) && !serves) {
   console.error(
     `yapd runs on Macs with Apple silicon and on Linux. Here it runs hooks and relays follow-ups, and can use yapd on another machine with yapd setup client.${
       mac ? " To remove a service installed before, run `yapd uninstall`." : ""
     }`,
   )
   process.exit(1)
-} else if (command === "serve" && client) {
+} else if ((command === "serve" || command === "v2") && client) {
   console.error(`This machine uses yapd on ${process.env.YAPD_SERVER}, so it runs yapd client. Take YAPD_SERVER out of its settings to run yapd here.`)
   process.exit(1)
 } else if (command === "serve") {
   runMain(withClients(Effect.flatMap(Effect.promise(() => import("./Serve.ts")), ({ serve }) => serve)))
+} else if (command === "v2") {
+  runMain(withClients(Effect.flatMap(Effect.promise(() => import("./v2/Serve.ts")), ({ serve }) => serve)))
+} else if (command === "v2-asr") {
+  if (process.argv.length > 4 || argument !== undefined && argument !== "--download" && argument !== "--check") {
+    console.error("usage: yapd v2-asr [--download|--check]")
+    process.exit(1)
+  }
+  try {
+    const { run } = await import("./v2/AsrServer.ts")
+    process.exitCode = await run({ download: argument === "--download", check: argument === "--check" })
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : "The self-hosted recognizer could not start.")
+    process.exitCode = 1
+  }
 } else if (command === "setup" && argument === "client") {
   const server = process.argv[4]
   if (server === undefined) {
@@ -245,7 +259,7 @@ if ((command === "serve" || (command === "install" && !client)) && !serves) {
   runMain(t3)
 } else {
   console.error(
-    "usage: yapd setup [server] | yapd setup client <server> | yapd pair [--new] | yapd doctor | yapd serve | yapd client | yapd install | yapd uninstall | yapd hook <claude|codex> [--wait] | yapd relay | yapd start [machine] | yapd catalog [machine] | yapd t3",
+    "usage: yapd setup [server] | yapd setup client <server> | yapd pair [--new] | yapd doctor | yapd serve | yapd v2 | yapd client | yapd install | yapd uninstall | yapd hook <claude|codex> [--wait] | yapd relay | yapd start [machine] | yapd catalog [machine] | yapd t3",
   )
   // Not 2: Claude Code treats exit code 2 from a Stop hook as "keep going".
   process.exit(1)

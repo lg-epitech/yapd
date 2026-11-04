@@ -18,6 +18,31 @@ With [ffmpeg](https://ffmpeg.org) installed it sounds a bit like Jarvis :)
 
 Every setting, and how it all works, is in [the long version](docs/guide.md).
 
+## V2 preview
+
+V2 gives typed requests, microphone captures and thread notifications one conversation and one tool loop. It uses Codex's existing ChatGPT sign-in for reasoning and tools, and self-hosted speech. It does not use separately billed model APIs. Run `codex login` on the server if needed.
+
+The default is `gpt-6.1-sol` at low reasoning effort. Existing `YAPD_BRAIN_MODEL` and `YAPD_BRAIN_EFFORT` settings take precedence. Speech and the tool session warm up silently at startup.
+
+```sh
+bun src/main.ts v2
+```
+
+The native clients use their existing connection. The optional conversation page is `/v2`, with your yapd pairing token. Phone capture remains manual: press to record, press Send, and the microphone closes before the answer. Use the updated clients for streaming playback and complete-capture acknowledgments.
+
+The default recognizer is your ASR's multipart endpoint at `http://127.0.0.1:8792/v1/transcribe`; override it with `YAPD_V2_ASR_URL`. Its prefix uploads are provisional previews, not native streaming inference. Kokoro starts speaking stable phrases while the answer continues generating.
+
+For native streaming recognition on a Linux x86-64 server, start the pinned CPU recognizer in another terminal:
+
+```sh
+bun src/main.ts v2-asr --download
+YAPD_V2_ASR_WS_URL=ws://127.0.0.1:8769/v1/audio/transcriptions/realtime bun src/main.ts v2
+```
+
+`--download` obtains the verified open-weight model and server, about 752 MB total. Later runs need no download; `v2-asr --check` verifies the cache without loading a model. The foreground server uses two CPU threads and listens on loopback. V2 accepts only its final transcript after manual commit; ambiguous interim hypotheses are never used to authorize work.
+
+This preview does not replace the installed service. Use a separate `YAPD_HOME` and port for an isolated trial. The [V2 ticket](https://github.com/lg-epitech/yapd/issues/60) records measured results and remaining experience checks. `bun scripts/v2-eval.ts --list` lists the text/tool checks; `--run --only contextual-target,constraints` runs a small subscription-backed subset against synthetic tools.
+
 ## Setup
 
 ```sh

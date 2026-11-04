@@ -37,8 +37,19 @@ describe("Shortcut", () => {
       { type: "escape", on: true },
       { type: "escape", on: false },
       { type: "escape", on: true },
-      { type: "escape", on: false },
+      { type: "escape", on: false, cancelled: true },
     ])
+  })
+
+  test("turning off cancels the identified physical capture even before recording setup finishes", async () => {
+    const messages = await Effect.runPromise(Effect.gen(function* () {
+      const messages: object[] = []
+      const shortcut = yield* Shortcut.make({ key: "space", modifiers: ["ctrl"] }, (message) => messages.push(message), true)
+      yield* shortcut.direct("shortcut", false, "phone", "physical-press")
+      yield* shortcut.service.toggle(false)
+      return messages
+    }))
+    expect(messages).toContainEqual({ type: "escape", on: false, deviceId: "phone", captureId: "physical-press", cancelled: true })
   })
 
   test("sends from this side only while dictating, and says whether a press from a phone starts one to send on a pause", async () => {
@@ -88,6 +99,34 @@ describe("Shortcut", () => {
       { type: "shortcut", key: "space", modifiers: ["ctrl"] },
       { type: "escape", on: true },
       { type: "escape", on: false },
+    ])
+  })
+
+  test("keeps the capture device through another device's send, auto-send, cancellation and disconnect", async () => {
+    const events = await Effect.runPromise(Effect.gen(function* () {
+      const shortcut = yield* Shortcut.make({ key: "space", modifiers: ["ctrl"] }, () => {}, true)
+      const collected = yield* Effect.fork(Stream.runCollect(Stream.take(shortcut.service.events, 8)))
+      yield* Effect.yieldNow()
+      yield* shortcut.direct("shortcut", false, "phone", "physical-phone-press")
+      yield* shortcut.pressed("shortcut", false, "mac", "another-physical-press")
+      yield* shortcut.pressed("shortcut", true, "mac")
+      yield* shortcut.service.send
+      yield* shortcut.direct("shortcut", false, "second-phone")
+      yield* shortcut.service.cancel
+      yield* shortcut.direct("shortcut", false, "third-phone")
+      yield* shortcut.departed("second-phone")
+      yield* shortcut.departed("third-phone")
+      return [...(yield* Fiber.join(collected).pipe(Effect.timeout("1 second")))]
+    }))
+    expect(events).toEqual([
+      { _tag: "Started", onPause: false, deviceId: "phone", captureId: "physical-phone-press" },
+      { _tag: "Sent", deviceId: "phone", captureId: "physical-phone-press" },
+      { _tag: "Started", onPause: true, deviceId: "mac" },
+      { _tag: "Sent", deviceId: "mac" },
+      { _tag: "Started", onPause: false, deviceId: "second-phone" },
+      { _tag: "Cancelled", deviceId: "second-phone" },
+      { _tag: "Started", onPause: false, deviceId: "third-phone" },
+      { _tag: "Cancelled", deviceId: "third-phone" },
     ])
   })
 })
