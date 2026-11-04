@@ -4,6 +4,8 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { agentMessages } from "./AgentMessages.ts"
 import { Codex } from "./Codex.ts"
+import { Session } from "./Session.ts"
+import { Store } from "./Store.ts"
 import type { ConversationItem, ModelEvent } from "./Types.ts"
 
 const owned: { model: Codex; directory: string }[] = []
@@ -123,6 +125,22 @@ test("a warm subscription thread receives changed playback and late tool facts u
   expect(turns[1]!.params.input[0].text).toContain(after.text)
   expect(turns[1]!.params.input[0].text).not.toContain(before.text)
   expect((await messages()).filter((m) => m.method === "thread/start")).toHaveLength(1)
+})
+
+test("a warm subscription receives the empty pending-update status after dismissal", async () => {
+  const { model, messages } = await setup()
+  const store = new Store()
+  const session = new Session({ conversationId: "c", store, model, tools: [{ ...tools[0]!, mode: "read", execute: async () => ({ ok: true }) }] })
+  try {
+    session.external({ eventId: "pending", text: "A retained result.", notification: { key: "thread", id: "result", version: 1, eligible: true, automatic: false } })
+    await session.commit({ text: "First question.", source: "text" }); await session.idle()
+    store.dismissNotifications("c", ["result"])
+    await session.commit({ text: "A different question.", source: "text" }); await session.idle()
+    const turns = (await messages()).filter((m) => m.method === "turn/start")
+    const context = turns[1]!.params.input[0].text.split("\n").slice(1).map((line: string) => JSON.parse(line)).find((item: ConversationItem) => item.type === "context" && item.eventId === "notification_updates")
+    expect(JSON.parse(context.text).pending).toEqual([])
+    expect((await messages()).filter((m) => m.method === "thread/start")).toHaveLength(1)
+  } finally { await session.close(); store.close() }
 })
 
 test("an interrupted pending tool cannot block a new turn or clear its newer thread", async () => {

@@ -34,6 +34,8 @@ The native clients use their existing connection. The optional conversation page
 
 On Mac, a conversation keeps listening between replies. Ask it to stop listening, press Escape, or turn yapd off to end it. A notification on its own does not open an ongoing conversation.
 
+Talking over an update stops its audio. A new request or manual capture cancellation never restarts that reply. Useful notification facts remain available for a relevant follow-up or catch-up; they do not trigger a retry after silence or another answer. A false speech onset can resume the same attempt. Stop dismisses the current and queued announcements, while unrelated older facts and off-time updates remain available. A requested catch-up clears selected facts only after its answer finishes playing.
+
 The default recognizer is your ASR's multipart endpoint at `http://127.0.0.1:8792/v1/transcribe`; override it with `YAPD_V2_ASR_URL`. Its prefix uploads are provisional previews, not native streaming inference. Kokoro starts speaking stable phrases while the answer continues generating.
 
 For native streaming recognition on a Linux x86-64 server, start the pinned CPU recognizer in another terminal:

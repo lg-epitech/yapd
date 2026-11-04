@@ -78,6 +78,8 @@ export const Thread = Schema.Struct({
   /** When it was settled, by his hand or T3 Code's. */
   settledAt: nullable(Schema.String),
   snoozedUntil: nullable(Schema.String),
+  snoozedAt: Schema.optional(Schema.NullOr(Schema.String)),
+  pendingGuestMessageCount: Schema.optional(Schema.Number),
   /** When he pinned it, while it's pinned. */
   pinnedAt: nullable(Schema.String),
   archivedAt: nullable(Schema.String),
@@ -138,6 +140,8 @@ export type Change =
   /** What it was waiting on was dealt with, here or anywhere else. */
   | { readonly _tag: "Answered"; readonly thread: Thread; readonly request: typeof Pending.Type }
   | { readonly _tag: "Renamed"; readonly thread: Thread; readonly before: Thread }
+  /** Explicit organization can make a retained notification obsolete. */
+  | { readonly _tag: "Organized"; readonly thread: Thread }
   /** Archived or deleted, which the stream doesn't tell apart. */
   | { readonly _tag: "Removed"; readonly thread: Thread }
 
@@ -155,6 +159,7 @@ export const compare = (before: Thread | undefined, after: Thread): ReadonlyArra
   }
   const changes: Array<Change> = []
   if (before.title !== after.title) changes.push({ _tag: "Renamed", thread: after, before })
+  if (before.settledOverride !== after.settledOverride || before.archivedAt !== after.archivedAt || before.snoozedUntil !== after.snoozedUntil || (before.snoozedAt ?? null) !== (after.snoozedAt ?? null)) changes.push({ _tag: "Organized", thread: after })
   const ran = before.activeRunId
   const runs = after.activeRunId
   // A run seen going that has stopped, or one that came and went unseen, like a quick failure while disconnected.
@@ -163,11 +168,13 @@ export const compare = (before: Thread | undefined, after: Thread): ReadonlyArra
     after.latestRunId !== before.latestRunId &&
     after.latestRunId !== runs &&
     after.latestRunCompletedAt !== null
-  if ((ran !== null && ran !== runs) || unseen) changes.push({ _tag: "Finished", thread: after, before })
-  if (runs !== null && runs !== ran) changes.push({ _tag: "Started", thread: after })
   const was = before.pendingRuntimeRequest
   const is = after.pendingRuntimeRequest
+  // Clear the question's old fact before publishing the completion that
+  // replaces it when both changes belong to one source snapshot.
   if (was !== null && was.id !== is?.id) changes.push({ _tag: "Answered", thread: after, request: was })
+  if ((ran !== null && ran !== runs) || unseen) changes.push({ _tag: "Finished", thread: after, before })
+  if (runs !== null && runs !== ran) changes.push({ _tag: "Started", thread: after })
   if (is !== null && is.id !== was?.id) changes.push({ _tag: "Asked", thread: after, request: is })
   return changes
 }

@@ -1,6 +1,6 @@
 import { Session } from "./Session.ts"
 import { createSpeechOutput, type Recognition, type Recognizer, type SpeechOutput, type SpeechOutputOptions, type Transcript } from "./Speech.ts"
-import type { SessionEvent, ThreadRef } from "./Types.ts"
+import type { ExternalInput, SessionEvent, ThreadRef } from "./Types.ts"
 
 export interface InputOrigin {
   readonly deviceId?: string
@@ -94,12 +94,13 @@ export class Runtime {
   }
 
   get inputEpoch(): number { return this.epoch }
+  get isEnabled(): boolean { return this.enabled }
 
   setEnabled(on: boolean): void {
     this.ensureOpen()
     if (this.enabled === on) return
     this.enabled = on
-    if (!on) this.stop()
+    if (!on) this.halt(false)
   }
 
   private ensureInput(expectedEpoch = this.epoch): void {
@@ -123,6 +124,7 @@ export class Runtime {
     // only after Speech has entered its terminal cancellation path.
     queueMicrotask(() => {
       if (this.closed) return
+      this.options.session.speechFailed(responseId)
       const previous = this.playback.get(responseId)
       if (previous?.state === "finished" || previous?.state === "interrupted") return
       this.options.session.playback({ responseId, playedMs: previous?.playedMs ?? 0, state: "interrupted", certainty: "approximate", ...(previous?.playedText === undefined ? {} : { playedText: previous.playedText }) })
@@ -214,7 +216,7 @@ export class Runtime {
     return capture.final
   }
 
-  cancel(input: { readonly captureId: string; readonly reason?: "error" }): void {
+  cancel(input: { readonly captureId: string; readonly reason?: "error" | "manual" }): void {
     this.ensureOpen()
     const capture = this.captures.get(input.captureId)
     if (capture === undefined || capture.status === "done" || capture.status === "cancelled") return
@@ -222,7 +224,7 @@ export class Runtime {
     capture.release()
     try { capture.recognizer.abort() } catch (error) {
       this.emit({ type: "runtime_error", captureId: input.captureId, message: message(error) })
-    } finally { this.options.session.abandon({ captureId: input.captureId, ...(input.reason === "error" ? { uncertain: true } : {}) }) }
+    } finally { this.options.session.abandon({ captureId: input.captureId, ...(input.reason === "error" ? { uncertain: true } : {}), ...(input.reason === "manual" ? { cancelled: true } : {}) }) }
   }
 
   private async commit(input: InputOrigin & { readonly text: string; readonly source: "text" | "voice"; readonly turnId: string; readonly captureId?: string }, sequence: number): Promise<CommitReceipt> {
@@ -243,24 +245,34 @@ export class Runtime {
     return this.commit({ ...snapshot(input), text: input.text, source: "text", turnId: input.turnId ?? crypto.randomUUID() }, ++this.sequence)
   }
 
-  external(input: { readonly eventId: string; readonly text: string }): void {
+  external(input: ExternalInput): boolean {
     this.ensureOpen()
-    this.options.session.external(input)
+    return this.options.session.external(input)
   }
 
-  wake(input: Pick<InputOrigin, "deviceId"> = {}): Promise<WakeReceipt> {
+  wake(input: Pick<InputOrigin, "deviceId"> & { readonly notificationId?: string } = {}): Promise<WakeReceipt> {
     this.ensureOpen()
     this.ensureInput()
-    this.pendingWake ??= snapshot(input)
-    return this.options.session.wake()
+    if (!this.options.session.hasQueuedWake) this.pendingWake = undefined
+    const previous = this.pendingWake
+    const origin = this.pendingWake ?? snapshot(input)
+    this.pendingWake = origin
+    return this.options.session.wake(input.notificationId).then((receipt) => {
+      if (receipt.status === "ignored" && previous === undefined && this.pendingWake === origin) this.pendingWake = undefined
+      return receipt
+    })
   }
 
   /** Conversation Stop is distinct from stopping an already dispatched coding run. */
   stop(): void {
+    this.halt(true)
+  }
+
+  private halt(dismissNotifications: boolean): void {
     this.ensureOpen()
     this.epoch++
     this.pendingWake = undefined
-    this.options.session.interrupt()
+    this.options.session.interrupt(dismissNotifications)
     for (const capture of this.captures.values()) this.cancel({ captureId: capture.input.captureId })
   }
 
@@ -269,7 +281,7 @@ export class Runtime {
 
   close(): Promise<void> {
     if (this.closing !== undefined) return this.closing
-    this.stop()
+    this.halt(false)
     this.closed = true
     this.closing = (async () => {
       try { await this.speech.close() } finally {

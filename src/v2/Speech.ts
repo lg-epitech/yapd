@@ -267,7 +267,10 @@ export const createSpeechOutput = (options: SpeechOutputOptions): SpeechOutput =
     state.suspended = true
     state.controller.abort(reason)
     if (terminal) { state.terminal = true; state.reject(reason) }
-    if (state.stopping !== undefined) return state.stopping
+    const unplayed = () => {
+      if (terminal && state.sent === 0) options.onPlayback({ type: "playback", responseId: state.id, playedMs: state.playedMs, state: "interrupted", certainty: "exact", playedText: state.text.slice(0, state.heard) })
+    }
+    if (state.stopping !== undefined) return state.stopping.then(unplayed)
     const playback = state.playback
     const opening = state.opening
     const stopping = (async () => {
@@ -276,6 +279,10 @@ export const createSpeechOutput = (options: SpeechOutputOptions): SpeechOutput =
         const position = await handle.stop()
         receipt(state, position, "interrupted")
         state.playedMs += position.samples / position.rate * 1000
+      } else {
+        // No player was opened: cancellation is known, rather than an
+        // unconfirmed playback that looks like it might still be pending.
+        unplayed()
       }
       delete state.playback; delete state.opening
     })()
@@ -427,11 +434,14 @@ export const createSpeechOutput = (options: SpeechOutputOptions): SpeechOutput =
             const state = outputs.get(event.responseId)
             if (state === undefined || state.terminal || !state.suspended || current !== state) return
             const version = ++state.resumeVersion
+            // Restore withheld text before newer model deltas can append while
+            // the old device's stop receipt is still in flight.
+            if (!event.text.startsWith(state.raw) && !state.raw.startsWith(event.text)) throw new Error("Resumed response changed its generated prefix.")
+            if (event.text.length > state.raw.length) state.raw = event.text
+            checkBounds(state)
             // Wait for the stopped-device receipt before choosing a phrase boundary.
             void owner.then(() => {
               if (closed || current !== state || state.terminal || state.resumeVersion !== version) return
-              if (!event.text.startsWith(state.raw) && !state.raw.startsWith(event.text)) throw new Error("Resumed response changed its generated prefix.")
-              if (event.text.length > state.raw.length) state.raw = event.text
               state.cursor = state.heard; state.sent = 0; state.marks = []
               delete state.position; delete state.rate; delete state.task
               delete state.stopping

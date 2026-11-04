@@ -6,6 +6,22 @@ export interface ThreadRef {
 
 export type InputSource = "text" | "voice"
 
+/** Notification identity comes from the source, never from generated speech. */
+export interface NotificationFact {
+  readonly key: string
+  readonly id: string
+  readonly version: number
+  /** False invalidates an earlier update, e.g. the thread resumed or was dismissed. */
+  readonly eligible: boolean
+  /** Uncorrelated T3 hooks retain information without risking a duplicate announcement. */
+  readonly automatic?: boolean
+}
+export interface ExternalInput {
+  readonly eventId: string
+  readonly text: string
+  readonly notification?: NotificationFact
+}
+
 export type ConversationItem =
   | { readonly type: "message"; readonly role: "user" | "assistant"; readonly text: string; readonly turnId: string; readonly responseId?: string; readonly source?: InputSource }
   | { readonly type: "context"; readonly text: string; readonly eventId: string }

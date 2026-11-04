@@ -18,6 +18,7 @@ import * as Show from "../Show.ts"
 import { Shortcut } from "../Shortcut.ts"
 import * as Store from "../Store.ts"
 import * as T3Actions from "../T3Actions.ts"
+import { bundle as t3Bundle } from "../T3Code.ts"
 import * as T3CodeServer from "../T3CodeServer.ts"
 import * as T3Live from "../T3Live.ts"
 import * as Threads from "../Threads.ts"
@@ -30,6 +31,8 @@ import { createStopListeningTool } from "./ConversationTools.ts"
 import { record, type Recording } from "./Capture.ts"
 import { LiveView } from "./LiveView.ts"
 import { createHistoryTool } from "./HistoryTool.ts"
+import { createNotificationTools } from "./NotificationTools.ts"
+import { organizationNotification, threadNotification, threadStopNotification } from "./NotificationFacts.ts"
 import { html as page } from "./Page.ts"
 import { Runtime, type RuntimeEvent } from "./Runtime.ts"
 import { Session } from "./Session.ts"
@@ -98,7 +101,7 @@ const running = Effect.gen(function* () {
   // This is silent startup work, never an acknowledgment played to the user.
   yield* (yield* Warmth).warm(["Ready."])
   const conversationStore = yield* Effect.acquireRelease(Effect.sync(() => new ConversationStore(join(Home.home, "v2.sqlite"))), (store) => Effect.sync(() => store.close()))
-  const catalog = [...tools, createHistoryTool(conversationStore, "main"), createStopListeningTool(async () => {
+  const catalog = [...tools, createHistoryTool(conversationStore, "main"), ...createNotificationTools(conversationStore, "main"), createStopListeningTool(async () => {
     if (voiceTurns === undefined) throw new Error("Voice input is not ready.")
     await Effect.runPromise(voiceTurns.suspend)
   })]
@@ -141,7 +144,8 @@ const running = Effect.gen(function* () {
     if (current !== undefined) yield* current.cancel
     return current
   })
-  const stop = Effect.sync(() => runtime.stop()).pipe(Effect.zipRight(shortcut.cancel), Effect.zipRight(voiceTurns.suspend), Effect.zipRight(closeInput))
+  const releaseInput = shortcut.cancel.pipe(Effect.zipRight(voiceTurns.suspend), Effect.zipRight(closeInput))
+  const stop = Effect.sync(() => runtime.stop()).pipe(Effect.zipRight(releaseInput))
   const outputDevice = Effect.gen(function* () {
     const selected = audio.listeningDevice === undefined ? Option.none() : Option.flatten(yield* Stream.runHead(audio.listeningDevice))
     return Option.getOrUndefined(selected)?.deviceId ?? lastDeviceId
@@ -180,6 +184,8 @@ const running = Effect.gen(function* () {
   yield* shortcut.toggle(enabled())
   yield* Effect.forkScoped(Stream.runForEach(shortcut.events, (event) => Effect.gen(function* () {
     if (event._tag === "Cancelled") {
+      const id = event.captureId ?? capture?.id ?? starting?.id
+      if (id !== undefined) runtime.cancel({ captureId: id, reason: "manual" })
       yield* closeInput
       return
     }
@@ -235,11 +241,14 @@ const running = Effect.gen(function* () {
   yield* Effect.forkScoped(Stream.runForEach(threads.changes, ({ machine: on, change }) => Effect.gen(function* () {
     const thread = change.thread
     const eventId = `t3:${on}:${thread.id}:${change._tag}:${thread.updatedAt}:${thread.latestRunId ?? ""}`
-    runtime.external({ eventId, text: JSON.stringify({ kind: "thread_event", machine: on, change: change._tag, thread }) })
-    if (!enabled() || !["Finished", "Asked"].includes(change._tag) || Threads.subagent(thread)) return
-    if (Option.isSome(yield* mutes.muted([Mutes.key.thread({ machine: on, id: thread.id })]))) return
+    const eligible = ["Finished", "Asked"].includes(change._tag) && !Threads.subagent(thread) && Option.isNone(yield* mutes.muted([Mutes.key.thread({ machine: on, id: thread.id })]))
+    const relevant = ["Finished", "Asked", "Started", "Answered", "Removed"].includes(change._tag)
+    const now = yield* Clock.currentTimeMillis
+    const notification = change._tag === "Organized" ? organizationNotification(on, thread, now) : relevant ? threadNotification(on, thread, eligible, enabled() && runtime.isEnabled, now) : undefined
+    const fresh = runtime.external({ eventId, text: JSON.stringify({ kind: "thread_event", machine: on, change: change._tag, thread }), ...(notification === undefined ? {} : { notification }) })
+    if (!enabled() || !eligible || !fresh) return
     const deviceId = yield* outputDevice
-    yield* Effect.tryPromise(() => runtime.wake(deviceId === undefined ? {} : { deviceId })).pipe(Effect.catchAll(() => Effect.void))
+    yield* Effect.tryPromise(() => runtime.wake({ ...(deviceId === undefined ? {} : { deviceId }), ...(notification === undefined ? {} : { notificationId: notification.id }) })).pipe(Effect.catchAll(() => Effect.void))
   })))
   const served = Show.served(show, threads.desk(Option.none(), [], 1000), journal.page, Effect.map(mutes.list, (rows) => new Set(rows.map(({ key }) => key))))
   const snapshot = () => View.snapshot(conversationStore, session.conversationId, recognitionMode, activeResponses)
@@ -250,10 +259,26 @@ const running = Effect.gen(function* () {
     handle: (agent, payload, origin) => Effect.gen(function* () {
       if (process.env.YAPD_INTERNAL === "1") return undefined
       const eventId = `hook:${createHash("sha256").update(JSON.stringify({ agent, payload, origin })).digest("hex")}`
-      runtime.external({ eventId, text: JSON.stringify({ kind: "agent_hook", agent, payload, origin }) })
-      if (payload.hook_event_name === "Stop" && enabled()) {
+      const text = JSON.stringify({ kind: "agent_hook", agent, payload, origin })
+      let notification: import("./Types.ts").NotificationFact | undefined
+      if (payload.hook_event_name === "Stop") {
+        const on = origin?.host ?? machine
+        const linked = typeof payload.session_id === "string" && typeof payload.cwd === "string"
+          ? Option.flatten(yield* threads.link(on, payload.session_id, payload.cwd).pipe(Effect.timeoutOption("1 second"))) : Option.none()
+        if (Option.isSome(linked)) {
+          if (linked.value._tag === "Thread") {
+            const thread = yield* threads.find(linked.value.ref)
+            if (Option.isSome(thread)) {
+              notification = threadStopNotification(on, thread.value, Option.isNone(yield* mutes.muted([Mutes.key.thread(linked.value.ref)])), enabled() && runtime.isEnabled, yield* Clock.currentTimeMillis)
+            }
+          }
+          // Subagent hooks stay context, without an independent announcement.
+        } else notification = { key: JSON.stringify([on, agent, payload.session_id ?? payload.cwd]), id: eventId, version: Date.now(), eligible: true, automatic: enabled() && runtime.isEnabled && origin?.app !== t3Bundle }
+      }
+      const fresh = runtime.external({ eventId, text, ...(notification === undefined ? {} : { notification }) })
+      if (payload.hook_event_name === "Stop" && enabled() && fresh && notification?.eligible) {
         const deviceId = yield* outputDevice
-        yield* Effect.tryPromise(() => runtime.wake(deviceId === undefined ? {} : { deviceId })).pipe(Effect.catchAll(() => Effect.void))
+        yield* Effect.tryPromise(() => runtime.wake({ ...(deviceId === undefined ? {} : { deviceId }), notificationId: notification.id })).pipe(Effect.catchAll(() => Effect.void))
       }
       return undefined
     }),
@@ -262,7 +287,7 @@ const running = Effect.gen(function* () {
       runtime.setEnabled(on)
       yield* SubscriptionRef.update(state, (s) => ({ ...s, on }))
       yield* settings.remember(on)
-      if (!on) yield* stop
+      if (!on) yield* releaseInput
       yield* shortcut.toggle(on)
     }).pipe(power.withPermits(1)),
     mode: () => Effect.fail(new Error("V2 uses one conversation; control notifications with thread mute or power.")),

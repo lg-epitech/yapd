@@ -337,7 +337,7 @@ describe("V2 Session", () => {
     const callIndex = finalItems.findIndex((item) => item.type === "function_call")
     expect(callIndex).toBeGreaterThan(-1)
     expect(finalItems[callIndex + 1]?.type).toBe("function_result")
-    expect(finalItems.length).toBeLessThanOrEqual(7)
+    expect(finalItems.length).toBeLessThanOrEqual(8) // Includes the replaceable pending-update status frame.
     await fixture.session.close()
     fixture.store.close()
   })

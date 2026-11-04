@@ -1,7 +1,7 @@
 import { Database } from "bun:sqlite"
 import { mkdirSync, writeFileSync } from "node:fs"
 import { dirname } from "node:path"
-import type { ConversationItem, InputSource, ThreadRef, ToolDefinition, UserTurn } from "./Types.ts"
+import type { ConversationItem, InputSource, NotificationFact, ThreadRef, ToolDefinition, UserTurn } from "./Types.ts"
 
 export interface StoredTurn extends UserTurn {
   readonly conversationId: string
@@ -27,6 +27,15 @@ export interface Playback {
   readonly state: "playing" | "finished" | "interrupted"
   readonly certainty: "exact" | "approximate"
   readonly playedText?: string
+}
+
+interface NotificationRow {
+  key: string
+  id: string
+  version: number
+  text: string
+  state: "new" | "held" | "handled" | "dismissed" | "superseded"
+  response_id: string | null
 }
 
 interface TurnRow {
@@ -117,6 +126,11 @@ export class Store {
       create table if not exists v2_playback (
         conversation_id text not null, response_id text not null, data text not null,
         primary key (conversation_id, response_id)
+      ) strict;
+      create table if not exists v2_notifications (
+        conversation_id text not null, key text not null, id text not null,
+        version integer not null, text text not null, state text not null, response_id text,
+        primary key (conversation_id, key)
       ) strict;
     `)
   }
@@ -303,5 +317,77 @@ export class Store {
   getPlayback(conversationId: string, responseId: string): Playback | undefined {
     const found = this.database.query<{ data: string }, [string, string]>("select data from v2_playback where conversation_id=? and response_id=?").get(conversationId, responseId)
     return found === null ? undefined : JSON.parse(found.data) as Playback
+  }
+
+  /** New source facts get one automatic opportunity. Duplicates never rearm it. */
+  notification(conversationId: string, fact: NotificationFact, text: string): boolean {
+    if (!Number.isSafeInteger(fact.version) || fact.version < 0 || !fact.key || !fact.id) throw new Error("Invalid notification identity.")
+    return this.database.transaction(() => {
+      const previous = this.database.query<NotificationRow, [string, string]>("select * from v2_notifications where conversation_id=? and key=?").get(conversationId, fact.key)
+      if (previous !== null && previous.version > fact.version) return false
+      if (previous?.id === fact.id) {
+        // A final hook can enrich the same completion without reviving its audio.
+        this.database.query("update v2_notifications set version=?,text=?,state=case when ? then state else 'superseded' end where conversation_id=? and key=?").run(fact.version, text, fact.eligible ? 1 : 0, conversationId, fact.key)
+        return false
+      }
+      const state = fact.eligible ? fact.automatic === false ? "held" : "new" : "superseded"
+      this.database.query("insert into v2_notifications values (?,?,?,?,?,?,null) on conflict(conversation_id,key) do update set id=excluded.id,version=excluded.version,text=excluded.text,state=excluded.state,response_id=null")
+        .run(conversationId, fact.key, fact.id, fact.version, text, state)
+      this.append(conversationId, "notification_fact", { ...fact, state })
+      return state === "new"
+    }).immediate()
+  }
+
+  pendingNotifications(conversationId: string) {
+    return this.database.query<NotificationRow, [string]>("select * from v2_notifications where conversation_id=? and state in ('new','held') order by version desc,key").all(conversationId)
+      .map((row) => ({ key: row.key, id: row.id, version: row.version, text: row.text, responseId: row.response_id, playback: row.response_id === null ? null : this.getPlayback(conversationId, row.response_id) ?? null }))
+  }
+
+  notificationReady(conversationId: string, id: string): boolean {
+    return this.database.query("select 1 from v2_notifications where conversation_id=? and id=? and state='new'").get(conversationId, id) !== null
+  }
+
+  beginNotification(conversationId: string, responseId: string): ReadonlyArray<string> {
+    return this.database.transaction(() => {
+      const rows = this.database.query<NotificationRow, [string]>("select * from v2_notifications where conversation_id=? and state='new'").all(conversationId)
+      this.database.query("update v2_notifications set state='held',response_id=? where conversation_id=? and state='new'").run(responseId, conversationId)
+      this.append(conversationId, "notification_attempt", { responseId, ids: rows.map(({ id }) => id) })
+      return rows.map(({ id }) => id)
+    }).immediate()
+  }
+
+  /** Real input holds queued information, without making it another audio attempt. */
+  holdNotifications(conversationId: string): void {
+    this.database.query("update v2_notifications set state='held' where conversation_id=? and state='new'").run(conversationId)
+  }
+
+  finishNotification(conversationId: string, responseId: string): void {
+    this.database.query("update v2_notifications set state='handled' where conversation_id=? and response_id=? and state='held'").run(conversationId, responseId)
+  }
+
+  /** Reporting selects facts for an answer; only its later playback clears them. */
+  reportNotifications(conversationId: string, responseId: string, ids: ReadonlyArray<string>): void {
+    this.database.transaction(() => {
+      const pending = this.pendingNotifications(conversationId)
+      if (ids.some((id) => !pending.some((notice) => notice.id === id))) throw new Error("An update changed or is no longer pending. Read pending updates again.")
+      for (const id of ids) this.database.query("update v2_notifications set state='held',response_id=? where conversation_id=? and id=?").run(responseId, conversationId, id)
+      this.append(conversationId, "notification_report", { responseId, ids })
+    }).immediate()
+  }
+
+  /** Stop affects the current/queued announcement, not unrelated older information. */
+  stopNotifications(conversationId: string, responseId?: string): void {
+    const ids = this.database.query<{ id: string }, [string, string | null]>("select id from v2_notifications where conversation_id=? and (state='new' or (state='held' and response_id=?))").all(conversationId, responseId ?? null).map(({ id }) => id)
+    if (ids.length > 0) this.dismissNotifications(conversationId, ids)
+  }
+
+  dismissNotifications(conversationId: string, ids?: ReadonlyArray<string>): void {
+    this.database.transaction(() => {
+      const pending = this.pendingNotifications(conversationId)
+      if (ids !== undefined && ids.some((id) => !pending.some((notice) => notice.id === id))) throw new Error("An update changed or is no longer pending. Read pending updates again.")
+      const selected = pending.filter((notice) => ids === undefined || ids.includes(notice.id))
+      for (const notice of selected) this.database.query("update v2_notifications set state='dismissed' where conversation_id=? and key=?").run(conversationId, notice.key)
+      if (selected.length > 0) this.append(conversationId, "notifications_dismissed", { ids: selected.map(({ id }) => id) })
+    }).immediate()
   }
 }
