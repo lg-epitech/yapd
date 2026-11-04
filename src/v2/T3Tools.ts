@@ -22,7 +22,7 @@ export interface T3ToolOptions {
   readonly confirmWaitMs?: number
 }
 
-export const settleThreadDescription = `Mark the specified idle thread settled/done without archiving it. Use settled=false to mark it active again. This never stops work or answers pending requests; T3 Code may refuse to settle a busy thread. Ask the user before stopping work to make it eligible. Say the outcome in a few words, without restating the request: "Settled." or "I settled the thread." only when confirmed is true; "Settlement requested." when it was accepted or queued but confirmed is false or absent. Never say "The request to settle it was accepted." For settled=false, say "Marked active." or "Reactivation requested." the same way. Report a refusal or unknown outcome plainly.`
+export const settleThreadDescription = `Mark the specified idle thread settled/done without archiving it. Use settled=false to mark it active again. This never stops work or answers pending requests; T3 Code may refuse to settle a busy thread. Ask the user before stopping work to make it eligible. Say nothing before the result, and never mention requests, receipts, dispatch, queues or statuses. When confirmed is true, say only "Settled." Otherwise never claim it settled: if confirmed is false or absent, or the status is unknown, say "I couldn't confirm it settled."; if it failed or was refused, give the reason in plain words, such as "It's still working, so it can't be settled." For settled=false, say "Marked active." or "I couldn't confirm it's active again." the same way.`
 
 const identifier = Schema.String.pipe(Schema.minLength(1), Schema.maxLength(512), Schema.pattern(/\S/))
 const words = Schema.String.pipe(Schema.minLength(1), Schema.maxLength(100_000), Schema.pattern(/\S/))
@@ -187,7 +187,7 @@ export const createT3Tools = (options: T3ToolOptions): ReadonlyArray<Tool> => {
   }
   /** Acceptance means T3 Code took the command; the live view shows it applied. A failed look leaves the receipt standing. */
   const shown = async (to: Threads.Ref, settling: boolean, context: ToolContext) => {
-    const deadline = Date.now() + (options.confirmWaitMs ?? 1500)
+    const deadline = Date.now() + (options.confirmWaitMs ?? 5000)
     try {
       for (;;) {
         const thread = Option.getOrUndefined(await run(threads.find(to)))

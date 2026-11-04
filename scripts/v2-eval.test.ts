@@ -7,7 +7,7 @@ test("listing the subscription scenarios needs no Codex executable and performs 
   const output = JSON.parse(await new Response(process_.stdout).text()) as { type: string; scenarios: Array<{ id: string }> }
   expect(await process_.exited).toBe(0)
   expect(output.type).toBe("available")
-  expect(output.scenarios).toHaveLength(17)
+  expect(output.scenarios).toHaveLength(19)
 })
 
 test("evaluation matches V2's workspace identities without leaking task answers, and can exercise empty-context discovery", async () => {
@@ -110,18 +110,21 @@ test("speech cut off mid-sentence may go unsent, but anything sent cannot narrat
   expect((await run("follow-up-cut-off-speech", stream("Review endpointing. The user's utterance ended mid-sentence."))).result.pass).toBe(false)
 })
 
-test("settlement replies stay short and claim only what the receipt proves", async () => {
+test("only a verified settlement says Settled, and anything else stays plain and free of status wording", async () => {
   const graded = async (scenario: string, threadId: string, said: string) => (await run(scenario, { stream: async function* () {
     yield { type: "tool_call", callId: "settle", name: "settle_thread", arguments: { machine: "fixture", threadId }, respond: async () => {} }
     yield { type: "text_delta", delta: said }
     yield { type: "done" }
   } })).result.pass
+  const rejected = ["Settlement requested.", "The request to settle the thread was accepted."]
   expect(await graded("settle-confirmed", "asr-fr", "Settled.")).toBe(true)
-  expect(await graded("settle-confirmed", "asr-fr", "I settled the thread.")).toBe(true)
-  expect(await graded("settle-confirmed", "asr-fr", "The request to settle the French ASR thread was accepted.")).toBe(false)
-  expect(await graded("settle-accepted-only", "asr-en", "Settlement requested.")).toBe(true)
-  expect(await graded("settle-accepted-only", "asr-en", "Settled.")).toBe(false)
-  expect(await graded("settle-accepted-only", "asr-en", "The request to settle the English ASR thread was accepted.")).toBe(false)
+  for (const said of ["I settled the thread.", ...rejected]) expect(await graded("settle-confirmed", "asr-fr", said)).toBe(false)
+  expect(await graded("settle-unverified", "asr-en", "I couldn't confirm it settled.")).toBe(true)
+  for (const said of ["Settled.", "The settlement was accepted, but I couldn't confirm it.", ...rejected]) expect(await graded("settle-unverified", "asr-en", said)).toBe(false)
+  expect(await graded("settle-refused", "yapd-ui", "It's still working, so it can't be settled.")).toBe(true)
+  for (const said of ["Settled.", "The settlement was refused because it's busy.", ...rejected]) expect(await graded("settle-refused", "yapd-ui", said)).toBe(false)
+  expect(await graded("settle-unknown", "mr-204", "I couldn't tell whether it settled.")).toBe(true)
+  for (const said of ["Settled.", "The outcome is unknown.", ...rejected]) expect(await graded("settle-unknown", "mr-204", said)).toBe(false)
 })
 
 test("a plausible factual answer without observed fixture evidence does not pass", async () => {
