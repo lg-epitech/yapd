@@ -12,6 +12,8 @@ export const Kind = {
   file: 2,
   /** The microphone as 16-bit integers, half the size, as clients send it. */
   pcm16: 3,
+  /** An ordered output stream chunk: a JSON header followed by PCM16 mono. */
+  stream: 4,
 } as const
 
 /** Each microphone frame is this many samples of 16 kHz mono, 32 ms, which is what the voice detector takes. */
@@ -19,6 +21,45 @@ export const samples = 512
 
 /** The most a header can be, so a frame that isn't one is never read as a huge one. */
 const largest = 4096
+
+/** Bounds a chunk to 16,384 mono samples; playback credit bounds the total queued audio. */
+export const streamSamples = 16384
+
+export interface StreamChunk {
+  readonly id: string
+  readonly generation: number
+  readonly sequence: number
+  readonly pcm: Uint8Array
+}
+
+/** A stream's generation and sequence are explicit: a late chunk cannot become a new response. */
+export const stream = ({ pcm, ...header }: StreamChunk): Uint8Array => {
+  if (!header.id || header.id.length > 100 || !Number.isSafeInteger(header.generation) || header.generation < 0 || !Number.isSafeInteger(header.sequence) || header.sequence < 0) throw new Error("Invalid audio stream header")
+  if (pcm.length === 0 || pcm.length % 2 !== 0 || pcm.length > streamSamples * 2) throw new Error("Invalid audio stream chunk")
+  const encoded = new TextEncoder().encode(JSON.stringify(header))
+  const frame = new Uint8Array(5 + encoded.length + pcm.length)
+  frame[0] = Kind.stream
+  new DataView(frame.buffer).setUint32(1, encoded.length)
+  frame.set(encoded, 5)
+  frame.set(pcm, 5 + encoded.length)
+  return frame
+}
+
+export const readStream = (frame: Uint8Array): StreamChunk | undefined => {
+  if (frame.length < 5 || frame[0] !== Kind.stream) return undefined
+  const length = new DataView(frame.buffer, frame.byteOffset + 1, 4).getUint32(0)
+  if (length > largest || frame.length <= 5 + length) return undefined
+  try {
+    const header: unknown = JSON.parse(new TextDecoder().decode(frame.subarray(5, 5 + length)))
+    if (typeof header !== "object" || header === null || !("id" in header) || !("generation" in header) || !("sequence" in header)) return undefined
+    const { id, generation, sequence } = header
+    if (typeof id !== "string" || !id || id.length > 100 || typeof generation !== "number" || !Number.isSafeInteger(generation) || generation < 0 || typeof sequence !== "number" || !Number.isSafeInteger(sequence) || sequence < 0) return undefined
+    const pcm = frame.subarray(5 + length)
+    return pcm.length > 0 && pcm.length % 2 === 0 && pcm.length <= streamSamples * 2 ? { id, generation, sequence, pcm } : undefined
+  } catch {
+    return undefined
+  }
+}
 
 /**
  * A file sent ahead of playing it: the kind, a big-endian UInt32 length, a

@@ -97,7 +97,7 @@ final class Talk {
       DispatchQueue.main.async { self?.stirred() }
     }
     connection.hello = { [id] in
-      ["type": "hello", "permission": Speaker.permission, "client": ["id": id, "name": UIDevice.current.name, "hotkeys": false, "opens": true]]
+      ["type": "hello", "permission": Speaker.permission, "client": ["id": id, "name": UIDevice.current.name, "hotkeys": false, "opens": true, "streaming": true, "captureBoundary": true, "handsFree": false]]
     }
     connection.opened = { speaker.announce() }
     connection.heard = { [weak self] message in
@@ -107,7 +107,7 @@ final class Talk {
       case "escape":
         let on = message["on"] as? Bool ?? false
         // In order with what it's told to play, since a dictation's microphone opens with its first sound.
-        speaker.dictating(on)
+        speaker.dictating(on, captureId: message["captureId"] as? String, cancelled: message["cancelled"] as? Bool ?? false)
         DispatchQueue.main.async { self?.dictating = on; self?.update() }
       case "open":
         guard let address = message["url"] as? String, let url = URL(string: address), url.scheme == "https" else { return }
@@ -190,7 +190,7 @@ final class Talk {
     idle?.cancel()
     begin()
     // Recording from the press, so it's going while the press is handled, as the Action button needs.
-    if !dictating { speaker.open() }
+    speaker.press()
     guard await connection.connect(to: server, token: token) else {
       trouble = "I can't reach yapd at \(server.host ?? "your server"). Is Tailscale on?"
       // Nothing's listening for what it records, nor will be.
@@ -201,13 +201,12 @@ final class Talk {
       return
     }
     // Sent only when pressed again, never on a pause, which someone else talking nearby would put off or fill.
-    connection.send(["type": "pressed", "key": "shortcut", "onPause": false])
     speaker.sent()
   }
 
   /// Drops what's being dictated, as Escape does on the Mac, or else stops what yapd is saying.
   func cancel() {
-    connection.send(["type": "pressed", "key": dictating ? "escape" : "stop"])
+    speaker.cancelPress()
   }
 
   func appeared(_ foreground: Bool) {

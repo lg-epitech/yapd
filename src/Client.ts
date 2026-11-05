@@ -160,7 +160,7 @@ const bridge = (port: number, microphone: boolean) =>
       sent.clear()
     }
     const name = process.env.YAPD_NAME?.trim() || Origin.clientName()
-    const client = { id: `mac:${Origin.clientName()}`, name, hotkeys: true, opens: true }
+    const client = { id: `mac:${Origin.clientName()}`, name, hotkeys: true, opens: true, streaming: false, captureBoundary: false, handsFree: false }
 
     let helper: Socket<Helper.Decoder> | undefined
     let unsent: Array<Uint8Array> = []
@@ -184,10 +184,25 @@ const bridge = (port: number, microphone: boolean) =>
     let hello: string | undefined
     let server: WebSocket | undefined
     let up = false
+    const forward = (data: string | Uint8Array) => {
+      if (server?.readyState !== WebSocket.OPEN) return
+      const bytes = typeof data === "string" ? Buffer.byteLength(data) : data.byteLength
+      if (server.bufferedAmount + bytes > 2 * 1024 * 1024) {
+        server.close()
+        tell({ type: "rest" })
+        return
+      }
+      server.send(data)
+    }
 
     /** What the server says, as the helper's commands, with what it's to play put where the helper can read it. */
     const heard = (data: string | ArrayBuffer) => {
       if (typeof data !== "string") {
+        const chunk = Wire.readStream(new Uint8Array(data))
+        if (chunk !== undefined) {
+          tell({ type: "stream-chunk", id: chunk.id, generation: chunk.generation, sequence: chunk.sequence, audio: Buffer.from(chunk.pcm).toString("base64") })
+          return
+        }
         const file = Wire.readFile(new Uint8Array(data))
         if (file === undefined) return
         const at = joinPath(files, `${sent.size}-${crypto.randomUUID()}.wav`)
@@ -250,17 +265,18 @@ const bridge = (port: number, microphone: boolean) =>
 
     const fromHelper = (message: Helper.Message) => {
       if (message.kind === Helper.Kind.pcm) {
-        if (server?.readyState === WebSocket.OPEN) server.send(Wire.pcm16(new Float32Array(message.payload.buffer)))
+        forward(Wire.pcm16(new Float32Array(message.payload.buffer)))
         return
       }
       const text = new TextDecoder().decode(message.payload)
-      let parsed: { readonly type?: unknown; readonly permission?: unknown }
+      let parsed: { readonly type?: unknown; readonly permission?: unknown; readonly streaming?: unknown; readonly captureBoundary?: unknown; readonly handsFree?: unknown }
       try {
         parsed = JSON.parse(text)
       } catch {
         return
       }
       if (parsed.type === "hello" || parsed.type === "permission") {
+        if (parsed.type === "hello") { client.streaming = parsed.streaming === true; client.captureBoundary = parsed.captureBoundary === true; client.handsFree = parsed.handsFree === true }
         hello = JSON.stringify({ type: "hello", permission: parsed.permission, client })
         if (parsed.type === "hello") {
           // A helper that started again holds no keys: the server tells it them again once it hears hello anew.
@@ -269,7 +285,7 @@ const bridge = (port: number, microphone: boolean) =>
           return
         }
       }
-      if (server?.readyState === WebSocket.OPEN) server.send(text)
+      forward(text)
     }
 
     yield* Effect.acquireRelease(

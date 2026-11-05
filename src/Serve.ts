@@ -48,7 +48,7 @@ import { SileroVad } from "./Vad.ts"
 import { KokoroVoice, Voice } from "./Voice.ts"
 import { ProviderWriter } from "./Writer.ts"
 
-// `yapd serve`, apart from the other commands, since only the daemon needs the
+// `yapd v1`, apart from the other commands, since only the daemon needs the
 // models and the native onnxruntime they bring, which hooks would load on every turn.
 
 /** The tunnel to each machine in `YAPD_REMOTES`, by its hostname in lowercase, held open while yapd serves. */

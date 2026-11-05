@@ -41,6 +41,14 @@ const run = (items: ReadonlyArray<unknown>, view = T3Live.empty) => {
 }
 
 describe("T3Live.apply", () => {
+  test("explicit organization invalidates pending updates without manufacturing another completion", () => {
+    const result = run([
+      snapshot(1, [thread()]), { kind: "synchronized" },
+      { kind: "thread.updated", sequence: 2, location: "active", thread: thread({ settledOverride: "settled" }) },
+      { kind: "thread.updated", sequence: 3, location: "active", thread: thread({ settledOverride: "settled" }) },
+    ])
+    expect(result.changes).toEqual(["Organized"])
+  })
   test("takes a snapshot as history, and what follows the catch-up as news", () => {
     const { view, changes } = run([
       snapshot(10, [thread()]),

@@ -71,6 +71,40 @@ const stateful = Effect.gen(function* () {
 })
 
 describe("Server", () => {
+  test("V2 shares authentication and commits stable turns without exposing data in its public shell", async () => {
+    await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
+      const committed: unknown[] = []
+      let stopped = false
+      const server = yield* Server.serve(0, {
+        ...hooks(() => Effect.succeed(undefined)),
+        conversation: {
+          page: "<!doctype html><title>yapd</title>",
+          read: Effect.succeed({ conversationId: "private", items: [] }),
+          events: Stream.succeed({ type: "connected" }),
+          commit: (input) => Effect.sync(() => { committed.push(input); return { turnId: input.turnId } }),
+          stop: Effect.sync(() => { stopped = true }),
+        },
+      }, Option.some(Redacted.make("test-token")))
+      const url = `http://127.0.0.1:${server.port}`
+      const page = yield* Effect.promise(() => fetch(`${url}/v2`, { headers: { origin: "https://other.example" } }))
+      expect(page.status).toBe(200)
+      expect(yield* Effect.promise(() => page.text())).not.toContain("private")
+      expect(page.headers.get("content-security-policy")).toContain("frame-ancestors 'none'")
+      for (const path of ["/conversation", "/conversation/stream", "/conversation/turns", "/conversation/stop"]) {
+        const response = yield* Effect.promise(() => fetch(`${url}${path}`, { method: path.includes("turns") || path.includes("stop") ? "POST" : "GET", headers: { origin: "https://other.example" } }))
+        expect(response.status).toBe(403)
+      }
+      const headers = { authorization: "Bearer test-token", "content-type": "application/json", origin: url }
+      const invalid = yield* Effect.promise(() => fetch(`${url}/conversation/turns`, { method: "POST", headers, body: JSON.stringify({ text: "Send it." }) }))
+      expect(invalid.status).toBe(400)
+      const accepted = yield* Effect.promise(() => fetch(`${url}/conversation/turns`, { method: "POST", headers, body: JSON.stringify({ text: "Only the French tests.", turnId: "request-1" }) }))
+      expect(accepted.status).toBe(202)
+      expect(committed).toEqual([{ text: "Only the French tests.", turnId: "request-1" }])
+      const stop = yield* Effect.promise(() => fetch(`${url}/conversation/stop`, { method: "POST", headers }))
+      expect(stop.status).toBe(204)
+      expect(stopped).toBe(true)
+    })))
+  })
   test("accepts valid events and rejects invalid payloads", async () => {
     await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
       const server = yield* Server.serve(0, hooks(() => Effect.succeed("Follow up.")))
