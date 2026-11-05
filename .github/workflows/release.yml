@@ -35,12 +35,13 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       TAG: ${{ needs.release-please.outputs.tag }}
+      VERSION: ${{ needs.release-please.outputs.version }}
       ZIP: yapd-menu-bar-${{ needs.release-please.outputs.version }}.zip
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.release-please.outputs.tag }}
-      - run: xcodebuild -project app/yapd.xcodeproj -configuration Release -quiet install DSTROOT="$RUNNER_TEMP/root"
+      - run: xcodebuild -project app/yapd.xcodeproj -configuration Release -quiet install DSTROOT="$RUNNER_TEMP/root" MARKETING_VERSION="$VERSION" CURRENT_PROJECT_VERSION="$GITHUB_RUN_NUMBER"
       # ditto keeps the app's signature and attributes, which zip alone doesn't.
       - run: ditto -c -k --keepParent "$RUNNER_TEMP/root/Applications/yapd.app" "$ZIP"
       - run: gh release upload "$TAG" "$ZIP"
