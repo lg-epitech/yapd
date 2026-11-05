@@ -184,6 +184,50 @@ describe("T3CodeLauncher's start", () => {
   })
 })
 
+describe("T3CodeLauncher config compatibility", () => {
+  const result = {
+    projection: { thread: { branch: null, worktreePath: "/scratch/thread-1", modelSelection: fable }, runs: [{ status: "running" }] },
+  }
+  const reached = (bundled: boolean) => {
+    const calls: Array<{ method: string; payload: unknown }> = []
+    const scratch = project({ title: "No project", workspaceRoot: "/scratch" })
+    const answer = <A, I>(value: unknown, schema: Schema.Schema<A, I>) => Schema.decodeUnknown(schema)(value).pipe(Effect.orDie)
+    const transport: Server.Transport = {
+      api: (path, schema) => answer(path === "/api/orchestration/shell" ? { projects: [scratch], threads: [] } : result, schema),
+      call: (method, payload, schema) => {
+        calls.push({ method, payload })
+        if (method === "server.getConfig") return answer({ providers, scratchWorkspaceRoot: "/scratch", ...(bundled ? { settings: { defaultModelSelection: fable, defaultThreadEnvMode: "worktree" } } : {}) }, schema)
+        if (method === "server.getSettings") return bundled
+          ? Effect.fail(new Server.Trouble({ reason: "T3 Code didn't understand me. One of us needs updating.", cause: { _tag: "Failure", cause: [{ _tag: "Die", defect: "Unknown request tag: server.getSettings" }] } }))
+          : answer({ defaultModelSelection: fable, defaultThreadEnvMode: "worktree" }, schema)
+        if (method === "projects.ensureScratch") return answer({ projectId: scratch.id }, schema)
+        if (method === "vcs.listRefs") return answer({ isRepo: false, refs: [] }, schema)
+        if (method === "orchestration.launchThread") return answer(result, schema)
+        return Effect.die(`Unexpected method: ${method}`)
+      },
+      asset: () => Effect.die("Unexpected asset"),
+    }
+    return { calls, launcher: T3CodeLauncher.launcher(Redacted.make("token"), Effect.succeed(transport), () => fresh) }
+  }
+
+  test("catalog and scratch launch use bundled settings when the separate settings RPC is unavailable", async () => {
+    const { calls, launcher } = reached(true)
+    const catalog = await Effect.runPromise(launcher.catalog)
+    expect(catalog.projects[0]).toMatchObject({ scratch: true, worktree: false, model: { name: fable.model, effort: "high" } })
+    expect(catalog.models.some(({ name }) => name === fable.model)).toBe(true)
+    expect(await Effect.runPromise(launcher.start({ project: "/scratch", prompt: "Read-only audit", worktree: false }))).toMatchObject({ thread: fresh.thread, project: "scratch", model: fable.model, worktree: false })
+    expect(calls.some(({ method }) => method === "server.getSettings")).toBe(false)
+    expect(calls.find(({ method }) => method === "orchestration.launchThread")?.payload).toMatchObject({ modelSelection: fable, workspaceStrategy: { type: "root" }, initialMessage: { text: "Read-only audit" } })
+  })
+
+  test("legacy config without bundled settings retains the separate settings RPC and its defaults", async () => {
+    const { calls, launcher } = reached(false)
+    expect((await Effect.runPromise(launcher.catalog)).projects[0]?.model?.name).toBe(fable.model)
+    expect((await Effect.runPromise(launcher.start({ project: "/scratch", prompt: "Read-only audit", worktree: false }))).model).toBe(fable.model)
+    expect(calls.filter(({ method }) => method === "server.getSettings")).toHaveLength(2)
+  })
+})
+
 describe("T3CodeServer", () => {
   const failure = (...cause: ReadonlyArray<unknown>) => ({ _tag: "Failure", cause })
   const reason = (exit: unknown) => Either.match(Server.outcome(exit), { onLeft: T3CodeLauncher.reason, onRight: () => undefined })

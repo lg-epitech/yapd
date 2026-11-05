@@ -253,6 +253,14 @@ export interface Page {
 
 /** What hooks and UIs can do. */
 export interface Api {
+  /** V2 uses the same authenticated listener as native clients and hooks. */
+  readonly conversation?: {
+    readonly page: string
+    readonly read: Effect.Effect<unknown>
+    readonly events: Stream.Stream<unknown>
+    readonly commit: (input: { readonly text: string; readonly turnId: string }) => Effect.Effect<unknown, unknown>
+    readonly stop: Effect.Effect<void, unknown>
+  }
   readonly handle: Handle
   /** The state, then each time it changes. */
   readonly state: Stream.Stream<State>
@@ -432,9 +440,40 @@ export const serve = (port: number, api: Api, token: Option.Option<Redacted.Reda
     const receive = (request: Request, server: Bun.Server<undefined>) =>
       Effect.gen(function* () {
         const url = new URL(request.url)
+        // This shell contains no conversation data or credentials. Its fetches
+        // still require the existing bearer-token authentication below.
+        if (request.method === "GET" && url.pathname === "/v2" && api.conversation !== undefined) {
+          return new Response(api.conversation.page, { headers: {
+            "content-type": "text/html; charset=utf-8", "cache-control": "no-store",
+            "x-content-type-options": "nosniff", "referrer-policy": "no-referrer",
+            "content-security-policy": "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+          } })
+        }
         if (!allowed(request, server)) return new Response(null, { status: 403 })
         const route = `${request.method} ${url.pathname}`
         if (route === "GET /health") return new Response("ok")
+        if (api.conversation !== undefined) {
+          if (route === "GET /conversation") return Response.json(yield* api.conversation.read)
+          if (route === "GET /conversation/stream") {
+            server.timeout(request, 0)
+            return new Response(Stream.toReadableStream(api.conversation.events.pipe(
+              Stream.map((event) => `data: ${JSON.stringify(event)}\n\n`), Stream.encodeText,
+            )), { headers: { "content-type": "text/event-stream", "cache-control": "no-store" } })
+          }
+          if (route === "POST /conversation/turns") {
+            const body = yield* Effect.tryPromise(() => request.json()).pipe(Effect.option)
+            const value = Option.getOrUndefined(body) as { text?: unknown; turnId?: unknown } | null | undefined
+            if (value === null || typeof value !== "object" || typeof value.text !== "string" || value.text.trim() === "" || value.text.length > 100_000 || typeof value.turnId !== "string" || !/^[\w-]{1,128}$/.test(value.turnId)) {
+              return new Response("Send non-empty text and a stable turnId.", { status: 400 })
+            }
+            return yield* api.conversation.commit({ text: value.text, turnId: value.turnId }).pipe(
+              Effect.map((receipt) => Response.json(receipt, { status: 202 })), Effect.catchAll(failed("take this conversation turn")),
+            )
+          }
+          if (route === "POST /conversation/stop") return yield* api.conversation.stop.pipe(
+            Effect.as(new Response(null, { status: 204 })), Effect.catchAll(failed("stop the conversation output")),
+          )
+        }
         if (route === "POST /events") return yield* event(request, url, server)
         if (route === "GET /state") return Response.json(yield* current)
         if (route === "GET /state/stream") {

@@ -12,7 +12,7 @@ import {
   Layer,
   Option,
   PubSub,
-  type Queue,
+  Queue,
   Runtime,
   Schema,
   Scope,
@@ -48,17 +48,70 @@ export interface Playback {
   readonly volume: (level: number) => Effect.Effect<void>
 }
 
+export interface PCMRequest {
+  readonly id: string
+  readonly generation: number
+  readonly rate: 16000 | 24000 | 48000
+  /** The utterance's originating device. A missing device fails instead of moving speech elsewhere. */
+  readonly deviceId?: string
+}
+
+export interface PCMPosition {
+  readonly samples: number
+  readonly rate: number
+  /** Rendered receipts are sample counts, not an alignment to spoken words. */
+  readonly certainty: "rendered" | "estimated" | "unknown"
+}
+
+export interface PCMPlayback {
+  /** Ordered, mono signed PCM16LE. Writes apply bounded device-playback backpressure. */
+  readonly write: (pcm: Uint8Array) => Effect.Effect<void, AudioError>
+  /** Closes generation and waits until the device has actually drained every sample. */
+  readonly end: Effect.Effect<void, AudioError>
+  readonly stop: Effect.Effect<PCMPosition>
+  readonly progress: Stream.Stream<PCMPosition>
+}
+
+export interface DeviceCapture {
+  readonly frames: Queue.Dequeue<Float32Array>
+  /** Native failure after ready must wake a consumer waiting for its next frame. */
+  readonly failed?: Effect.Effect<never, AudioError>
+  /** Stop the consumer first; the native boundary precedes these final queued frames. */
+  readonly finish: Effect.Effect<{ readonly frames: ReadonlyArray<Float32Array>; readonly samples: number }, AudioError>
+  readonly cancel: Effect.Effect<void>
+}
+
+export interface RollingFrame {
+  readonly sequence: number
+  readonly frame: Float32Array
+  readonly echoRisk: boolean
+}
+
+export interface Listener {
+  readonly frames: Queue.Dequeue<RollingFrame>
+  readonly promote: (captureId: string, fromSequence: number) => Effect.Effect<DeviceCapture, AudioError, Scope.Scope>
+}
+
 export class Audio extends Context.Tag("yapd/Audio")<
   Audio,
   {
     /** Plays a file from `from` seconds in. Closing the scope stops it. */
     readonly play: (path: string, from?: number) => Effect.Effect<Playback, AudioError, Scope.Scope>
+    /** Only negotiated streaming clients support this; legacy file playback remains available. */
+    readonly stream?: (request: PCMRequest) => Effect.Effect<PCMPlayback, AudioError, Scope.Scope>
     /**
      * 32 ms frames of 16 kHz mono from the microphone while playing, with yapd's
      * own voice cancelled out once that's learnt: see `echo`. None when
      * there's no microphone to listen to.
      */
     readonly microphone: Effect.Effect<Option.Option<Queue.Dequeue<Float32Array>>, never, Scope.Scope>
+    /** Captures only this connected device; losing it ends the subscription without selecting another. */
+    readonly microphoneFor?: (deviceId: string) => Effect.Effect<Option.Option<Queue.Dequeue<Float32Array>>, AudioError, Scope.Scope>
+    /** Owns an exact native capture, with bounded buffering and acknowledged input boundaries. */
+    readonly captureFor?: (deviceId: string, captureId: string) => Effect.Effect<DeviceCapture, AudioError, Scope.Scope>
+    /** Mac AEC preview; phone clients explicitly reject this without activating input. */
+    readonly listenFor?: (deviceId: string) => Effect.Effect<Listener, AudioError, Scope.Scope>
+    readonly listeningDevice?: Stream.Stream<Option.Option<{ readonly deviceId: string; readonly handsFree: boolean }>>
     /**
      * Whether yapd's own voice may be in a frame from the microphone, so what
      * sounds like the user may be yapd: while it says its first seconds since
@@ -229,7 +282,7 @@ export const AfplayAudio = Layer.effectContext(
 )
 
 const Event = Schema.Union(
-  Schema.Struct({ type: Schema.Literal("hello", "permission"), permission: Schema.String }),
+  Schema.Struct({ type: Schema.Literal("hello", "permission"), permission: Schema.String, streaming: Schema.optional(Schema.Boolean), captureBoundary: Schema.optional(Schema.Boolean), handsFree: Schema.optional(Schema.Boolean), client: Schema.optional(Schema.Struct({ streaming: Schema.optional(Schema.Boolean), captureBoundary: Schema.optional(Schema.Boolean), handsFree: Schema.optional(Schema.Boolean) })) }),
   Schema.Struct({ type: Schema.Literal("active"), listening: Schema.Boolean }),
   Schema.Struct({ type: Schema.Literal("rested") }),
   Schema.Struct({ type: Schema.Literal("playing"), id: Schema.String, duration: Schema.Number }),
@@ -238,7 +291,14 @@ const Event = Schema.Union(
   Schema.Struct({ type: Schema.Literal("failed"), id: Schema.String, message: Schema.String }),
   Schema.Struct({ type: Schema.Literal("error"), message: Schema.String }),
   Schema.Struct({ type: Schema.Literal("shortcut"), registered: Schema.Boolean, message: Schema.optional(Schema.String) }),
-  Schema.Struct({ type: Schema.Literal("pressed"), key: Schema.Literal("shortcut", "escape"), onPause: Schema.optional(Schema.Boolean) }),
+  Schema.Struct({ type: Schema.Literal("pressed"), key: Schema.Literal("shortcut", "escape", "stop"), onPause: Schema.optional(Schema.Boolean), captureId: Schema.optional(Schema.String) }),
+  Schema.Struct({ type: Schema.Literal("capture-ready", "capture-finished"), id: Schema.String }),
+  Schema.Struct({ type: Schema.Literal("capture-error"), id: Schema.String, message: Schema.String }),
+  Schema.Struct({ type: Schema.Literal("capture-frame", "listen-frame"), id: Schema.String, sequence: Schema.Number, encoding: Schema.Literal("f32le", "pcm16le"), audio: Schema.String }),
+  Schema.Struct({ type: Schema.Literal("listen-ready", "listen-finished"), id: Schema.String }),
+  Schema.Struct({ type: Schema.Literal("listen-error"), id: Schema.String, message: Schema.String }),
+  Schema.Struct({ type: Schema.Literal("stream-ready", "stream-playing", "stream-progress", "stream-finished", "stream-stopped"), id: Schema.String, generation: Schema.Number, rate: Schema.Number, samples: Schema.Number, certainty: Schema.Literal("rendered", "estimated", "unknown") }),
+  Schema.Struct({ type: Schema.Literal("stream-error"), id: Schema.String, generation: Schema.Number, message: Schema.String }),
 )
 const decodeEvent = Schema.decodeUnknownOption(Schema.parseJson(Event))
 
@@ -351,6 +411,7 @@ const permissionLog = (permission: string) => {
 export interface Link {
   /** Sends a message, after whatever was sent before it. */
   readonly send: (message: object) => void
+  readonly pcm?: (chunk: Wire.StreamChunk) => void
   /** Drops the connection at once, for a device that stopped answering. */
   readonly terminate: () => void
   /** Sends ahead a file it's likely to be told to play, to a device that's sent what it plays rather than reading it here. */
@@ -364,7 +425,8 @@ export interface Owner {
   /** How taking the shortcut's keys went. */
   readonly registered: (ok: boolean, message?: string) => void
   /** `onPause` when a dictation it starts is to be sent once he stops talking: as `YAPD_SEND_ON_PAUSE` says when it doesn't say. */
-  readonly pressed: (key: Shortcut.Key, onPause?: boolean) => void
+  readonly pressed: (key: Shortcut.Key, onPause?: boolean, captureId?: string) => void
+  readonly interrupted?: () => void
   /** What it plays, or whether it listens, may have changed. */
   readonly changed: () => void
   /** Its link went, and with it whatever it played and heard. */
@@ -404,6 +466,7 @@ export interface Device {
   readonly hello: Effect.Effect<Deferred.Deferred<void>>
   readonly speaking: () => boolean
   readonly listening: () => boolean
+  readonly handsFree: () => boolean
   /** Sends it a message as it is, like the shortcut's keys. */
   readonly send: (message: object) => void
   /** Played and heard here, failing at once while it has no link. */
@@ -439,6 +502,46 @@ export const device = (
     let link: Link | undefined
     let greeted: Deferred.Deferred<void> | undefined
     let current: Current | undefined
+    let streaming = false
+    let captureBoundary = false
+    let handsFree = false
+    interface Listening {
+      readonly id: string
+      readonly queue: Queue.Queue<RollingFrame>
+      readonly ready: Deferred.Deferred<void, AudioError>
+      readonly stopped: Deferred.Deferred<void>
+      accepted: boolean
+      sequence: number
+      failure?: AudioError
+    }
+    let rolling: Listening | undefined
+    interface Capturing {
+      readonly id: string
+      readonly queue: Queue.Queue<Float32Array>
+      readonly ready: Deferred.Deferred<void, AudioError>
+      readonly boundary: Deferred.Deferred<void, AudioError>
+      readonly released: Deferred.Deferred<void>
+      readonly failed: Deferred.Deferred<never, AudioError>
+      accepted: boolean
+      ended: boolean
+      samples: number
+      sequence: number
+      failure?: AudioError
+    }
+    let capturing: Capturing | undefined
+    interface Sending extends PCMRequest {
+      sent: number
+      sequence: number
+      ending: boolean
+      position: PCMPosition
+      readonly ready: Deferred.Deferred<void, AudioError>
+      readonly finished: Deferred.Deferred<void, AudioError>
+      readonly stopped: Deferred.Deferred<PCMPosition>
+      readonly positions: PubSub.PubSub<PCMPosition>
+      changed: Deferred.Deferred<void>
+      failure?: AudioError
+    }
+    let output: Sending | undefined
     /** The silence played to get the speaker ready, while it plays. It's nobody's playback. */
     let warming: string | undefined
     /** The note that he was heard, while it plays. Nobody's playback either, and never speaking. */
@@ -466,7 +569,38 @@ export const device = (
     yield* Effect.addFinalizer(() => Effect.suspend(endMicrophone))
 
     const send = (message: object) => link?.send(message)
+    const failCapture = (message: string) => {
+      if (capturing === undefined) return
+      capturing.failure = new AudioError({ message })
+      Deferred.unsafeDone(capturing.failed, Exit.fail(capturing.failure))
+      Deferred.unsafeDone(capturing.ready, Exit.fail(capturing.failure))
+      Deferred.unsafeDone(capturing.boundary, Exit.fail(capturing.failure))
+    }
+    const failListening = (message: string) => {
+      if (rolling === undefined) return
+      rolling.failure = new AudioError({ message })
+      Deferred.unsafeDone(rolling.ready, Exit.fail(rolling.failure))
+      Deferred.unsafeDone(rolling.stopped, Exit.void)
+      runFork(Queue.shutdown(rolling.queue))
+    }
     const now = () => runSync(Clock.currentTimeMillis)
+    const signal = (stream: Sending) => {
+      Deferred.unsafeDone(stream.changed, Exit.void)
+      stream.changed = runSync(Deferred.make<void>())
+    }
+    const failStream = (message: string) => {
+      const stream = output
+      if (stream === undefined) return
+      stream.failure = new AudioError({ message })
+      Deferred.unsafeDone(stream.ready, Exit.fail(stream.failure))
+      Deferred.unsafeDone(stream.finished, Exit.fail(stream.failure))
+      if (!runSync(Deferred.isDone(stream.stopped))) {
+        stream.position = { ...stream.position, certainty: "unknown" }
+        Deferred.unsafeDone(stream.stopped, Exit.succeed(stream.position))
+      }
+      signal(stream)
+      output = undefined
+    }
     /** The helper went quiet, so the echo cancellation heard yapd until now. */
     const quiet = () => {
       if (playingSince !== undefined) heard += now() - playingSince
@@ -490,6 +624,27 @@ export const device = (
       runSync(PubSub.publish(frames, samples))
     }
 
+    /**
+     * He pressed stop on it, like on a phone, whose microphone is off while
+     * yapd speaks: what it's saying ends now, broken off, as when its link
+     * goes, so it's never taken as heard to the end.
+     */
+    const hush = () => {
+      if (output !== undefined) {
+        const stream = output
+        send({ type: "stream-cancel", id: stream.id, generation: stream.generation })
+        stream.failure = new AudioError({ message: "Stopped by a press" })
+        Deferred.unsafeDone(stream.finished, Exit.fail(stream.failure))
+        signal(stream)
+        return
+      }
+      if (current === undefined) return
+      const playback = current
+      runFork(Effect.logInfo(`${options.name ?? "The audio helper"} stopped what yapd was saying`))
+      send({ type: "stop" })
+      settle(playback, new AudioError({ message: "Stopped by a press" }), 0)
+    }
+
     const handle = (text: string) => {
       const event = decodeEvent(text)
       if (Option.isNone(event)) return
@@ -499,8 +654,118 @@ export const device = (
           if (greeted !== undefined) Deferred.unsafeDone(greeted, Exit.void)
           if (event.value.permission !== permission) runFork(said(event.value.permission))
           permission = event.value.permission
-          if (event.value.type === "hello") owner.greeted()
+          if (event.value.type === "hello") {
+            streaming = event.value.streaming === true || event.value.client?.streaming === true
+            captureBoundary = event.value.captureBoundary === true || event.value.client?.captureBoundary === true
+            handsFree = event.value.handsFree === true || event.value.client?.handsFree === true
+            owner.greeted()
+          }
           return
+        case "capture-ready":
+          if (capturing?.id === event.value.id && !capturing.ended && capturing.failure === undefined) {
+            capturing.accepted = true
+            Deferred.unsafeDone(capturing.ready, Exit.void)
+          }
+          return
+        case "capture-finished":
+          if (capturing?.id === event.value.id) {
+            capturing.ended = true
+            Deferred.unsafeDone(capturing.boundary, Exit.void)
+            Deferred.unsafeDone(capturing.released, Exit.void)
+          }
+          return
+        case "capture-error":
+          if (capturing?.id === event.value.id) { capturing.ended = true; failCapture(event.value.message); Deferred.unsafeDone(capturing.released, Exit.void) }
+          return
+        case "listen-ready":
+          if (rolling?.id === event.value.id && rolling.failure === undefined) { rolling.accepted = true; Deferred.unsafeDone(rolling.ready, Exit.void) }
+          return
+        case "listen-finished":
+          if (rolling?.id === event.value.id) { Deferred.unsafeDone(rolling.stopped, Exit.void); failListening("The listening preview stopped") }
+          return
+        case "listen-error":
+          if (rolling?.id === event.value.id) failListening(event.value.message)
+          return
+        case "capture-frame":
+        case "listen-frame": {
+          const capture = capturing
+          const event_ = event.value
+          const listener = rolling
+          const preview = event_.type === "listen-frame"
+          if (preview ? listener?.id !== event_.id || !listener.accepted || listener.failure !== undefined : capture?.id !== event_.id || !capture.accepted || capture.ended || capture.failure !== undefined) return
+          const bytes = event_.encoding === "f32le" ? 4 : 2
+          const pcm = event_.audio.length > Math.ceil(Wire.samples * bytes / 3) * 4 ? Buffer.alloc(0) : Buffer.from(event_.audio, "base64")
+          if (preview) {
+            if (listener === undefined) return
+            if (event_.sequence !== listener.sequence || pcm.length !== Wire.samples * bytes) {
+              failListening("Listening audio was invalid or out of order")
+              send({ type: "listen-cancel", id: listener.id }); return
+            }
+            const view = new DataView(pcm.buffer, pcm.byteOffset, pcm.byteLength)
+            const frame = Float32Array.from({ length: Wire.samples }, (_, index) => bytes === 4 ? view.getFloat32(index * 4, true) : view.getInt16(index * 2, true) / 32768)
+            const echoRisk = playingSince !== undefined && heard + now() - playingSince < learning
+            if (frame.some((value) => !Number.isFinite(value)) || !runSync(Queue.offer(listener.queue, { sequence: event_.sequence, frame, echoRisk }))) {
+              failListening("The bounded listening queue overflowed or its audio was invalid")
+              send({ type: "listen-cancel", id: listener.id }); return
+            }
+            listener.sequence++; return
+          }
+          if (capture === undefined) return
+          if (event_.sequence !== capture.sequence || pcm.length !== Wire.samples * bytes) {
+            failCapture("The capture frame was invalid or out of order; nothing was sent")
+            send({ type: "capture-cancel", id: capture.id }); return
+          }
+          const view = new DataView(pcm.buffer, pcm.byteOffset, pcm.byteLength)
+          const samples = Float32Array.from({ length: Wire.samples }, (_, index) => bytes === 4 ? view.getFloat32(index * 4, true) : view.getInt16(index * 2, true) / 32768)
+          if (samples.some((value) => !Number.isFinite(value)) || !runSync(Queue.offer(capture.queue, samples))) {
+            failCapture("The bounded capture queue overflowed or its audio was invalid; nothing was truncated or sent")
+            send({ type: "capture-cancel", id: capture.id }); return
+          }
+          capture.sequence++; capture.samples += samples.length
+          return
+        }
+        case "stream-error": {
+          if (output?.id === event.value.id && output.generation === event.value.generation) {
+            failStream(event.value.message)
+            quiet()
+          }
+          return
+        }
+        case "stream-ready":
+        case "stream-playing":
+        case "stream-progress":
+        case "stream-finished":
+        case "stream-stopped": {
+          const stream = output
+          const receipt = event.value
+          if (stream === undefined || stream.id !== receipt.id || stream.generation !== receipt.generation) return
+          if (receipt.rate !== stream.rate || !Number.isSafeInteger(receipt.samples) || receipt.samples < stream.position.samples || receipt.samples > stream.sent || (receipt.type !== "stream-stopped" && receipt.certainty !== "rendered")) {
+            send({ type: "stream-cancel", id: stream.id, generation: stream.generation })
+            failStream("The device reported an invalid stream position")
+            return
+          }
+          stream.position = { samples: receipt.samples, rate: stream.rate, certainty: receipt.certainty }
+          runSync(PubSub.publish(stream.positions, stream.position))
+          signal(stream)
+          if (receipt.type === "stream-ready") Deferred.unsafeDone(stream.ready, Exit.void)
+          if (receipt.type === "stream-playing") playingSince = now()
+          if (receipt.type === "stream-stopped") {
+            Deferred.unsafeDone(stream.stopped, Exit.succeed(stream.position))
+            failStream("The audio stream stopped")
+            quiet()
+          }
+          if (receipt.type === "stream-finished") {
+            if (!stream.ending || receipt.samples !== stream.sent || receipt.certainty !== "rendered") {
+              send({ type: "stream-cancel", id: stream.id, generation: stream.generation })
+              failStream("The device finished before the audio stream drained")
+            } else {
+              Deferred.unsafeDone(stream.finished, Exit.void)
+              output = undefined
+            }
+            quiet()
+          }
+          return
+        }
         case "active":
           // It started listening, which starts the echo cancellation over.
           // Device recovery can temporarily lose the microphone. Keep existing
@@ -578,13 +843,21 @@ export const device = (
           owner.registered(event.value.registered, event.value.message)
           return
         case "pressed":
-          owner.pressed(event.value.key, event.value.onPause)
+          if (event.value.key === "stop") { hush(); owner.interrupted?.(); return }
+          owner.pressed(event.value.key, event.value.onPause, event.value.captureId)
       }
     }
 
     const detach = (was: Link) => {
       if (was !== link) return
       link = undefined
+      streaming = false
+      captureBoundary = false
+      handsFree = false
+      failListening(gone)
+      failCapture(gone)
+      if (capturing !== undefined) { capturing.ended = true; Deferred.unsafeDone(capturing.released, Exit.void) }
+      failStream(gone)
       warming = undefined
       ticking = undefined
       runFork(endMicrophone())
@@ -599,6 +872,10 @@ export const device = (
       Effect.uninterruptibleMask((restore) =>
         Effect.gen(function* () {
           if (link === undefined) return yield* new AudioError({ message: gone })
+          if (output !== undefined) {
+            send({ type: "stream-cancel", id: output.id, generation: output.generation })
+            failStream("Replaced by file playback")
+          }
           const playback: Current = {
             id: crypto.randomUUID(),
             duration: 0,
@@ -660,26 +937,146 @@ export const device = (
         }),
       )
 
+    const stream = (request: PCMRequest): Effect.Effect<PCMPlayback, AudioError, Scope.Scope> => Effect.gen(function* () {
+      if (link === undefined) return yield* new AudioError({ message: gone })
+      if (!streaming) return yield* new AudioError({ message: "This device does not support streamed audio; update its client" })
+      if (!request.id || request.id.length > 100 || !Number.isSafeInteger(request.generation) || request.generation < 0 || ![16000, 24000, 48000].includes(request.rate)) return yield* new AudioError({ message: "Invalid audio stream format" })
+      if (current !== undefined || output !== undefined) return yield* new AudioError({ message: "The device is already playing; stop that playback before starting a stream" })
+      const positions = yield* PubSub.sliding<PCMPosition>(16)
+      yield* Effect.addFinalizer(() => PubSub.shutdown(positions))
+      const sending: Sending = { ...request, sent: 0, sequence: 0, ending: false, position: { samples: 0, rate: request.rate, certainty: "unknown" }, ready: yield* Deferred.make<void, AudioError>(), finished: yield* Deferred.make<void, AudioError>(), stopped: yield* Deferred.make<PCMPosition>(), changed: yield* Deferred.make<void>(), positions }
+      output = sending
+      const stop = Effect.suspend(() => {
+        if (output !== sending) return Effect.succeed(sending.position)
+        send({ type: "stream-cancel", id: sending.id, generation: sending.generation })
+        return Deferred.await(sending.stopped).pipe(Effect.interruptible, Effect.timeoutOption(patience.stop), Effect.map((stopped) => {
+          if (Option.isSome(stopped)) return stopped.value
+          const was = link
+          was?.terminate()
+          if (was !== undefined) detach(was)
+          return { ...sending.position, certainty: "unknown" as const }
+        }))
+      })
+      yield* Effect.addFinalizer(() => stop)
+      warming = undefined
+      ticking = undefined
+      wake()
+      send({ type: "stream-start", ...request, format: "pcm16le", channels: 1 })
+      yield* Deferred.await(sending.ready).pipe(Effect.timeoutFail({ duration: patience.start, onTimeout: () => new AudioError({ message: "The device did not accept the audio stream" }) }))
+      const writes = yield* Effect.makeSemaphore(1)
+      const abort = (error: AudioError) => Effect.sync(() => {
+        if (output !== sending) return
+        sending.failure = error
+        Deferred.unsafeDone(sending.finished, Exit.fail(error))
+        signal(sending)
+        send({ type: "stream-cancel", id: sending.id, generation: sending.generation })
+      })
+      const chunk = (pcm: Uint8Array): Effect.Effect<void, AudioError> => Effect.gen(function* () {
+        while (true) {
+          if (sending.failure !== undefined) return yield* sending.failure
+          if (output !== sending || sending.ending) return yield* new AudioError({ message: "The audio stream is closed" })
+          // Four seconds, including bytes still in transit. Wait for rendered receipts before sending more.
+          if (sending.sent + pcm.length / 2 - sending.position.samples <= sending.rate * 4) break
+          yield* Deferred.await(sending.changed).pipe(Effect.timeoutFail({ duration: "10 seconds", onTimeout: () => new AudioError({ message: "Stream playback stalled: its bounded buffer did not drain" }) }))
+        }
+        const framed = { id: sending.id, generation: sending.generation, sequence: sending.sequence++, pcm }
+        sending.sent += pcm.length / 2
+        if (link?.pcm !== undefined) link.pcm(framed)
+        else send({ type: "stream-chunk", ...framed, pcm: undefined, audio: Buffer.from(pcm).toString("base64") })
+      })
+      return {
+        write: (pcm) => Effect.gen(function* () {
+          if (pcm.length % 2 !== 0) return yield* new AudioError({ message: "PCM16 audio must contain complete samples" })
+          for (let at = 0; at < pcm.length; at += Wire.streamSamples * 2) yield* chunk(pcm.slice(at, at + Wire.streamSamples * 2))
+        }).pipe(writes.withPermits(1), Effect.tapError(abort)),
+        end: Effect.gen(function* () {
+          if (sending.failure !== undefined) return yield* sending.failure
+          if (output !== sending) return yield* Deferred.await(sending.finished)
+          if (!sending.ending) {
+            sending.ending = true
+            send({ type: "stream-end", id: sending.id, generation: sending.generation, sequence: sending.sequence })
+          }
+          yield* Deferred.await(sending.finished).pipe(Effect.timeoutFail({ duration: "15 seconds", onTimeout: () => new AudioError({ message: "The device never confirmed the audio stream drained" }) }))
+        }).pipe(writes.withPermits(1), Effect.tapError(abort)),
+        stop,
+        progress: Stream.fromPubSub(positions),
+      }
+    })
+
+    const captureFor = (_deviceId: string, id: string, promotion?: { readonly listenerId: string; readonly fromSequence: number }): Effect.Effect<DeviceCapture, AudioError, Scope.Scope> => Effect.gen(function* () {
+      if (link === undefined) return yield* new AudioError({ message: gone })
+      if (!captureBoundary) return yield* new AudioError({ message: "This device cannot acknowledge complete captures; update its client" })
+      if (!id || id.length > 100 || capturing !== undefined) return yield* new AudioError({ message: "The device already has a capture, or its capture ID is invalid" })
+      const capture: Capturing = { id, queue: yield* Queue.dropping<Float32Array>(512), ready: yield* Deferred.make<void, AudioError>(), boundary: yield* Deferred.make<void, AudioError>(), released: yield* Deferred.make<void>(), failed: yield* Deferred.make<never, AudioError>(), accepted: false, ended: false, samples: 0, sequence: 0 }
+      capturing = capture
+      const check = Effect.suspend(() => capture.failure === undefined ? Effect.void : Effect.fail(capture.failure))
+      const boundary = (type: "capture-finish" | "capture-cancel"): Effect.Effect<void, AudioError> => Effect.gen(function* () {
+        yield* check
+        if (!capture.ended) {
+          send({ type, id })
+          yield* Deferred.await(capture.boundary).pipe(Effect.timeoutFail({ duration: patience.stop, onTimeout: () => new AudioError({ message: "The device did not acknowledge its capture boundary" }) }))
+        }
+        yield* check
+      })
+      const cancel = Effect.gen(function* () {
+        if (capture.ended) return
+        send({ type: "capture-cancel", id })
+        const acknowledged = yield* Deferred.await(capture.released).pipe(Effect.interruptible, Effect.timeoutOption(patience.stop))
+        if (Option.isNone(acknowledged)) {
+          const was = link
+          was?.terminate()
+          if (was !== undefined) detach(was)
+        }
+      })
+      yield* Effect.addFinalizer(() => cancel.pipe(Effect.zipRight(Effect.sync(() => { if (capturing === capture) capturing = undefined })), Effect.zipRight(Queue.shutdown(capture.queue))))
+      send(promotion === undefined ? { type: "capture-start", id } : { type: "capture-promote", id, ...promotion })
+      yield* Deferred.await(capture.ready).pipe(Effect.timeoutFail({ duration: patience.start, onTimeout: () => new AudioError({ message: "The device did not start its capture" }) }))
+      return { frames: capture.queue, failed: Deferred.await(capture.failed), finish: boundary("capture-finish").pipe(Effect.zipRight(Queue.takeAll(capture.queue)), Effect.map((frames) => ({ frames: [...frames], samples: capture.samples }))), cancel }
+    })
+
+    const listenFor = (deviceId: string): Effect.Effect<Listener, AudioError, Scope.Scope> => Effect.gen(function* () {
+      if (link === undefined || !handsFree || permission !== "authorized") return yield* new AudioError({ message: "Hands-free listening is unavailable on this device; check microphone access" })
+      if (rolling !== undefined || capturing !== undefined) return yield* new AudioError({ message: "The device already has a listening owner" })
+      const listener: Listening = { id: crypto.randomUUID(), queue: yield* Queue.dropping<RollingFrame>(128), ready: yield* Deferred.make<void, AudioError>(), stopped: yield* Deferred.make<void>(), accepted: false, sequence: 0 }
+      rolling = listener
+      yield* Effect.addFinalizer(() => Effect.gen(function* () {
+        send({ type: "listen-cancel", id: listener.id })
+        yield* Deferred.await(listener.stopped).pipe(Effect.interruptible, Effect.timeoutOption(patience.stop))
+        if (rolling === listener) rolling = undefined
+        yield* Queue.shutdown(listener.queue)
+      }))
+      send({ type: "listen-start", id: listener.id })
+      yield* Deferred.await(listener.ready).pipe(Effect.timeoutFail({ duration: patience.start, onTimeout: () => new AudioError({ message: "The Mac did not start listening" }) }))
+      return { frames: listener.queue, promote: (id, fromSequence) => Effect.suspend(() => {
+        if (rolling !== listener || listener.failure !== undefined || !Number.isSafeInteger(fromSequence) || fromSequence < 0) return Effect.fail(listener.failure ?? new AudioError({ message: "This listening preview cannot be promoted" }))
+        return captureFor(deviceId, id, { listenerId: listener.id, fromSequence })
+      }) }
+    })
+
     const audio: Audio["Type"] = {
       play: (file, from = 0) => play(file, from),
+      stream,
+      captureFor,
+      listenFor,
       microphone: Effect.suspend(() =>
         listening && frames !== undefined ? Effect.map(PubSub.subscribe(frames), Option.some) : Effect.succeed(Option.none()),
       ),
       echo: (frame) => Effect.sync(() => echoes.has(frame)),
       // Playing anything sets the helper up, so it plays a moment's silence. It isn't heard, and isn't waited for.
       warm: Effect.sync(() => {
-        if (link === undefined || listening || current !== undefined || warming !== undefined) return
+        if (link === undefined || listening || current !== undefined || output !== undefined || warming !== undefined) return
         warming = crypto.randomUUID()
         wake()
         send({ type: "play", id: warming, path: cues.silence, from: 0 })
       }),
       // Over a line, the helper would stop it without a word, leaving it never to finish: so only while nothing plays.
       tick: Effect.sync(() => {
-        if (link === undefined || !listening || current !== undefined || warming !== undefined || ticking !== undefined) return
+        if (link === undefined || !listening || current !== undefined || output !== undefined || warming !== undefined || ticking !== undefined) return
         ticking = crypto.randomUUID()
         send({ type: "play", id: ticking, path: cues.tick, from: 0 })
       }),
       rest: Effect.suspend(() => {
+        failStream("The audio device rested")
         warming = undefined
         ticking = undefined
         send({ type: "rest" })
@@ -713,6 +1110,7 @@ export const device = (
       ),
       speaking: () => playingSince !== undefined,
       listening: () => listening,
+      handsFree: () => handsFree && permission === "authorized",
       send,
       audio,
     } satisfies Device
@@ -732,6 +1130,7 @@ export interface Speaker {
   readonly open?: (url: string) => Effect.Effect<void, unknown>
   readonly speaking: () => boolean
   readonly listening: () => boolean
+  readonly handsFree: () => boolean
 }
 
 /** The part of a client's WebSocket yapd uses. */
@@ -771,6 +1170,9 @@ const Hello = Schema.parseJson(
       hotkeys: Schema.optional(Schema.Boolean),
       /** Whether it opens addresses, like a pull request, when asked. */
       opens: Schema.optional(Schema.Boolean),
+      streaming: Schema.optional(Schema.Boolean),
+      captureBoundary: Schema.optional(Schema.Boolean),
+      handsFree: Schema.optional(Schema.Boolean),
     }),
   }),
 )
@@ -807,6 +1209,7 @@ const clientLink = (socket: ClientSocket): Link => {
     }
   }
   return {
+    pcm: (chunk) => void socket.send(Wire.stream(chunk)),
     send: (message) => {
       if ("type" in message && message.type === "play" && "path" in message && typeof message.path === "string") {
         const { path, ...play } = message
@@ -881,7 +1284,15 @@ export const router = <E = never, R = never>(local?: (owner: Owner, cues: Cues, 
     const shortcut = Option.isSome(keys) ? yield* Shortcut.make(keys.value, broadcast, false) : undefined
     /** For a press that doesn't say, like a Mac's shortcut. */
     const sendOnPause = yield* Config.sendOnPause
-    const changed = () => report(joined.some(({ speaker }) => speaker.speaking()), joined.some(({ speaker }) => speaker.listening()))
+    const selected = yield* SubscriptionRef.make<Option.Option<{ readonly deviceId: string; readonly handsFree: boolean }>>(Option.none())
+    let selection = ""
+    const changed = () => {
+      report(joined.some(({ speaker }) => speaker.speaking()), joined.some(({ speaker }) => speaker.listening()))
+      const speaker = inUse()
+      const value = speaker === undefined ? undefined : { deviceId: speaker.id, handsFree: speaker.handsFree() }
+      const next = JSON.stringify(value) ?? ""
+      if (next !== selection) { selection = next; runSync(SubscriptionRef.set(selected, Option.fromNullable(value))) }
+    }
     const owner = (id: string, hotkeys: boolean, name = id): Owner => ({
       greeted: () => {
         if (shortcut !== undefined && hotkeys) runSync(shortcut.greeted)
@@ -889,16 +1300,17 @@ export const router = <E = never, R = never>(local?: (owner: Owner, cues: Cues, 
       registered: (ok, message) => {
         if (shortcut !== undefined) runSync(shortcut.registered(ok, message))
       },
-      pressed: (key, onPause) => {
+      pressed: (key, onPause, captureId) => {
         if (id !== "local") runFork(Effect.logInfo(`${name} pressed ${key === "shortcut" ? "the shortcut" : "Escape"}`))
         used.set(id, now())
         const pause = onPause ?? sendOnPause
-        if (shortcut !== undefined) runSync(hotkeys ? shortcut.pressed(key, pause) : shortcut.direct(key, pause))
+        if (shortcut !== undefined) runSync(hotkeys ? shortcut.pressed(key, pause, id, captureId) : shortcut.direct(key, pause, id, captureId))
       },
+      interrupted: () => { if (shortcut !== undefined) runSync(shortcut.interrupted(id)) },
       changed,
       // Whatever was being dictated on the device in use goes with it.
       lost: () => {
-        if (shortcut !== undefined && inUse()?.id === id) runSync(shortcut.quit)
+        if (shortcut !== undefined) runSync(shortcut.departed(id))
         changed()
       },
     })
@@ -912,7 +1324,26 @@ export const router = <E = never, R = never>(local?: (owner: Owner, cues: Cues, 
           const speaker = inUse()
           return speaker === undefined ? Effect.fail(new AudioError({ message: "There's nothing to play on: no device is connected" })) : speaker.audio.play(file, from)
         }),
+      stream: (request) => Effect.suspend(() => {
+        const { deviceId, ...format } = request
+        const speaker = deviceId === undefined ? inUse() : joined.find(({ speaker }) => speaker.id === deviceId)?.speaker
+        if (speaker === undefined && deviceId !== undefined) return Effect.fail(new AudioError({ message: `The originating device ${deviceId} is not connected` }))
+        return speaker?.audio.stream === undefined ? Effect.fail(new AudioError({ message: "The selected device cannot stream audio" })) : speaker.audio.stream(format)
+      }),
       microphone: Effect.suspend(() => inUse()?.audio.microphone ?? Effect.succeed(Option.none())),
+      microphoneFor: (deviceId) => Effect.suspend(() => {
+        const speaker = joined.find(({ speaker }) => speaker.id === deviceId)?.speaker
+        return speaker === undefined ? Effect.fail(new AudioError({ message: `The capture device ${deviceId} is not connected` })) : speaker.audio.microphone
+      }),
+      captureFor: (deviceId, captureId) => Effect.suspend(() => {
+        const speaker = joined.find(({ speaker }) => speaker.id === deviceId)?.speaker
+        return speaker?.audio.captureFor === undefined ? Effect.fail(new AudioError({ message: `The capture device ${deviceId} is unavailable or needs an update` })) : speaker.audio.captureFor(deviceId, captureId)
+      }),
+      listenFor: (deviceId) => Effect.suspend(() => {
+        const speaker = joined.find(({ speaker }) => speaker.id === deviceId)?.speaker
+        return speaker?.audio.listenFor === undefined ? Effect.fail(new AudioError({ message: `The listening device ${deviceId} is unavailable` })) : speaker.audio.listenFor(deviceId)
+      }),
+      listeningDevice: selected.changes,
       // Only the device that heard a frame ever marks it.
       echo: (frame) => Effect.map(Effect.forEach(joined, ({ speaker }) => speaker.audio.echo(frame)), (marked) => marked.some(Boolean)),
       // Every one, since one that played before the one in use changed may still be listening.
@@ -964,6 +1395,7 @@ export const router = <E = never, R = never>(local?: (owner: Owner, cues: Cues, 
         ...(hello.opens === true ? { open: (url: string) => Effect.sync(() => made.send({ type: "open", url })) } : {}),
         speaking: made.speaking,
         listening: made.listening,
+        handsFree: made.handsFree,
       }
       clients.set(socket, { ...client, device: made, speaker, scope })
       joined.push({ speaker, at: now() })
@@ -1180,6 +1612,9 @@ const helper = (
     )
 
     const audio: Audio["Type"] = {
+      stream: (request) => connect.pipe(Effect.mapError((cause) => new AudioError({ message: cause.message, cause })), Effect.zipRight(own.audio.stream!(request))),
+      captureFor: (deviceId, captureId) => connect.pipe(Effect.mapError((cause) => new AudioError({ message: cause.message, cause })), Effect.zipRight(own.audio.captureFor!(deviceId, captureId))),
+      listenFor: (deviceId) => connect.pipe(Effect.mapError((cause) => new AudioError({ message: cause.message, cause })), Effect.zipRight(own.audio.listenFor!(deviceId))),
       play: (file, from = 0) =>
         connect.pipe(
           Effect.mapError((cause) => new AudioError({ message: cause.message, cause })),
@@ -1205,6 +1640,7 @@ const helper = (
       open: (url) => run(["open", url]),
       speaking: () => own.speaking() || afplaying > 0,
       listening: own.listening,
+      handsFree: own.handsFree,
     } satisfies Speaker
   })
 

@@ -3,7 +3,7 @@ import Foundation
 // The phone's connection to yapd's /audio, over Tailscale, with the token
 // `yapd pair` gave out. Text frames are the helper's JSON messages; binary ones
 // start with a byte saying what they are: 2 for a file to play, sent ahead,
-// 3 for the microphone (docs/api.md).
+// 3 for the microphone, 4 for ordered output PCM (docs/api.md).
 
 final class Connection: NSObject, URLSessionWebSocketDelegate {
   /// What yapd says, on the speaker's side: its messages, and the files it sends ahead.
@@ -21,6 +21,11 @@ final class Connection: NSObject, URLSessionWebSocketDelegate {
   private var task: URLSessionWebSocketTask?
   private var open = false
   private var waiting: [CheckedContinuation<Bool, Never>] = []
+  /// PCM and its capture boundary share one ordered, bounded write path.
+  private let writes = DispatchQueue(label: "yapd.connection.write")
+  private var outgoing: [(URLSessionWebSocketTask, URLSessionWebSocketTask.Message, Int)] = []
+  private var outgoingBytes = 0
+  private var writing = false
 
   /// Connects, unless it is already, and says once it's open, or that it couldn't be within a few seconds.
   func connect(to server: URL, token: String) async -> Bool {
@@ -73,11 +78,40 @@ final class Connection: NSObject, URLSessionWebSocketDelegate {
 
   func send(_ message: [String: Any]) {
     guard let data = try? JSONSerialization.data(withJSONObject: message), let text = String(data: data, encoding: .utf8) else { return }
-    current()?.send(.string(text)) { _ in }
+    enqueue(.string(text), bytes: data.count)
   }
 
   func send(_ data: Data) {
-    current()?.send(.data(data)) { _ in }
+    enqueue(.data(data), bytes: data.count)
+  }
+
+  private func enqueue(_ message: URLSessionWebSocketTask.Message, bytes: Int) {
+    guard let task = current() else { return }
+    writes.async {
+      guard task === self.current() else { return }
+      guard self.outgoingBytes + bytes <= 1024 * 1024 else {
+        task.cancel(with: .messageTooBig, reason: nil); self.gone(task); return
+      }
+      self.outgoing.append((task, message, bytes)); self.outgoingBytes += bytes
+      self.flush()
+    }
+  }
+
+  private func flush() {
+    guard !writing else { return }
+    while let next = outgoing.first {
+      outgoing.removeFirst(); outgoingBytes -= next.2
+      guard next.0 === current() else { continue }
+      writing = true
+      next.0.send(next.1) { error in
+        self.writes.async {
+          self.writing = false
+          if error != nil { self.gone(next.0) }
+          self.flush()
+        }
+      }
+      return
+    }
   }
 
   private func current() -> URLSessionWebSocketTask? {
@@ -97,6 +131,10 @@ final class Connection: NSObject, URLSessionWebSocketDelegate {
   private func receive(_ task: URLSessionWebSocketTask) {
     task.receive { [weak self] result in
       guard let self else { return }
+      self.lock.lock()
+      let current = self.task === task
+      self.lock.unlock()
+      guard current else { return } // A replaced connection cannot feed its old stream into the speaker.
       switch result {
       case .failure:
         self.gone(task)
@@ -114,16 +152,23 @@ final class Connection: NSObject, URLSessionWebSocketDelegate {
     }
   }
 
-  /// A file: the kind, a big-endian length, a JSON header naming it, then its bytes.
+  /// A bounded stream chunk or a file: kind, big-endian header length, JSON, payload.
   private func read(_ data: Data) {
     let bytes = [UInt8](data)
-    guard bytes.count >= 5, bytes[0] == 2 else { return }
+    guard bytes.count >= 5, bytes[0] == 2 || bytes[0] == 4 else { return }
     let length = bytes[1...4].reduce(0) { $0 << 8 | Int($1) }
     guard length <= 4096, bytes.count >= 5 + length,
-      let header = try? JSONSerialization.jsonObject(with: Data(bytes[5..<(5 + length)])) as? [String: Any],
-      let id = header["file"] as? String
+      var header = try? JSONSerialization.jsonObject(with: Data(bytes[5..<(5 + length)])) as? [String: Any]
     else { return }
-    file(id, Data(bytes[(5 + length)...]))
+    let payload = Data(bytes[(5 + length)...])
+    if bytes[0] == 4 {
+      guard !payload.isEmpty, payload.count <= 32768, payload.count % 2 == 0 else { return }
+      header["type"] = "stream-chunk"
+      header["pcm"] = payload
+      heard(header)
+    } else if let id = header["file"] as? String {
+      file(id, payload)
+    }
   }
 
   private func gone(_ task: URLSessionWebSocketTask?) {

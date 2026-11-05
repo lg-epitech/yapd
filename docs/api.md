@@ -1,5 +1,7 @@
 # API
 
+V2 is the default daemon. Its conversation endpoints are `GET /conversation`, `GET /conversation/stream`, `POST /conversation/turns` (JSON `text` and stable `turnId`) and `POST /conversation/stop`. The conversation UI is `/v2`; all data and actions use the authentication rules below. Legacy focus/quiet modes, reminder and replay controls in this reference belong to `yapd v1`.
+
 yapd serves a small HTTP API on the port its hooks use, `127.0.0.1:4747` unless `YAPD_PORT` says otherwise. The [menu bar app](guide.md#menu-bar) only uses this API, so your own UI can do everything it does: a status bar module on Linux, a Stream Deck button, a script.
 
 It listens on localhost. A [client](guide.md#running-yapd-on-a-server) has the server's port at the same address, through its connection to it. From another machine, forward the port over SSH, like `ssh -N -L 4747:127.0.0.1:4747 server`.
@@ -460,7 +462,7 @@ The device tells yapd:
 | `{"type": "stopped", "id", "at"}` | It stopped at `at` seconds, as told. Without an `id`, nothing was playing. yapd waits five seconds for this, then drops the connection. |
 | `{"type": "failed", "id", "message"}` | It couldn't play it. |
 | `{"type": "rested"}` | It closed its microphone of its own accord. |
-| `{"type": "pressed", "key", "onPause"}` | You pressed `shortcut`, to start dictating or to send it, or `escape`, to drop it. A phone's button is `shortcut`. With `onPause: true`, a dictation it starts is sent once you've spoken and then been quiet for about two seconds, as if you'd pressed again; with `false`, only when you press again. Without it, as `YAPD_SEND_ON_PAUSE` says, which is on unless set to `false`. |
+| `{"type": "pressed", "key", "onPause"}` | You pressed `shortcut`, to start dictating or to send it, `escape`, to drop it, or `stop`, to stop what yapd is saying on it, which then counts as cut off. A phone's button is `shortcut`. With `onPause: true`, a dictation it starts is sent once you've spoken and then been quiet for about two seconds, as if you'd pressed again; with `false`, only when you press again, as the phone does. Without it, as `YAPD_SEND_ON_PAUSE` says, which is on unless set to `false`. |
 | `{"type": "shortcut", "registered", "message"}` | From a device with `hotkeys`: whether it took the keys, and why not. |
 | `{"type": "error", "message"}` | Something went wrong, for yapd's log. |
 

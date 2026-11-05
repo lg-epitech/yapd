@@ -19,6 +19,8 @@ final class Link {
 
   private let fd: Int32
   private let writes = DispatchQueue(label: "yapd.link.write")
+  private let pendingLock = NSLock()
+  private var pendingBytes = 0
 
   init(path: String) throws {
     fd = socket(AF_UNIX, SOCK_STREAM, 0)
@@ -45,7 +47,14 @@ final class Link {
     var message = Data([kind.rawValue])
     withUnsafeBytes(of: UInt32(payload.count).bigEndian) { message.append(contentsOf: $0) }
     message.append(payload)
-    writes.async { [fd] in
+    pendingLock.lock()
+    guard pendingBytes + message.count <= 2 * 1024 * 1024 else {
+      pendingLock.unlock(); log("The bounded audio connection buffer overflowed"); exit(1)
+    }
+    pendingBytes += message.count
+    pendingLock.unlock()
+    writes.async { [self] in
+      defer { pendingLock.lock(); pendingBytes -= message.count; pendingLock.unlock() }
       message.withUnsafeBytes { raw in
         var offset = 0
         while offset < raw.count {
@@ -98,45 +107,184 @@ final class Link {
 final class Capture {
   static let rate: Double = 16000
   static let frameLength = 512
-
-  private let link: Link
+  let id: String
+  private let send: (Data) -> Void
+  private var modern: (Data, Int) -> Void
+  private var sequence = 0
+  private let lock = NSRecursiveLock()
   private let target = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: Capture.rate, channels: 1, interleaved: false)!
   private var converter: AVAudioConverter?
   private var pending: [Float] = []
+  private var before: [Data] = []
+  private var armed = false
+  private var ended = false
+  private var overflow = false
 
-  init(link: Link) { self.link = link }
+  init(id: String = UUID().uuidString, send: @escaping (Data) -> Void, modern: ((Data, Int) -> Void)? = nil) {
+    self.id = id; self.send = send; self.modern = modern ?? { frame, _ in send(frame) }
+  }
+
+  /// Legacy delivery continues before V2 subscribes. V2 starts at ready, then receives this exact FIFO once.
+  func begin(_ ready: () -> Void) -> Bool {
+    lock.lock(); defer { lock.unlock() }
+    guard !overflow else { return false }
+    guard !armed else { ready(); return true }
+    armed = true
+    ready()
+    for frame in before { modern(frame, sequence); sequence += 1 }
+    before.removeAll()
+    return true
+  }
+
+  private func emit(_ samples: [Float]) {
+    let frame = samples.withUnsafeBufferPointer { Data(buffer: $0) }
+    if armed { modern(frame, sequence); sequence += 1 }
+    else {
+      if before.count < 512 { before.append(frame) } else { overflow = true }
+      send(frame)
+    }
+  }
+
+  private func append(_ buffer: AVAudioPCMBuffer) {
+    guard let samples = buffer.floatChannelData?[0] else { overflow = true; return }
+    pending.append(contentsOf: UnsafeBufferPointer(start: samples, count: Int(buffer.frameLength)))
+    while pending.count >= Capture.frameLength {
+      emit(Array(pending.prefix(Capture.frameLength)))
+      pending.removeFirst(Capture.frameLength)
+    }
+  }
 
   func push(_ buffer: AVAudioPCMBuffer) {
-    guard let channels = buffer.floatChannelData, buffer.frameLength > 0 else { return }
-    // Voice processing can report every mic in an array; the first channel carries the processed voice.
+    lock.lock(); defer { lock.unlock() }
+    guard !ended, let channels = buffer.floatChannelData, buffer.frameLength > 0 else { return }
     let mono = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: buffer.format.sampleRate, channels: 1, interleaved: false)!
-    guard let input = AVAudioPCMBuffer(pcmFormat: mono, frameCapacity: buffer.frameLength) else { return }
+    guard let input = AVAudioPCMBuffer(pcmFormat: mono, frameCapacity: buffer.frameLength) else { overflow = true; return }
     input.frameLength = buffer.frameLength
     let stride = buffer.format.isInterleaved ? Int(buffer.format.channelCount) : 1
     for index in 0..<Int(buffer.frameLength) { input.floatChannelData![0][index] = channels[0][index * stride] }
-
     if converter?.inputFormat != mono { converter = AVAudioConverter(from: mono, to: target) }
-    guard let converter else { return }
+    guard let converter else { overflow = true; return }
     let capacity = AVAudioFrameCount(Double(buffer.frameLength) * target.sampleRate / mono.sampleRate) + 32
-    guard let output = AVAudioPCMBuffer(pcmFormat: target, frameCapacity: capacity) else { return }
+    guard let output = AVAudioPCMBuffer(pcmFormat: target, frameCapacity: capacity) else { overflow = true; return }
     var supplied = false
     var error: NSError?
     converter.convert(to: output, error: &error) { _, status in
-      if supplied {
-        status.pointee = .noDataNow
-        return nil
+      if supplied { status.pointee = .noDataNow; return nil }
+      supplied = true; status.pointee = .haveData; return input
+    }
+    guard error == nil else { overflow = true; return }
+    append(output)
+  }
+
+  /// Flush the resampler and the final incomplete frame before the ordered boundary.
+  func finish() -> Bool {
+    lock.lock(); defer { lock.unlock() }
+    if ended { return !overflow }
+    ended = true
+    if let converter {
+      for attempt in 0..<16 {
+        guard let output = AVAudioPCMBuffer(pcmFormat: target, frameCapacity: 512) else { overflow = true; break }
+        var error: NSError?
+        let status = converter.convert(to: output, error: &error) { _, state in state.pointee = .endOfStream; return nil }
+        if error != nil { overflow = true; break }
+        append(output)
+        if status == .endOfStream || status == .inputRanDry { break }
+        if attempt == 15 { overflow = true }
       }
-      supplied = true
-      status.pointee = .haveData
-      return input
     }
-    guard error == nil, let samples = output.floatChannelData?[0] else { return }
-    pending.append(contentsOf: UnsafeBufferPointer(start: samples, count: Int(output.frameLength)))
-    while pending.count >= Capture.frameLength {
-      let frame = Array(pending.prefix(Capture.frameLength))
-      pending.removeFirst(Capture.frameLength)
-      link.send(.pcm, frame.withUnsafeBufferPointer { Data(buffer: $0) })
+    if !pending.isEmpty {
+      pending.append(contentsOf: repeatElement(0, count: Capture.frameLength - pending.count))
+      emit(pending); pending.removeAll()
     }
+    return !overflow
+  }
+
+  /// Switch views while keeping the converter, pending samples and AEC tap intact.
+  func route(_ output: @escaping (Data, Int) -> Void, ready: () -> Void) -> Bool {
+    lock.lock(); defer { lock.unlock() }
+    guard !ended else { return false }
+    modern = output; armed = true; sequence = 0; before.removeAll(); overflow = false
+    ready()
+    return true
+  }
+
+  func unroute() {
+    lock.lock(); defer { lock.unlock() }
+    armed = false; sequence = 0; before.removeAll(); overflow = false
+    modern = { [send] frame, _ in send(frame) }
+  }
+
+  var finished: Bool { lock.lock(); defer { lock.unlock() }; return ended }
+  /// V1 still drains legacy PCM after Send; only V2 owns capture boundaries.
+  var subscribed: Bool { lock.lock(); defer { lock.unlock() }; return armed }
+
+  func cancel() {
+    lock.lock(); defer { lock.unlock() }
+    ended = true; pending.removeAll(); before.removeAll()
+  }
+}
+
+/// A recording is an exact view of the continuously processed Mac input clock.
+final class RollingInput {
+  let id: String
+  private let lock = NSRecursiveLock()
+  private let emit: (String, String, Int, Data?) -> Void
+  private var recent: [(Int, Data)] = []
+  private var sequence = 0
+  private var stopped = false
+  private var recording: (id: String, sequence: Int)?
+  private var ended: [String] = []
+
+  init(id: String, emit: @escaping (String, String, Int, Data?) -> Void) { self.id = id; self.emit = emit }
+
+  func push(_ frame: Data) {
+    lock.lock(); defer { lock.unlock() }
+    guard !stopped else { return }
+    recent.append((sequence, frame))
+    if recent.count > 128 { recent.removeFirst() }
+    emit("listen-frame", id, sequence, frame)
+    sequence += 1
+    if var record = recording {
+      emit("capture-frame", record.id, record.sequence, frame)
+      record.sequence += 1; recording = record
+    }
+  }
+
+  func promote(id: String, fromSequence: Int) -> Bool {
+    lock.lock(); defer { lock.unlock() }
+    guard !stopped, recording == nil, !ended.contains(id), fromSequence >= (recent.first?.0 ?? sequence), fromSequence <= sequence else { return false }
+    recording = (id, 0)
+    emit("capture-ready", id, 0, nil)
+    for (at, frame) in recent where at >= fromSequence {
+      emit("capture-frame", id, recording!.sequence, frame)
+      recording!.sequence += 1
+    }
+    return true
+  }
+
+  func owns(_ id: String) -> Bool {
+    lock.lock(); defer { lock.unlock() }
+    return recording?.id == id || ended.contains(id)
+  }
+
+  /// The marker follows every frame in this segment, without stopping the AEC clock.
+  func seal(_ id: String) {
+    lock.lock(); defer { lock.unlock() }
+    if recording?.id == id {
+      recording = nil; ended.append(id)
+      if ended.count > 8 { ended.removeFirst() }
+    }
+    guard ended.contains(id) else { return }
+    emit("capture-finished", id, 0, nil)
+  }
+
+  func stop() {
+    lock.lock(); defer { lock.unlock() }
+    guard !stopped else { return }
+    stopped = true
+    if let record = recording { emit("capture-error", record.id, 0, nil) }
+    recording = nil
+    emit("listen-finished", id, 0, nil)
   }
 }
 
@@ -159,9 +307,31 @@ final class Audio {
   private let player = AVAudioPlayerNode()
   private var playing: Playing?
   private var generation = 0
+
+  /// Device-local streaming state. Only the audio queue mutates it.
+  private final class Streaming {
+    let id: String
+    let generation: Int
+    let rate: Int
+    var sequence = 0
+    var scheduled = 0
+    var rendered = 0
+    var ended = false
+    var began = false
+    init(id: String, generation: Int, rate: Int) {
+      self.id = id
+      self.generation = generation
+      self.rate = rate
+    }
+  }
+  private var streaming: Streaming?
   /// Whether the daemon wants the engine running, which a device change doesn't alter.
   private var active = false
   private var tapped = false
+  private var capture: Capture?
+  private var captures: [String: Capture] = [:]
+  private var dictating = false
+  private var rolling: RollingInput?
   private var processing = false
 
   init(link: Link, wantsMicrophone: Bool) {
@@ -186,6 +356,26 @@ final class Audio {
 
   func handle(_ message: [String: Any]) {
     switch message["type"] as? String {
+    case "listen-start": startListening(message)
+    case "listen-cancel": stopListening(message)
+    case "capture-promote": promoteCapture(message)
+    case "capture-start": startCapture(message)
+    case "capture-finish": endCapture(message, cancel: false)
+    case "capture-cancel": endCapture(message, cancel: true)
+    case "escape":
+      if let id = message["captureId"] as? String, id != capture?.id { return }
+      if message["cancelled"] as? Bool == true {
+        capture?.cancel(); dictating = false
+        restIfIdle()
+        return
+      }
+      let on = message["on"] as? Bool ?? false
+      if on && capture?.finished == true { return }
+      dictating = on
+    case "stream-start": startStream(message)
+    case "stream-chunk": chunkStream(message)
+    case "stream-end": endStream(message)
+    case "stream-cancel": cancelStream(message)
     case "play":
       guard let id = message["id"] as? String, let path = message["path"] as? String else { return }
       play(id: id, path: path, from: message["from"] as? Double ?? 0)
@@ -194,6 +384,86 @@ final class Audio {
     case "rest": rest()
     default: log("unknown message \(message)")
     }
+  }
+
+  private func makeCapture() -> Capture {
+    let id = UUID().uuidString
+    return Capture(id: id, send: { [link] frame in link.send(.pcm, frame) }, modern: { [link] frame, sequence in
+      link.send(["type": "capture-frame", "id": id, "sequence": sequence, "encoding": "f32le", "audio": frame.base64EncodedString()])
+    })
+  }
+
+  private func startListening(_ message: [String: Any]) {
+    guard let id = message["id"] as? String else { return }
+    guard rolling == nil, !dictating else { link.send(["type": "listen-error", "id": id, "message": "The Mac input already has an owner"]); return }
+    do {
+      try activate()
+      guard let capture else { link.send(["type": "listen-error", "id": id, "message": "The Mac microphone is unavailable"]); return }
+      let rolling = RollingInput(id: id, emit: { [link] type, id, sequence, frame in
+        if let frame { link.send(["type": type, "id": id, "sequence": sequence, "encoding": "f32le", "audio": frame.base64EncodedString()]) }
+        else { link.send(["type": type, "id": id, "message": "Listening ended before the recording was sealed"]) }
+      })
+      self.rolling = rolling
+      if !capture.route({ frame, _ in rolling.push(frame) }, ready: { self.link.send(["type": "listen-ready", "id": id]) }) {
+        self.rolling = nil; link.send(["type": "listen-error", "id": id, "message": "The Mac input capture has already ended"])
+      }
+    } catch { link.send(["type": "listen-error", "id": id, "message": "Could not start the Mac microphone"]) }
+  }
+
+  private func stopListening(_ message: [String: Any]) {
+    guard let id = message["id"] as? String else { return }
+    if rolling?.id == id { rolling?.stop(); rolling = nil; capture?.unroute(); restIfIdle() }
+    else { link.send(["type": "listen-finished", "id": id]) }
+  }
+
+  private func promoteCapture(_ message: [String: Any]) {
+    guard let id = message["id"] as? String else { return }
+    guard let rolling, message["listenerId"] as? String == rolling.id,
+      let from = message["fromSequence"] as? Int, rolling.promote(id: id, fromSequence: from)
+    else { link.send(["type": "capture-error", "id": id, "message": "The exact listening prefix is unavailable or another capture owns it"]); return }
+  }
+
+  func pressed(_ key: String) {
+    if let rolling { rolling.stop(); self.rolling = nil; capture?.unroute() }
+
+    if key == "shortcut" && !dictating {
+      stop(silently: true); halt()
+      let capture = makeCapture()
+      self.capture = capture; captures[capture.id] = capture; dictating = true
+      if captures.count > 8, let old = captures.keys.first(where: { $0 != capture.id }) { captures.removeValue(forKey: old) }
+      do { try activate() } catch { link.send(["type": "error", "message": "Could not open the microphone"]) }
+      link.send(["type": "pressed", "key": key, "captureId": capture.id])
+    } else {
+      let id = capture?.id
+      if key == "escape" { capture?.cancel() } else { _ = capture?.finish() }
+      dictating = false; active = false; halt()
+      if capture?.subscribed == true { link.send(["type": "rested"]) }
+      var event: [String: Any] = ["type": "pressed", "key": key]
+      if let id { event["captureId"] = id }
+      link.send(event)
+    }
+  }
+
+  private func startCapture(_ message: [String: Any]) {
+    guard let id = message["id"] as? String else { return }
+    guard let selected = captures[id] else { link.send(["type": "capture-error", "id": id, "message": "That physical capture is no longer available"]); return }
+    if !selected.begin({ self.link.send(["type": "capture-ready", "id": id]) }) {
+      endCapture(message, cancel: true)
+      link.send(["type": "capture-error", "id": id, "message": "The bounded pre-start capture buffer overflowed or conversion failed"])
+    }
+  }
+
+  private func endCapture(_ message: [String: Any], cancel: Bool) {
+    guard let id = message["id"] as? String else { return }
+    if rolling?.owns(id) == true { rolling?.seal(id); return }
+    guard let selected = captures[id] else { link.send(["type": "capture-error", "id": id, "message": "That physical capture is no longer available"]); return }
+    let complete: Bool
+    if cancel { selected.cancel(); complete = true } else { complete = selected.finish() }
+    if capture === selected {
+      dictating = false; active = false; halt(); capture = nil
+      link.send(["type": "rested"])
+    }
+    link.send(complete ? ["type": "capture-finished", "id": id] : ["type": "capture-error", "id": id, "message": "Capture conversion or buffering failed; nothing was sent"])
   }
 
   private func activate() throws {
@@ -235,7 +505,8 @@ final class Audio {
     guard !tapped else { return }
     let format = input.outputFormat(forBus: 0)
     guard usable(format) else { throw POSIXError(.ENODEV) }
-    let capture = Capture(link: link)
+    let capture = self.capture ?? makeCapture()
+    self.capture = capture
     input.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in capture.push(buffer) }
     tapped = true
   }
@@ -248,6 +519,7 @@ final class Audio {
   }
 
   private func halt() {
+    if let rolling { rolling.stop(); self.rolling = nil; capture?.unroute() }
     if tapped {
       engine.inputNode.removeTap(onBus: 0)
       tapped = false
@@ -258,6 +530,146 @@ final class Audio {
       try? engine.inputNode.setVoiceProcessingEnabled(false)
       processing = false
     }
+  }
+
+  /// A late old listener/stream must never stop a newer recording or output.
+  private func restIfIdle() {
+    guard rolling == nil, !dictating, streaming == nil, playing == nil else { return }
+    active = false
+    halt()
+    capture = nil
+    link.send(["type": "rested"])
+  }
+  /// A PCM stream is never a collection of replacing WAV play commands.
+  private func startStream(_ message: [String: Any]) {
+    guard let id = message["id"] as? String, let generation = message["generation"] as? Int else {
+      link.send(["type": "error", "message": "An audio stream needs an ID and generation"])
+      return
+    }
+    guard !id.isEmpty, id.utf8.count <= 100, generation >= 0,
+      let rate = message["rate"] as? Int, [16000, 24000, 48000].contains(rate),
+      message["format"] as? String == "pcm16le", message["channels"] as? Int == 1
+    else { return streamError(id: id, generation: generation, message: "Unsupported PCM stream format") }
+
+    do {
+      try activate()
+      stop(silently: true)
+      let format = AVAudioFormat(standardFormatWithSampleRate: Double(rate), channels: 1)!
+      if player.outputFormat(forBus: 0) != format {
+        engine.disconnectNodeOutput(player)
+        engine.connect(player, to: engine.mainMixerNode, format: format)
+      }
+      guard rendering() else {
+        rest()
+        return streamError(id: id, generation: generation, message: "The audio engine is not rendering")
+      }
+      let stream = Streaming(id: id, generation: generation, rate: rate)
+      streaming = stream
+      streamReport("stream-ready", stream, samples: 0, certainty: "rendered")
+    } catch {
+      rest()
+      streamError(id: id, generation: generation, message: "Could not start streamed audio: \(error)")
+    }
+  }
+
+  private func chunkStream(_ message: [String: Any]) {
+    guard let stream = streaming,
+      message["id"] as? String == stream.id, message["generation"] as? Int == stream.generation
+    else { return } // Chunks from stopped/disconnected generations never start playback.
+    let pcm = (message["pcm"] as? Data) ?? (message["audio"] as? String).flatMap { Data(base64Encoded: $0) }
+    guard !stream.ended, message["sequence"] as? Int == stream.sequence,
+      let pcm, !pcm.isEmpty, pcm.count <= 32768, pcm.count % 2 == 0
+    else { return failStream("Invalid or out-of-order PCM stream chunk") }
+    let count = pcm.count / 2
+    guard stream.scheduled - stream.rendered + count <= stream.rate * 4 else {
+      return failStream("The bounded PCM playback buffer overflowed")
+    }
+    let format = AVAudioFormat(standardFormatWithSampleRate: Double(stream.rate), channels: 1)!
+    guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(count)),
+      let samples = buffer.floatChannelData?[0]
+    else { return failStream("Could not allocate a PCM playback chunk") }
+    buffer.frameLength = AVAudioFrameCount(count)
+    pcm.withUnsafeBytes { raw in
+      let bytes = raw.bindMemory(to: UInt8.self)
+      for i in 0..<count {
+        let word = UInt16(bytes[i * 2]) | UInt16(bytes[i * 2 + 1]) << 8
+        samples[i] = Float(Int16(bitPattern: word)) / 32768
+      }
+    }
+    stream.sequence += 1
+    stream.scheduled += count
+    let through = stream.scheduled
+    player.scheduleBuffer(buffer, completionCallbackType: .dataPlayedBack) { [weak self, weak stream] _ in
+      guard let self, let stream else { return }
+      self.queue.async {
+        guard self.streaming === stream else { return }
+        stream.rendered = max(stream.rendered, through)
+        self.streamReport("stream-progress", stream, samples: stream.rendered, certainty: "rendered")
+        if stream.ended && stream.rendered == stream.scheduled { self.finishStream(stream) }
+      }
+    }
+    if !stream.began {
+      stream.began = true
+      player.volume = 1
+      player.play()
+      streamReport("stream-playing", stream, samples: stream.rendered, certainty: "rendered")
+    }
+  }
+
+  private func endStream(_ message: [String: Any]) {
+    guard let stream = streaming,
+      message["id"] as? String == stream.id, message["generation"] as? Int == stream.generation
+    else { return }
+    guard message["sequence"] as? Int == stream.sequence else { return failStream("The stream ended with missing chunks") }
+    stream.ended = true
+    if stream.rendered == stream.scheduled { finishStream(stream) }
+  }
+
+  private func cancelStream(_ message: [String: Any]) {
+    guard let stream = streaming,
+      message["id"] as? String == stream.id, message["generation"] as? Int == stream.generation
+    else { return }
+    stopStream()
+    restIfIdle()
+  }
+
+  private func streamReport(_ type: String, _ stream: Streaming, samples: Int, certainty: String) {
+    link.send(["type": type, "id": stream.id, "generation": stream.generation, "rate": stream.rate, "samples": samples, "certainty": certainty])
+  }
+
+  private func streamError(id: String, generation: Int, message: String) {
+    link.send(["type": "stream-error", "id": id, "generation": generation, "message": message])
+  }
+
+  private func failStream(_ message: String) {
+    guard let stream = streaming else { return }
+    streaming = nil
+    player.stop()
+    streamError(id: stream.id, generation: stream.generation, message: message)
+    restIfIdle()
+  }
+
+  private func finishStream(_ stream: Streaming) {
+    guard streaming === stream else { return }
+    streaming = nil
+    player.stop()
+    streamReport("stream-finished", stream, samples: stream.rendered, certainty: "rendered")
+    restIfIdle()
+  }
+
+  private func stopStream() {
+    guard let stream = streaming else { return }
+    // Completed dataPlayedBack callbacks establish a lower bound. Node time can
+    // include output still in flight, so a finer stopped position is estimated.
+    var samples = stream.rendered
+    var certainty = "rendered"
+    if let now = player.lastRenderTime, now.isSampleTimeValid, let time = player.playerTime(forNodeTime: now) {
+      samples = max(samples, min(stream.scheduled, Int(max(0, time.sampleTime))))
+      certainty = "estimated"
+    }
+    streaming = nil
+    player.stop()
+    streamReport("stream-stopped", stream, samples: samples, certainty: certainty)
   }
 
   private func play(id: String, path: String, from: Double) {
@@ -329,6 +741,7 @@ final class Audio {
 
   /// Reports how far it got, or nothing when there was nothing playing, like when it had just finished.
   private func stop(silently: Bool = false) {
+    stopStream()
     let current = playing
     let at = current.map(position)
     playing = nil
@@ -345,6 +758,7 @@ final class Audio {
   private func recover() {
     // Starting the engine can post a change of its own, which needs nothing.
     guard active, !engine.isRunning else { return }
+    if streaming != nil { failStream("The audio device changed during streaming") }
     let current = playing
     let at = current.map(position)
     playing = nil
@@ -381,11 +795,13 @@ final class Hotkeys {
   private static let modifiers = ["ctrl": controlKey, "option": optionKey, "cmd": cmdKey, "shift": shiftKey]
 
   private let link: Link
+  private let onPress: (String) -> Void
   private var shortcut: EventHotKeyRef?
   private var escape: EventHotKeyRef?
 
-  init(link: Link) {
+  init(link: Link, onPress: @escaping (String) -> Void) {
     self.link = link
+    self.onPress = onPress
     var pressed = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
     InstallEventHandler(
       GetApplicationEventTarget(),
@@ -395,7 +811,7 @@ final class Hotkeys {
           event, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID), nil,
           MemoryLayout<EventHotKeyID>.size, nil, &id)
         let hotkeys = Unmanaged<Hotkeys>.fromOpaque(context!).takeUnretainedValue()
-        hotkeys.link.send(["type": "pressed", "key": id.id == Hotkeys.escapeID ? "escape" : "shortcut"])
+        hotkeys.onPress(id.id == Hotkeys.escapeID ? "escape" : "shortcut")
         return noErr
       }, 1, &pressed, Unmanaged.passUnretained(self).toOpaque(), nil)
   }
@@ -503,14 +919,16 @@ do {
 
 let wantsMicrophone = !arguments.contains("--no-microphone")
 let audio = Audio(link: link, wantsMicrophone: wantsMicrophone)
-link.send(["type": "hello", "permission": Audio.permission])
+link.send(["type": "hello", "permission": Audio.permission, "streaming": true, "captureBoundary": true, "handsFree": wantsMicrophone])
 if wantsMicrophone && AVCaptureDevice.authorizationStatus(for: .audio) == .notDetermined {
   AVCaptureDevice.requestAccess(for: .audio) { _ in link.send(["type": "permission", "permission": Audio.permission]) }
 }
-let hotkeys = Hotkeys(link: link)
+let hotkeys = Hotkeys(link: link, onPress: { key in audio.queue.async { audio.pressed(key) } })
 link.receive { message in
   switch message["type"] as? String {
-  case "shortcut", "escape": DispatchQueue.main.async { hotkeys.handle(message) }
+  case "shortcut", "escape":
+    DispatchQueue.main.async { hotkeys.handle(message) }
+    if message["type"] as? String == "escape" { audio.queue.async { audio.handle(message) } }
   default: audio.queue.async { audio.handle(message) }
   }
 }

@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { Clock, Effect, Option, PubSub, Schema, type Scope, Stream, TestClock, TestContext } from "effect"
 import * as Icons from "./Icons.ts"
+import type * as Inbox from "./Inbox.ts"
 import * as Journal from "./Journal.ts"
 import * as Latest from "./Latest.ts"
 import * as Missed from "./Missed.ts"
@@ -108,8 +109,10 @@ describe("Latest", () => {
     const menuOf = (offers: ReadonlyArray<number>) =>
       Effect.gen(function* () {
         const listed = yield* listing({ Rosie: [thread("t-tezos", "Migrate the Tezos integration")] })
-        /** Whether what he says after each told can go anywhere. */
-        const listening: Array<boolean> = []
+        /** Of each told, whether talking over it stops it, whether what he says is a follow-up about its thread, and else whether it ends there. */
+        const listening: Array<{ readonly over: boolean; readonly follows: boolean; readonly ends?: boolean }> = []
+        /** A follow-up about its thread, which here makes nothing of what he says. */
+        const follows: NonNullable<Inbox.Notice["followUp"]> = () => Effect.succeed(Option.none())
         const controls = Mutes.controls({ mutes: listed.mutes, silence: () => Effect.void, journal: listed.journal })
         const menu = Latest.menu({
           latest: listed.latest,
@@ -122,11 +125,18 @@ describe("Latest", () => {
             power: Effect.succeed({ on: true, turns: 1 }),
             // Said at once, which makes "it" the thread it's about.
             tell: (notice) =>
-              Effect.sync(() => void listening.push(notice.followUp !== undefined)).pipe(Effect.zipRight(notice.saying ?? Effect.void), Effect.zipRight(notice.heard ?? Effect.void), Effect.as(true)),
+              Effect.gen(function* () {
+                const { followUp } = notice
+                const other = followUp === undefined || followUp === follows ? {} : { ends: Option.isSome(yield* followUp("Tell it to stop.", 1)) }
+                listening.push({ over: followUp !== undefined && notice.after !== true, follows: followUp === follows, ...other })
+                yield* notice.saying ?? Effect.void
+                yield* notice.heard ?? Effect.void
+                return true
+              }),
           } as Parameters<typeof Latest.menu>[0]["daemon"],
           mention: () => Effect.void,
           journal: listed.journal,
-          following: () => () => Effect.succeed(Option.none()),
+          following: () => follows,
           reminders: {
             get: (id) =>
               Effect.succeed(Option.some({ id, at: 0, heard: "", text: "", machine: "Rosie", thread: "t-tezos", state: "fired" as const, ...(offers.includes(id) ? { propose: "Run the tests again." } : {}) })),
@@ -136,7 +146,7 @@ describe("Latest", () => {
         return { ...listed, menu, listening, settle }
       })
 
-    test("a row said again from the menu is followed up from its end only as it could be as it was first said; over what its thread waits on him for, like a secret or an offer, only 'Mute.' is listened for", async () => {
+    test("a row said again from the menu stops when he talks over it, and is followed up only as it could be as it was first said; what he says over what its thread waits on him for, like a secret or an offer, only stops it", async () => {
       const result = await run(
         Effect.gen(function* () {
           const { journal, menu, listening, settle } = yield* menuOf([7])
@@ -153,7 +163,11 @@ describe("Latest", () => {
           return [...listening]
         }),
       )
-      expect(result).toEqual([true, false, false])
+      expect(result).toEqual([
+        { over: true, follows: true },
+        { over: true, follows: false, ends: true },
+        { over: true, follows: false, ends: true },
+      ])
     })
   })
 

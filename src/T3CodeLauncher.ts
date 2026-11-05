@@ -480,6 +480,15 @@ const Providers = Schema.Struct({
   providers: Schema.Array(Provider),
   /** The folder behind its scratch project, on a T3 Code that has one. */
   scratchWorkspaceRoot: Schema.optional(Schema.String),
+  /** Current T3 Code bundles settings here and may no longer expose getSettings. */
+  settings: Schema.optional(Settings),
+})
+
+/** Prefer the atomic config snapshot; only legacy snapshots need another RPC. */
+const configuration = (call: Server.Transport["call"]) => Effect.gen(function* () {
+  const config = yield* call("server.getConfig", {}, Providers)
+  const settings = config.settings ?? (yield* call("server.getSettings", {}, Settings))
+  return { ...config, settings }
 })
 
 /** The scratch project, made if it wasn't yet. */
@@ -515,8 +524,8 @@ export const launcher = (
       const refuse = (reason: string) => new LaunchError({ reason })
       const { api, call } = yield* reach
 
-      const [shell, { providers, scratchWorkspaceRoot: root }] = yield* Effect.all(
-        [api("/api/orchestration/shell", Shell), call("server.getConfig", {}, Providers)],
+      const [shell, { providers, scratchWorkspaceRoot: root, settings }] = yield* Effect.all(
+        [api("/api/orchestration/shell", Shell), configuration(call)],
         { concurrency: "unbounded" },
       )
       const wanted = home(request.project.trim())
@@ -535,9 +544,8 @@ export const launcher = (
       const project = scratch ? yield* made : yield* Either.mapLeft(find(shell.projects, request.project, resolve), refuse)
 
       const base = request.baseBranch?.trim() || undefined
-      const [settings, refs, named, mode] = yield* Effect.all(
+      const [refs, named, mode] = yield* Effect.all(
         [
-          call("server.getSettings", {}, Settings),
           call("vcs.listRefs", { cwd: project.workspaceRoot, refKind: "local", limit: 200 }, Refs),
           base === undefined
             ? Effect.succeed([])
@@ -602,11 +610,10 @@ export const launcher = (
 
   catalog: Effect.gen(function* () {
     const { api, call } = yield* reach
-    const [shell, settings, { providers, scratchWorkspaceRoot: root }] = yield* Effect.all(
+    const [shell, { providers, scratchWorkspaceRoot: root, settings }] = yield* Effect.all(
       [
         api("/api/orchestration/shell", Shell),
-        call("server.getSettings", {}, Settings),
-        call("server.getConfig", {}, Providers),
+        configuration(call),
       ],
       { concurrency: "unbounded" },
     )

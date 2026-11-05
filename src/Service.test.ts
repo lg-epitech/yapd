@@ -10,6 +10,10 @@ const options: Service.Options = {
 }
 
 describe("Service", () => {
+  test("installed servers run the default daemon command", () => {
+    expect(Service.plist(options)).toContain("<string>serve</string>")
+    expect(Service.unit(options)).toContain('"serve"')
+  })
   test("escapes paths in the plist", () => {
     const plist = Service.plist(options)
     expect(plist).toContain("<string>/Users/me/R&amp;D &lt;yapd&gt;/src/main.ts</string>")
