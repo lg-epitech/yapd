@@ -5,6 +5,7 @@ import { Audio, type ClientSocket, Devices, native, router, wav } from "./Audio.
 import * as Helper from "./Helper.ts"
 import { Shortcut } from "./Shortcut.ts"
 import * as Wire from "./Wire.ts"
+import { record } from "./v2/Capture.ts"
 
 interface Command {
   readonly type: string
@@ -519,6 +520,48 @@ describe("Devices", () => {
 })
 
 describe("Device capture boundaries", () => {
+  test("native failure, overflow and disconnect wake an active recording without Send", () => run(Effect.gen(function* () {
+    for (const problem of ["native", "overflow", "disconnect"] as const) {
+      const context = yield* router()
+      const audio = Context.get(context, Audio)
+      const sockets = Option.getOrThrow(Context.get(context, Devices).sockets)
+      const phone = client(sockets, `failed-${problem}`)
+      phone.hello(true, true)
+      let cancelled = 0, sent = 0
+      const errors: string[] = []
+      const pending = yield* Effect.fork(record({ id: "failed-capture", deviceId: `failed-${problem}`, audio,
+        runtime: { start: () => {}, push: () => {}, send: async () => { sent++; return undefined }, cancel: () => { cancelled++ } },
+        onError: (error) => { errors.push(String(error)) },
+      }))
+      yield* settle
+      phone.say({ type: "capture-ready", id: "failed-capture" })
+      const recording = yield* Fiber.join(pending)
+      if (problem === "native") phone.say({ type: "capture-error", id: "failed-capture", message: "Native conversion failed" })
+      else if (problem === "disconnect") phone.leave()
+      else {
+        for (let i = 0; i < 513; i++) phone.captured("failed-capture", i, 0.1)
+        phone.say({ type: "capture-finished", id: "failed-capture" })
+      }
+      yield* settle
+      expect(errors).toHaveLength(1)
+      expect(errors[0]).toContain(problem === "native" ? "Native conversion failed" : problem === "overflow" ? "overflowed" : "went away")
+      expect(cancelled).toBeGreaterThan(0)
+      expect(sent).toBe(0)
+      const reconnected = problem === "disconnect" ? client(sockets, `failed-${problem}`) : phone
+      if (problem === "disconnect") reconnected.hello(true, true)
+      const retry = yield* Effect.fork(audio.captureFor!(`failed-${problem}`, "retry"))
+      yield* settle
+      reconnected.say({ type: "capture-ready", id: "retry" })
+      const next = yield* Fiber.join(retry)
+      reconnected.captured("retry", 0, 0.25)
+      const finish = yield* Effect.fork(next.finish)
+      yield* settle
+      reconnected.say({ type: "capture-finished", id: "retry" })
+      expect((yield* Fiber.join(finish)).samples).toBe(512)
+      yield* recording.cancel
+    }
+  })))
+
   const open = Effect.gen(function* () {
     const context = yield* router()
     const audio = Context.get(context, Audio)

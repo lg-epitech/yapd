@@ -215,6 +215,8 @@ final class Capture {
   }
 
   var finished: Bool { lock.lock(); defer { lock.unlock() }; return ended }
+  /// V1 still drains legacy PCM after Send; only V2 owns capture boundaries.
+  var subscribed: Bool { lock.lock(); defer { lock.unlock() }; return armed }
 
   func cancel() {
     lock.lock(); defer { lock.unlock() }
@@ -435,6 +437,7 @@ final class Audio {
       let id = capture?.id
       if key == "escape" { capture?.cancel() } else { _ = capture?.finish() }
       dictating = false; active = false; halt()
+      if capture?.subscribed == true { link.send(["type": "rested"]) }
       var event: [String: Any] = ["type": "pressed", "key": key]
       if let id { event["captureId"] = id }
       link.send(event)
@@ -456,7 +459,10 @@ final class Audio {
     guard let selected = captures[id] else { link.send(["type": "capture-error", "id": id, "message": "That physical capture is no longer available"]); return }
     let complete: Bool
     if cancel { selected.cancel(); complete = true } else { complete = selected.finish() }
-    if capture === selected { dictating = false; active = false; halt(); capture = nil }
+    if capture === selected {
+      dictating = false; active = false; halt(); capture = nil
+      link.send(["type": "rested"])
+    }
     link.send(complete ? ["type": "capture-finished", "id": id] : ["type": "capture-error", "id": id, "message": "Capture conversion or buffering failed; nothing was sent"])
   }
 

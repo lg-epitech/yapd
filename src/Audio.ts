@@ -74,6 +74,8 @@ export interface PCMPlayback {
 
 export interface DeviceCapture {
   readonly frames: Queue.Dequeue<Float32Array>
+  /** Native failure after ready must wake a consumer waiting for its next frame. */
+  readonly failed?: Effect.Effect<never, AudioError>
   /** Stop the consumer first; the native boundary precedes these final queued frames. */
   readonly finish: Effect.Effect<{ readonly frames: ReadonlyArray<Float32Array>; readonly samples: number }, AudioError>
   readonly cancel: Effect.Effect<void>
@@ -519,6 +521,7 @@ export const device = (
       readonly ready: Deferred.Deferred<void, AudioError>
       readonly boundary: Deferred.Deferred<void, AudioError>
       readonly released: Deferred.Deferred<void>
+      readonly failed: Deferred.Deferred<never, AudioError>
       accepted: boolean
       ended: boolean
       samples: number
@@ -569,6 +572,7 @@ export const device = (
     const failCapture = (message: string) => {
       if (capturing === undefined) return
       capturing.failure = new AudioError({ message })
+      Deferred.unsafeDone(capturing.failed, Exit.fail(capturing.failure))
       Deferred.unsafeDone(capturing.ready, Exit.fail(capturing.failure))
       Deferred.unsafeDone(capturing.boundary, Exit.fail(capturing.failure))
     }
@@ -1003,7 +1007,7 @@ export const device = (
       if (link === undefined) return yield* new AudioError({ message: gone })
       if (!captureBoundary) return yield* new AudioError({ message: "This device cannot acknowledge complete captures; update its client" })
       if (!id || id.length > 100 || capturing !== undefined) return yield* new AudioError({ message: "The device already has a capture, or its capture ID is invalid" })
-      const capture: Capturing = { id, queue: yield* Queue.dropping<Float32Array>(512), ready: yield* Deferred.make<void, AudioError>(), boundary: yield* Deferred.make<void, AudioError>(), released: yield* Deferred.make<void>(), accepted: false, ended: false, samples: 0, sequence: 0 }
+      const capture: Capturing = { id, queue: yield* Queue.dropping<Float32Array>(512), ready: yield* Deferred.make<void, AudioError>(), boundary: yield* Deferred.make<void, AudioError>(), released: yield* Deferred.make<void>(), failed: yield* Deferred.make<never, AudioError>(), accepted: false, ended: false, samples: 0, sequence: 0 }
       capturing = capture
       const check = Effect.suspend(() => capture.failure === undefined ? Effect.void : Effect.fail(capture.failure))
       const boundary = (type: "capture-finish" | "capture-cancel"): Effect.Effect<void, AudioError> => Effect.gen(function* () {
@@ -1027,7 +1031,7 @@ export const device = (
       yield* Effect.addFinalizer(() => cancel.pipe(Effect.zipRight(Effect.sync(() => { if (capturing === capture) capturing = undefined })), Effect.zipRight(Queue.shutdown(capture.queue))))
       send(promotion === undefined ? { type: "capture-start", id } : { type: "capture-promote", id, ...promotion })
       yield* Deferred.await(capture.ready).pipe(Effect.timeoutFail({ duration: patience.start, onTimeout: () => new AudioError({ message: "The device did not start its capture" }) }))
-      return { frames: capture.queue, finish: boundary("capture-finish").pipe(Effect.zipRight(Queue.takeAll(capture.queue)), Effect.map((frames) => ({ frames: [...frames], samples: capture.samples }))), cancel }
+      return { frames: capture.queue, failed: Deferred.await(capture.failed), finish: boundary("capture-finish").pipe(Effect.zipRight(Queue.takeAll(capture.queue)), Effect.map((frames) => ({ frames: [...frames], samples: capture.samples }))), cancel }
     })
 
     const listenFor = (deviceId: string): Effect.Effect<Listener, AudioError, Scope.Scope> => Effect.gen(function* () {

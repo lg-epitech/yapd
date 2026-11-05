@@ -45,6 +45,17 @@ const asr = (respond: (samples: number, index: number, request: Request) => Prom
 }
 
 describe("V2 HTTP speech recognition", () => {
+  test("a prompt longer than one minute reaches final recognition intact", async () => {
+    const fixture = asr(() => Response.json({ text: "A complete long prompt, including its final correction." }))
+    try {
+      const capture = createHttpRecognizer({ url: fixture.url })
+      for (let frame = 0; frame < 2032; frame++) capture.push(audio(512))
+      const samples = 2032 * 512
+      expect(await capture.finish()).toMatchObject({ samples, durationMs: samples / 16, text: "A complete long prompt, including its final correction." })
+      expect(fixture.requests).toEqual([samples])
+    } finally { fixture.close() }
+  })
+
   test("manual finalization sends real multipart PCM WAV and preserves the intact transcript", async () => {
     const fixture = asr(() => Response.json({ text: "  Yes, but don't send it.  " }))
     try {

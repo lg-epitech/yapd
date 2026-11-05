@@ -37,11 +37,29 @@ extension Audio {
     precondition(streaming === newest && active)
     streaming = nil; restIfIdle()
     precondition(!active)
+    let before = link.events.filter { $0["type"] as? String == "rested" }.count
+    let manual = makeCapture(); capture = manual; captures[manual.id] = manual; dictating = true; active = true
+    endCapture(["id": manual.id], cancel: false)
+    precondition(!active && capture == nil && !dictating)
+    precondition(link.events.filter { $0["type"] as? String == "rested" }.count == before + 1)
+    for key in ["shortcut", "escape"] {
+      let legacy = makeCapture(); capture = legacy; captures[legacy.id] = legacy; dictating = true; active = true
+      let legacyRested = link.events.filter { $0["type"] as? String == "rested" }.count
+      pressed(key)
+      // V1 drains legacy PCM after pressed; rested would discard that tail.
+      precondition(link.events.filter { $0["type"] as? String == "rested" }.count == legacyRested)
+      let before = link.events.filter { $0["type"] as? String == "rested" }.count
+      let manual = makeCapture(); capture = manual; captures[manual.id] = manual; dictating = true; active = true
+      precondition(manual.begin({}))
+      pressed(key)
+      precondition(!active && !dictating)
+      precondition(link.events.filter { $0["type"] as? String == "rested" }.count == before + 1)
+    }
   }
 }
 let link = Link(); let audio = Audio(link: link, wantsMicrophone: false)
 audio.queue.sync { audio.checkOwnership() }
-precondition(link.events.filter { $0["type"] as? String == "rested" }.count == 4)
+precondition(link.events.filter { $0["type"] as? String == "rested" }.count == 7)
 print("Native ownership passed.")
 `)
       const compile = Bun.spawn(["nice", "-n", "15", "swiftc", "-o", binary, swift], { stdout: "pipe", stderr: "pipe" })

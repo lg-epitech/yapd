@@ -32,8 +32,8 @@ export const record = (options: {
   // Taking a frame and handing it to recognition is indivisible with respect to
   // Send. No stream prefetch may remove words from the final queue drain.
   const take = Effect.uninterruptibleMask((restore) => restore(Queue.take(input.frames)).pipe(Effect.tap((frame) => Effect.sync(() => push(frame)))))
-  const consumer = yield* take.pipe(
-    Effect.tap((frame) => options.inspect?.(frame) ?? Effect.void), Effect.forever,
+  const frames = take.pipe(Effect.tap((frame) => options.inspect?.(frame) ?? Effect.void), Effect.forever)
+  const consumer = yield* (input.failed === undefined ? frames : Effect.raceFirst(frames, input.failed)).pipe(
     Effect.catchAllCause((cause) => Effect.gen(function* () {
       if (ended) return
       ended = true

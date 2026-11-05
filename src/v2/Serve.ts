@@ -60,6 +60,7 @@ const running = Effect.gen(function* () {
   let voiceTurns: VoiceTurns.VoiceTurns | undefined
   const state = yield* SubscriptionRef.make<Server.State>({ on: yield* settings.on, activity: "idle", updates: [] })
   const emit = (event: RuntimeEvent) => {
+    if (event.type === "runtime_error") Effect.runFork(Effect.logWarning("V2 voice error", event))
     if (event.type === "response_started") activeResponses.add(event.responseId)
     if (event.type === "response_done" || event.type === "error" && event.responseId !== undefined || event.type === "output_cancelled" && event.reason !== "onset") activeResponses.delete(event.responseId!)
     if (event.type !== "runtime_error" && event.type !== "recognition_final" && event.type !== "transcript_partial") voiceTurns?.event(event)
@@ -194,7 +195,7 @@ const running = Effect.gen(function* () {
       capture = undefined
       if (current !== undefined) {
         yield* current.seal
-        yield* Effect.forkScoped(current.send.pipe(Effect.catchAllCause(() => Effect.sync(() => fail("The recording could not be verified or transcribed. It was not sent.")))))
+        yield* Effect.forkScoped(current.send.pipe(Effect.catchAllCause((cause) => Effect.logWarning("V2 transcription failed", cause).pipe(Effect.zipRight(Effect.sync(() => fail("The recording could not be verified or transcribed. It was not sent.")))))))
       }
       return
     }
@@ -224,7 +225,8 @@ const running = Effect.gen(function* () {
         else silence += frame.length
         if (voiced >= 4000 && silence >= 19200) yield* shortcut.send
       }),
-      onError: () => {
+      onError: (cause) => {
+        Effect.runFork(Effect.logWarning("V2 microphone capture failed", cause))
         if (capture?.id === id) capture = undefined
         Effect.runFork(shortcut.cancel)
         fail("Microphone capture stopped. Nothing was sent.")
@@ -233,7 +235,10 @@ const running = Effect.gen(function* () {
     starting = { id, fiber: opening }
     capture = yield* Fiber.join(opening).pipe(Effect.ensuring(Effect.sync(() => { if (starting?.fiber === opening) starting = undefined })))
   }).pipe(Effect.catchAllCause((cause) => closeInput.pipe(Effect.zipRight(shortcut.cancel), Effect.zipRight(Effect.sync(() => {
-    if (!Cause.isInterruptedOnly(cause) && enabled()) fail("The microphone could not start.")
+    if (!Cause.isInterruptedOnly(cause) && enabled()) {
+      Effect.runFork(Effect.logWarning("V2 microphone setup or seal failed", cause))
+      fail("The microphone recording failed. Nothing was sent.")
+    }
   })))))))
   if (shortcut.interruptions !== undefined) yield* Effect.forkScoped(Stream.runForEach(shortcut.interruptions, () => stop))
 
