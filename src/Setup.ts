@@ -199,7 +199,7 @@ const settings = Effect.tryPromise({
     if (await Bun.file(Home.settings).exists()) return false
     await Bun.write(
       Home.settings,
-      "# yapd's settings, like YAPD_PROVIDER=claude, one per line. They're all in\n# https://github.com/lg-epitech/yapd/blob/master/docs/guide.md\n",
+      "# yapd's settings, like YAPD_BRAIN_EFFORT=low, one per line. They're all in\n# https://github.com/lg-epitech/yapd/blob/master/docs/guide.md#v2\n",
     )
     return true
   },

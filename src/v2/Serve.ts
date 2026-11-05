@@ -27,6 +27,7 @@ import { SileroVad, Vad } from "../Vad.ts"
 import { KokoroVoice, Voice, Warmth } from "../Voice.ts"
 import { createAudioPlayer, createVoiceSynthesizer } from "./AudioBridge.ts"
 import { Codex } from "./Codex.ts"
+import { modelSettings } from "./ModelSettings.ts"
 import { createStopListeningTool } from "./ConversationTools.ts"
 import { record, type Recording } from "./Capture.ts"
 import { LiveView } from "./LiveView.ts"
@@ -43,7 +44,7 @@ import { createT3Tools } from "./T3Tools.ts"
 import * as VoiceTurns from "./VoiceTurns.ts"
 import * as View from "./View.ts"
 
-/** Separate opt-in runtime: no V1 intent classifier, responder or writer. */
+/** Default conversation runtime, shared by typed input, voice and updates. */
 const running = Effect.gen(function* () {
   const started = yield* Clock.currentTimeMillis
   const settings = yield* Settings.Settings
@@ -89,14 +90,8 @@ const running = Effect.gen(function* () {
       : (() => { const tunnel = tunnels.get(name); return tunnel === undefined ? undefined : Tunnel.transport(tunnel.locate, name) })(),
     show: async ({ title, text, url }) => { await Effect.runPromise(show.put({ kind: "said", title, markdown: text, ...(url === undefined ? {} : { url }) })) },
   })
-  const configuredModel = Option.orElse(yield* Config.brainModel, () => Effect.runSync(Config.model))
-  const configuredEffort = Option.orElse(yield* Config.brainEffort, () => Effect.runSync(Config.effort))
-  const configuredTier = Option.orElse(yield* Config.brainTier, () => Effect.runSync(Config.tier))
-  const model = yield* Effect.acquireRelease(Effect.sync(() => new Codex({
-    model: Option.getOrElse(configuredModel, () => "gpt-6.1-sol"),
-    effort: Option.getOrElse(configuredEffort, () => "low"),
-    ...Option.match(configuredTier, { onNone: () => ({}), onSome: (tier) => ({ tier }) }),
-  })), (model) => Effect.promise(() => model.close()))
+  const configured = yield* modelSettings
+  const model = yield* Effect.acquireRelease(Effect.sync(() => new Codex(configured)), (model) => Effect.promise(() => model.close()))
   // Auth is checked before accepting work, and rejects API-key authentication.
   yield* Effect.tryPromise(() => model.prepare())
   // This is silent startup work, never an acknowledgment played to the user.

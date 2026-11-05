@@ -1,5 +1,7 @@
 # API
 
+V2 is the default daemon. Its conversation endpoints are `GET /conversation`, `GET /conversation/stream`, `POST /conversation/turns` (JSON `text` and stable `turnId`) and `POST /conversation/stop`. The conversation UI is `/v2`; all data and actions use the authentication rules below. Legacy focus/quiet modes, reminder and replay controls in this reference belong to `yapd v1`.
+
 yapd serves a small HTTP API on the port its hooks use, `127.0.0.1:4747` unless `YAPD_PORT` says otherwise. The [menu bar app](guide.md#menu-bar) only uses this API, so your own UI can do everything it does: a status bar module on Linux, a Stream Deck button, a script.
 
 It listens on localhost. A [client](guide.md#running-yapd-on-a-server) has the server's port at the same address, through its connection to it. From another machine, forward the port over SSH, like `ssh -N -L 4747:127.0.0.1:4747 server`.

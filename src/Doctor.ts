@@ -165,12 +165,12 @@ const service = (main: string) =>
     if (argv[1] !== main) findings.push(warn(`The service runs ${argv[1]}, not this yapd. yapd install switches it.`))
     const path = environment?.PATH ?? ""
     const on = (command: string) => Bun.which(command, { PATH: path }) !== null
-    const providers = [yield* Config.provider, ...Option.toArray(yield* Config.writerProvider)]
+    const providers: Provider.Name[] = argv[2] === "v1" ? [yield* Config.provider, ...Option.toArray(yield* Config.writerProvider)] : ["codex"]
     for (const command of new Set(providers.map(cli))) {
       findings.push(
         on(command)
           ? ok(`The service finds ${command}`)
-          : fail(`The service can't find ${command}, which writes what yapd says. Run yapd install from a shell where it's on the PATH.`),
+          : fail(`The service can't find ${command}. Run yapd install from a shell where it's on the PATH.`),
       )
     }
     if ((yield* Config.effect) !== "none" && !on("ffmpeg")) {
@@ -193,7 +193,7 @@ const helper = Effect.gen(function* () {
 
 /** The speech models that have downloaded, by the mark yapd leaves on each. */
 const models = Effect.gen(function* () {
-  const repos = [...new Set([kokoroRepo, vadRepo, yield* Config.whisper, yield* Config.dictationWhisper])]
+  const repos = [kokoroRepo, vadRepo]
   const missing = repos.filter((repo) => !existsSync(join(Home.models, repo, ".yapd-loaded")))
   return [
     missing.length === 0
@@ -277,7 +277,7 @@ export const doctor = (bun: string, main: string) =>
       hooks("claude", command, main),
       hooks("codex", command, main),
       daemon(here),
-      ...(here === "server" ? [service(main), ...(mac ? [helper] : []), models, remotes] : []),
+      ...(here === "server" ? [service(main), ...(mac ? [helper] : []), models, Effect.succeed([warn("V2 needs signed-in Codex and a running self-hosted ASR server. YAPD_V2_ASR_URL selects multipart recognition; YAPD_V2_ASR_WS_URL selects native streaming. setup does not install that server.")]), remotes] : []),
       ...(here === "client" ? [client, reachable, ...(mac ? [helper] : [])] : []),
       ...(here === "hooks" ? [reachable] : []),
       t3code,
